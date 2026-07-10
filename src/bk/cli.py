@@ -34,6 +34,7 @@ from .timeparse import (
 )
 from .tui import run_tui
 from .usage import classify_process_usage
+from .worker import job_log_path, retry_job, run_worker
 
 try:
     import readline  # noqa: F401
@@ -62,6 +63,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _monitor_command(argv[1:], config, store)
         if head in {"usage", "u"}:
             return _usage_command(argv[1:], config)
+        if head in {"worker", "w"}:
+            return _worker_command(argv[1:], config, store)
+        if head in {"jobs", "j"}:
+            return _jobs_command(store)
+        if head in {"job-log", "jl"}:
+            return _job_log_command(argv[1:], config, store)
+        if head in {"job-retry", "jr"}:
+            return _job_retry_command(argv[1:], store)
         if head in {"status", "timeline", "st"}:
             _print_status(config, store)
             return 0
@@ -174,6 +183,18 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
     if head in {"usage", "u"}:
         _usage_command(args[1:], config)
         return True
+    if head in {"worker", "w"}:
+        _worker_command(args[1:], config, store)
+        return True
+    if head in {"jobs", "j"}:
+        _jobs_command(store)
+        return True
+    if head in {"job-log", "jl"}:
+        _job_log_command(args[1:], config, store)
+        return True
+    if head in {"job-retry", "jr"}:
+        _job_retry_command(args[1:], store)
+        return True
     if _looks_like_auto_request(args):
         _book_command(args, MODE_SHARED, config, store)
         return True
@@ -189,13 +210,15 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
 
 
 def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore) -> int:
+    booking_argv, command_argv = _split_job_command(argv)
     parser = argparse.ArgumentParser(prog=f"bk {'exclusive' if mode == MODE_EXCLUSIVE else ''}".strip())
     parser.add_argument("count", type=int)
     parser.add_argument("duration")
     parser.add_argument("--start", help="ISO time; omitted means now with automatic queueing")
     parser.add_argument("--gpu", help="comma separated GPU indexes, for example 0,1")
     parser.add_argument("--mem", help="expected memory on each GPU, for example 12g or 4096m")
-    args = parser.parse_args(argv)
+    parser.add_argument("--op-id", help="idempotency key for agents and retry-safe scripts")
+    args = parser.parse_args(booking_argv)
 
     start_raw = args.start or "now"
     preferred = _parse_gpu_list(args.gpu) if args.gpu else None
@@ -211,6 +234,9 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
         gpu_order=advice.order,
         gpu_scores=advice.scores,
         allow_queue=args.start is None,
+        op_id=args.op_id,
+        command_argv=command_argv,
+        working_directory=os.getcwd() if command_argv is not None else None,
         expected_memory_mb=expected_memory_mb,
         gpu_memory_capacity_mb=advice.memory_capacities_mb,
     )
@@ -228,6 +254,10 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
         f"gpu={gpus} {format_local_range(reservation['start_at'], reservation['end_at'])}"
     )
     _print_booking_advice(config, store, reservation, advice, expected_memory_mb)
+    if isinstance(reservation.get("job"), dict):
+        command_text = shlex.join(reservation["job"].get("argv", []))
+        print(f"job: {reservation['job'].get('status')} command={command_text}")
+        print("worker: keep `bk w` running before the scheduled start")
     return 0
 
 
@@ -267,6 +297,85 @@ def _usage_command(argv: List[str], config: Config) -> int:
     return 0
 
 
+def _worker_command(argv: List[str], config: Config, store: LedgerStore) -> int:
+    parser = argparse.ArgumentParser(prog="bk worker")
+    parser.add_argument("--once", action="store_true", help="run due jobs, wait for them, then exit")
+    parser.add_argument("--poll", type=float, help="poll interval in seconds")
+    parser.add_argument("--max-parallel", type=int, help="maximum child jobs for this worker")
+    parser.add_argument("--quiet", action="store_true")
+    args = parser.parse_args(argv)
+    summary = run_worker(
+        config,
+        store,
+        _current_actor(),
+        once=args.once,
+        poll_seconds=args.poll,
+        max_parallel=args.max_parallel,
+        quiet=args.quiet,
+    )
+    return 0 if summary.failed == 0 else 1
+
+
+def _jobs_command(store: LedgerStore) -> int:
+    actor = _current_actor()
+    reservations = _own_job_reservations(store, actor)
+    if not reservations:
+        print("No jobs.")
+        return 0
+    print("#  ID       State        GPU       Start                  Command")
+    for index, reservation in enumerate(reservations, 1):
+        job = reservation["job"]
+        command = shlex.join(job.get("argv", []))
+        if len(command) > 48:
+            command = command[:45] + "..."
+        print(
+            f"{index:<2} {_short_id(reservation):<8} {str(job.get('status', '?')):<12} "
+            f"{','.join(map(str, reservation.get('gpus', []))):<9} "
+            f"{format_local(reservation['start_at']):<22} {command}"
+        )
+    return 0
+
+
+def _job_log_command(argv: List[str], config: Config, store: LedgerStore) -> int:
+    parser = argparse.ArgumentParser(prog="bk job-log")
+    parser.add_argument("reservation_id", nargs="?")
+    args = parser.parse_args(argv)
+    actor = _current_actor()
+    reservations = _own_job_reservations(store, actor)
+    if not reservations:
+        raise BookingError("you have no jobs")
+    token = args.reservation_id or input("job number or short id: ").strip()
+    reservation = _resolve_job_reservation(reservations, token)
+    path = job_log_path(config, str(reservation["id"]))
+    if not path.exists():
+        print(f"job log not created yet: {path}")
+        return 0
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        sys.stdout.write(fh.read())
+    return 0
+
+
+def _job_retry_command(argv: List[str], store: LedgerStore) -> int:
+    parser = argparse.ArgumentParser(prog="bk job-retry")
+    parser.add_argument("reservation_id")
+    parser.add_argument(
+        "--accept-duplicate-risk",
+        action="store_true",
+        help="required for an uncertain claim that might already be running",
+    )
+    args = parser.parse_args(argv)
+    actor = _current_actor()
+    reservation = _resolve_job_reservation(_own_job_reservations(store, actor), args.reservation_id)
+    updated = retry_job(
+        store,
+        actor,
+        str(reservation["id"]),
+        accept_duplicate_risk=args.accept_duplicate_risk,
+    )
+    print(f"job retry queued: {_short_id(updated)}")
+    return 0
+
+
 def _add_interactive(config: Config, store: LedgerStore) -> int:
     actor = _current_actor()
     mode_raw = input("mode [shared/exclusive] (shared): ").strip() or MODE_SHARED
@@ -281,6 +390,8 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
     preferred = _parse_gpu_list(gpu_raw) if gpu_raw else None
     memory_raw = input("expected memory per GPU optional, for example 12g: ").strip()
     expected_memory_mb = parse_memory_mb(memory_raw) if memory_raw else None
+    command_raw = input("command optional, for example python train.py: ").strip()
+    command_argv = shlex.split(command_raw) if command_raw else None
     advice = build_gpu_advice(config)
     result = add_booking(
         store,
@@ -295,6 +406,8 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
             gpu_order=advice.order,
             gpu_scores=advice.scores,
             allow_queue=allow_queue,
+            command_argv=command_argv,
+            working_directory=os.getcwd() if command_argv is not None else None,
             expected_memory_mb=expected_memory_mb,
             gpu_memory_capacity_mb=advice.memory_capacities_mb,
         ),
@@ -302,6 +415,9 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
     reservation = result.reservation
     print(f"{'queued' if result.queued else 'created'}: {_short_id(reservation)} {format_local_range(reservation['start_at'], reservation['end_at'])}")
     _print_booking_advice(config, store, reservation, advice, expected_memory_mb)
+    if isinstance(reservation.get("job"), dict):
+        print(f"job: pending command={shlex.join(reservation['job'].get('argv', []))}")
+        print("worker: keep `bk w` running before the scheduled start")
     return 0
 
 
@@ -427,7 +543,9 @@ def _list_command(store: LedgerStore) -> int:
         index = mine_index.get(reservation["id"], "-")
         print(
             f"{index:>2} {_short_id(reservation)} {reservation['mode']} uid={reservation['uid']} "
-            f"user={reservation['username']} gpu={gpus} {format_local_range(reservation['start_at'], reservation['end_at'])}"
+            f"user={reservation['username']} gpu={gpus} "
+            f"job={reservation.get('job', {}).get('status', '-')} "
+            f"{format_local_range(reservation['start_at'], reservation['end_at'])}"
         )
     return 0
 
@@ -488,6 +606,16 @@ def _parse_gpu_list(value: str) -> List[int]:
     if not gpus:
         raise ValueError("--gpu must contain at least one GPU index")
     return gpus
+
+
+def _split_job_command(argv: List[str]) -> tuple[List[str], Optional[List[str]]]:
+    if "--" not in argv:
+        return argv, None
+    separator = argv.index("--")
+    command = argv[separator + 1 :]
+    if not command:
+        raise ValueError("-- must be followed by a job command")
+    return argv[:separator], command
 
 
 def _print_booking_advice(
@@ -580,6 +708,30 @@ def _own_active_reservations(store: LedgerStore, actor: Actor) -> List[dict]:
     return [item for item in list_active(store.load()) if int(item.get("uid")) == actor.uid]
 
 
+def _own_job_reservations(store: LedgerStore, actor: Actor) -> List[dict]:
+    result = [
+        item
+        for item in store.load().get("reservations", [])
+        if int(item.get("uid", -1)) == actor.uid and isinstance(item.get("job"), dict)
+    ]
+    return sorted(result, key=lambda item: (str(item.get("start_at", "")), str(item.get("id", ""))))
+
+
+def _resolve_job_reservation(reservations: List[dict], token: str) -> dict:
+    if not token:
+        raise BookingError("job number or short id is required")
+    if token.isdigit():
+        index = int(token)
+        if 1 <= index <= len(reservations):
+            return reservations[index - 1]
+    matches = [item for item in reservations if str(item.get("id", "")).startswith(token)]
+    if not matches:
+        raise BookingError(f"job not found for current user: {token}")
+    if len(matches) > 1:
+        raise BookingError(f"ambiguous job id {token}")
+    return matches[0]
+
+
 def _prompt_reservation_token(store: LedgerStore, actor: Actor, action: str) -> str:
     mine = _own_active_reservations(store, actor)
     if not mine:
@@ -625,11 +777,16 @@ def _print_help(file=None) -> None:
         """usage:
   bk
   bk <count> <duration> [--gpu 0,1] [--start ISO]
+  bk <count> <duration> -- <command> [args...]
   bk s <count> <duration>       shared (shared/auto also accepted)
   bk x <count> <duration>       exclusive
   bk t                          TUI
   bk m [--once]                 monitor
   bk u [--rollups]              usage records
+  bk w                          run this UID's scheduled jobs
+  bk j                          list this UID's jobs
+  bk jl <number_or_short_id>    show a job log
+  bk jr <number_or_short_id>    retry a failed job
   bk a                          guided add
   bk e [number_or_short_id]     edit
   bk d <number_or_short_id>     delete
@@ -639,7 +796,8 @@ def _print_help(file=None) -> None:
   bk log
   bk doctor
 
-duration examples: 30m, 4h, 1d
+duration examples: 30m, 1h30m, 1d
+shared memory: --mem 12g (expected memory per GPU)
 default mode: shared
 omitted --start: queue to the earliest available slot
 explicit --start: exact time, no automatic move
@@ -664,6 +822,10 @@ def _print_shell_help() -> None:
   dr | doctor               report policy violations in the ledger
   m | monitor               continuously audit GPU process usage
   u [--rollups]             show recent usage events or minute rollups
+  w | worker                execute only this UID's due jobs
+  j | jobs                  list scheduled job states
+  jl <number|short_id>      show a job log
+  jr <number|short_id>      retry a failed job
   reset --yes               clear ledger, logs, and backups in this data dir
   t | tui                   open full-screen TUI
   quit                      exit
@@ -713,6 +875,7 @@ def _print_status(config: Config, store: LedgerStore) -> None:
             print(
                 f"  {index:>2} {_short_id(reservation)} {reservation['mode']:<9} "
                 f"GPU={gpus:<7} {reservation['username']} "
+                f"job={reservation.get('job', {}).get('status', '-'):<10} "
                 f"{format_local_range(reservation['start_at'], reservation['end_at'])}"
             )
     print()

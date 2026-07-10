@@ -8,6 +8,7 @@
 bk
 bk 1 4h
 bk 2 1h30m --mem 12g
+bk 2 1h30m --mem 12g -- python train.py --config exp.yaml
 bk s 1 4h
 bk x 1 4h
 bk t
@@ -23,6 +24,7 @@ bk reset --yes
 - `bk`：进入普通行式交互会话，不接管屏幕、不切换背景。
 - `bk 1 4h`：默认共享模式，自动预约 1 张 GPU 4 小时。
 - `bk 2 1h30m --mem 12g`：预约 2 张卡 1 小时 30 分钟，并声明每张卡预计使用 12 GiB 显存。
+- 在 `--` 后追加命令，会把实验和预约绑定；worker 到点执行并自动设置可见 GPU。
 - `bk s 1 4h`：显式 shared；`shared` / `auto` 仍兼容。
 - `bk x 1 4h`：exclusive 排他模式；完整单词 `exclusive` 仍兼容。
 - `bk t`：进入全屏 TUI；完整命令是 `bk tui`。
@@ -57,6 +59,7 @@ export BK_MAX_SHARED_USERS=2
 export BK_QUEUE_SEARCH_HOURS=168
 export BK_REQUIRE_SHARED_MEMORY=false
 export BK_SHARED_MEMORY_RESERVE_MB=512
+export BK_JOB_LOG_DIR="$HOME/.local/state/bk/jobs"
 ```
 
 也可以在数据目录下放置 `config.json`：
@@ -73,6 +76,55 @@ export BK_SHARED_MEMORY_RESERVE_MB=512
 ```
 
 环境变量优先级高于 `config.json`。
+
+## 到点自动运行实验
+
+最短工作流：
+
+```bash
+bk 2 1h30m --mem 12g -- python train.py --config exp.yaml
+bk jobs
+bk worker
+```
+
+预约保存的是参数数组而不是 shell 字符串，worker 使用 `shell=False` 原样启动，因此 `;`、重定向和命令替换不会被隐式解释。确实需要 shell 语法时显式写成：
+
+```bash
+bk 1 30m -- sh -lc 'python train.py > train.log 2>&1'
+```
+
+worker 只领取与当前系统 UID 完全相同的预约，不能代表其他用户执行。启动子进程时自动设置：
+
+- `CUDA_VISIBLE_DEVICES`：预约到的物理 GPU，例如 `2,5`；程序内部会看到逻辑设备 `0,1`。
+- `CUDA_DEVICE_ORDER=PCI_BUS_ID`。
+- `BK_RESERVATION_ID`、`BK_RESERVED_GPUS`。
+- 声明 `--mem` 时还会设置 `BK_EXPECTED_GPU_MEMORY_MB`。
+
+worker 会将 stdout/stderr 合并写入当前用户的私有日志目录，目录权限为 `0700`、日志为 `0600`。常用命令：
+
+```bash
+bk j                     # jobs
+bk jl 1                  # job-log
+bk jr 1                  # retry failed/interrupted job
+bk w --once              # 只执行当前已到点任务，结束后退出
+```
+
+任务到预约结束仍未退出时，worker 先发送 `SIGTERM`，5 秒后仍存活则发送 `SIGKILL`；取消正在运行的预约也会触发相同流程。领取任务采用 at-most-once 策略：worker 在持久化 claim 后崩溃时，任务变为 `uncertain`，不会冒险自动执行第二次。确认进程确实不存在后，使用：
+
+```bash
+bk jr 1 --accept-duplicate-risk
+```
+
+生产环境建议每位需要自动运行实验的用户自行启用 [deploy/bk-worker.service](deploy/bk-worker.service)，而不是部署共享 root worker：
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/bk-worker.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now bk-worker.service
+```
+
+服务只以该用户身份执行其预约。若系统未为用户启用 linger，用户退出登录后 user service 可能停止；是否开启 linger 应由服务器管理员按实验室策略决定。
 
 ## 实时 GPU 行为监测
 

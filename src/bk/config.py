@@ -4,7 +4,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 DEFAULT_DATA_DIR = "/data2/shared/bk"
@@ -21,6 +21,9 @@ class Config:
     timeline_hours: int = 24
     require_shared_memory: bool = False
     shared_memory_reserve_mb: int = 512
+    job_log_dir: Optional[Path] = None
+    worker_poll_seconds: float = 1.0
+    worker_claim_timeout_seconds: float = 30.0
 
 
 def _read_config_file(data_dir: Path) -> Dict[str, Any]:
@@ -95,10 +98,19 @@ def load_config() -> Config:
         "timeline_hours": "BK_TIMELINE_HOURS",
         "require_shared_memory": "BK_REQUIRE_SHARED_MEMORY",
         "shared_memory_reserve_mb": "BK_SHARED_MEMORY_RESERVE_MB",
+        "worker_poll_seconds": "BK_WORKER_POLL_SECONDS",
+        "worker_claim_timeout_seconds": "BK_WORKER_CLAIM_TIMEOUT_SECONDS",
     }
     for key, env_name in env_map.items():
         if env_name in os.environ:
             raw[key] = os.environ[env_name]
+
+    job_log_raw = os.environ.get("BK_JOB_LOG_DIR", raw.get("job_log_dir"))
+    if job_log_raw:
+        job_log_dir = Path(str(job_log_raw)).expanduser()
+    else:
+        state_home = Path(os.environ.get("XDG_STATE_HOME", "~/.local/state")).expanduser()
+        job_log_dir = state_home / "bk" / "jobs"
 
     return Config(
         data_dir=data_dir,
@@ -110,4 +122,7 @@ def load_config() -> Config:
         timeline_hours=_int_value(raw, "timeline_hours", 24),
         require_shared_memory=_bool_value(raw, "require_shared_memory", False),
         shared_memory_reserve_mb=_nonnegative_int_value(raw, "shared_memory_reserve_mb", 512),
+        job_log_dir=job_log_dir,
+        worker_poll_seconds=_float_value(raw, "worker_poll_seconds", 1.0),
+        worker_claim_timeout_seconds=_float_value(raw, "worker_claim_timeout_seconds", 30.0),
     )

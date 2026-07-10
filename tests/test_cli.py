@@ -379,6 +379,49 @@ class CliTests(unittest.TestCase):
             self.assertEqual(rollups.returncode, 0, rollups.stderr)
             self.assertIn('"partial": true', rollups.stdout)
 
+    def test_cli_schedules_and_runs_command_with_user_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            log_dir = Path(tmp) / "job-logs"
+            start = iso(ceil_5m(datetime.now(timezone.utc)) - timedelta(minutes=5))
+            env = {"BK_JOB_LOG_DIR": str(log_dir)}
+            create = self.run_bk(
+                [
+                    "1",
+                    "10m",
+                    "--start",
+                    start,
+                    "--",
+                    sys.executable,
+                    "-c",
+                    "import os; print('CUDA=' + os.environ['CUDA_VISIBLE_DEVICES'])",
+                ],
+                data_dir,
+                env,
+            )
+            worker = self.run_bk(["w", "--once", "--quiet", "--poll", "0.1"], data_dir, env)
+            jobs = self.run_bk(["j"], data_dir, env)
+            log = self.run_bk(["jl", "1"], data_dir, env)
+
+            self.assertEqual(create.returncode, 0, create.stderr)
+            self.assertIn("job: pending", create.stdout)
+            self.assertEqual(worker.returncode, 0, worker.stderr)
+            self.assertEqual(jobs.returncode, 0, jobs.stderr)
+            self.assertIn("succeeded", jobs.stdout)
+            self.assertIn("CUDA=0", log.stdout)
+
+    def test_operation_id_is_idempotent_for_agent_retries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            first = self.run_bk(["1", "30m", "--op-id", "agent-request-42"], data_dir)
+            second = self.run_bk(["1", "30m", "--op-id", "agent-request-42"], data_dir)
+
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            ledger = json.loads((data_dir / "ledger.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(ledger["reservations"]), 1)
+            self.assertIn("exists:", second.stdout)
+
     def test_reset_clears_ledger_logs_and_backups(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

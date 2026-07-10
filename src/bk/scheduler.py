@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -9,6 +11,11 @@ from .config import Config
 from .models import (
     MODE_EXCLUSIVE,
     MODE_SHARED,
+    JOB_CANCELLED,
+    JOB_CLAIMED,
+    JOB_MISSED,
+    JOB_PENDING,
+    JOB_RUNNING,
     STATUS_ACTIVE,
     STATUS_CANCELLED,
     STATUS_EXPIRED,
@@ -33,6 +40,8 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
     if request.duration_seconds <= 0:
         raise BookingError("duration must be positive")
     _validate_duration_granularity(request.duration_seconds)
+    command_argv, working_directory = _normalize_job_command(request.command_argv, request.working_directory)
+    op_id = _normalize_operation_id(request.op_id)
     expected_memory_mb = _normalize_expected_memory(request.expected_memory_mb)
     if request.mode == MODE_SHARED and config.require_shared_memory and expected_memory_mb is None:
         raise BookingError("shared reservations must declare expected memory with --mem")
@@ -48,6 +57,11 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
         gpu_order = _normalize_gpu_order(request.gpu_order, config)
         gpu_scores = _normalize_gpu_scores(request.gpu_scores, config)
 
+        if op_id:
+            for existing in ledger.get("reservations", []):
+                if int(existing.get("uid", -1)) == request.actor.uid and existing.get("op_id") == op_id:
+                    return ledger, BookingResult(existing, False, "operation already applied"), [], changed
+
         if preferred is not None:
             if len(preferred) != request.count:
                 raise BookingError("--gpu count must match requested GPU count")
@@ -61,6 +75,9 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
                     start,
                     end,
                     request.mode,
+                    expected_memory_mb,
+                    command_argv,
+                    working_directory,
                 )
                 if duplicate is not None:
                     return ledger, BookingResult(duplicate, False, "duplicate request ignored"), [], changed
@@ -73,6 +90,9 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
                     start,
                     end,
                     request.mode,
+                    expected_memory_mb,
+                    command_argv,
+                    working_directory,
                 )
                 if duplicate is not None:
                     return ledger, BookingResult(duplicate, False, "duplicate request ignored"), [], changed
@@ -104,7 +124,7 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
 
         reservation = {
             "id": str(uuid.uuid4()),
-            "op_id": request.op_id or str(uuid.uuid4()),
+            "op_id": op_id or str(uuid.uuid4()),
             "uid": request.actor.uid,
             "username": request.actor.username,
             "gpus": gpus,
@@ -117,6 +137,20 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
         }
         if expected_memory_mb is not None:
             reservation["expected_memory_mb"] = expected_memory_mb
+        if command_argv is not None:
+            reservation["job"] = {
+                "argv": command_argv,
+                "cwd": working_directory,
+                "status": JOB_PENDING,
+                "submitted_at": to_iso(now),
+                "claimed_at": None,
+                "started_at": None,
+                "finished_at": None,
+                "exit_code": None,
+                "runner_pid": None,
+                "runner_host": None,
+                "log_path": None,
+            }
         ledger["reservations"].append(reservation)
         log = _log_item(request.actor, "add", reservation, "ok", "queued" if queued else "created")
         return ledger, BookingResult(reservation, True, "queued" if queued else "created", queued), [log], True
@@ -137,6 +171,13 @@ def cancel_booking(store: LedgerStore, reservation_id: str, actor: Actor) -> dic
                 raise BookingError("permission denied: reservation belongs to another UID")
             reservation["status"] = STATUS_CANCELLED
             reservation["updated_at"] = to_iso(now)
+            job = reservation.get("job")
+            if isinstance(job, dict):
+                if job.get("status") in {JOB_PENDING, JOB_CLAIMED}:
+                    job["status"] = JOB_CANCELLED
+                    job["finished_at"] = to_iso(now)
+                elif job.get("status") == JOB_RUNNING:
+                    job["cancel_requested_at"] = to_iso(now)
             log = _log_item(actor, "cancel", reservation, "ok", "cancelled")
             return ledger, reservation, [log], True
         raise BookingError("reservation not found")
@@ -155,6 +196,9 @@ def edit_booking(store: LedgerStore, config: Config, request: EditRequest) -> Bo
             raise BookingError("reservation is not active")
         if int(reservation.get("uid")) != request.actor.uid:
             raise BookingError("permission denied: reservation belongs to another UID")
+        job = reservation.get("job")
+        if isinstance(job, dict) and job.get("status") != JOB_PENDING:
+            raise BookingError(f"cannot edit reservation after job entered {job.get('status')} state")
 
         mode = request.mode or reservation.get("mode", MODE_SHARED)
         if mode not in {MODE_SHARED, MODE_EXCLUSIVE}:
@@ -580,6 +624,9 @@ def _find_exact_duplicate(
     start: datetime,
     end: datetime,
     mode: str,
+    expected_memory_mb: Optional[int],
+    command_argv: Optional[Sequence[str]],
+    working_directory: Optional[str],
 ) -> Optional[dict]:
     normalized_gpus = sorted(gpus)
     for item in list_active(ledger, start):
@@ -588,6 +635,8 @@ def _find_exact_duplicate(
         if item.get("mode") != mode:
             continue
         if sorted(item.get("gpus", [])) != normalized_gpus:
+            continue
+        if not _same_request_metadata(item, expected_memory_mb, command_argv, working_directory):
             continue
         if parse_iso(item["start_at"]) == start and parse_iso(item["end_at"]) == end:
             return item
@@ -601,6 +650,9 @@ def _find_auto_duplicate(
     start: datetime,
     end: datetime,
     mode: str,
+    expected_memory_mb: Optional[int],
+    command_argv: Optional[Sequence[str]],
+    working_directory: Optional[str],
 ) -> Optional[dict]:
     for item in list_active(ledger, start):
         if int(item.get("uid")) != uid:
@@ -609,9 +661,32 @@ def _find_auto_duplicate(
             continue
         if len(item.get("gpus", [])) != count:
             continue
+        if not _same_request_metadata(item, expected_memory_mb, command_argv, working_directory):
+            continue
         if parse_iso(item["start_at"]) == start and parse_iso(item["end_at"]) == end:
             return item
     return None
+
+
+def _same_request_metadata(
+    reservation: dict,
+    expected_memory_mb: Optional[int],
+    command_argv: Optional[Sequence[str]],
+    working_directory: Optional[str],
+) -> bool:
+    stored_memory = reservation.get("expected_memory_mb")
+    try:
+        normalized_stored_memory = int(stored_memory) if stored_memory is not None else None
+    except (TypeError, ValueError):
+        return False
+    if normalized_stored_memory != expected_memory_mb:
+        return False
+    job = reservation.get("job")
+    if command_argv is None:
+        return not isinstance(job, dict)
+    if not isinstance(job, dict):
+        return False
+    return list(job.get("argv", [])) == list(command_argv) and job.get("cwd") == working_directory
 
 
 def _find_reservation(ledger: dict, reservation_id: str) -> Optional[dict]:
@@ -694,6 +769,10 @@ def _expire_old_reservations(ledger: dict, now: datetime) -> bool:
         if reservation.get("status") == STATUS_ACTIVE and parse_iso(reservation["end_at"]) <= now:
             reservation["status"] = STATUS_EXPIRED
             reservation["updated_at"] = to_iso(now)
+            job = reservation.get("job")
+            if isinstance(job, dict) and job.get("status") in {JOB_PENDING, JOB_CLAIMED}:
+                job["status"] = JOB_MISSED
+                job["finished_at"] = to_iso(now)
             changed = True
     return changed
 
@@ -755,6 +834,44 @@ def _normalize_expected_memory(value: Optional[int]) -> Optional[int]:
     if parsed <= 0:
         raise BookingError("expected GPU memory must be positive")
     return parsed
+
+
+def _normalize_job_command(
+    command_argv: Optional[Sequence[str]],
+    working_directory: Optional[str],
+) -> Tuple[Optional[List[str]], Optional[str]]:
+    if command_argv is None:
+        if working_directory is not None:
+            raise BookingError("working directory requires a job command")
+        return None, None
+    argv = [str(item) for item in command_argv]
+    if not argv or not argv[0]:
+        raise BookingError("job command must not be empty")
+    if len(argv) > 256:
+        raise BookingError("job command has too many arguments")
+    if any("\x00" in item for item in argv):
+        raise BookingError("job command contains a NUL byte")
+    if sum(len(item.encode("utf-8")) for item in argv) > 64 * 1024:
+        raise BookingError("job command is too large")
+    if working_directory is None:
+        raise BookingError("job command requires an absolute working directory")
+    cwd = str(working_directory)
+    if not os.path.isabs(cwd):
+        raise BookingError("job working directory must be absolute")
+    if "\x00" in cwd or len(cwd.encode("utf-8")) > 4096:
+        raise BookingError("invalid job working directory")
+    return argv, cwd
+
+
+def _normalize_operation_id(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if not normalized or len(normalized) > 128:
+        raise BookingError("operation ID must contain 1-128 characters")
+    if re.fullmatch(r"[A-Za-z0-9._:-]+", normalized) is None:
+        raise BookingError("operation ID contains unsupported characters")
+    return normalized
 
 
 def _reservation_pressure_score(

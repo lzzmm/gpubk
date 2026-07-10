@@ -1,0 +1,16 @@
+[Unit]
+Description=BK per-user scheduled job worker
+After=default.target
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.config/bk/bk.env
+ExecStart=%h/.local/bin/bk worker
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+KillMode=control-group
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

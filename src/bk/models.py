@@ -12,6 +12,17 @@ STATUS_ACTIVE = "active"
 STATUS_CANCELLED = "cancelled"
 STATUS_EXPIRED = "expired"
 
+JOB_PENDING = "pending"
+JOB_CLAIMED = "claimed"
+JOB_RUNNING = "running"
+JOB_SUCCEEDED = "succeeded"
+JOB_FAILED = "failed"
+JOB_CANCELLED = "cancelled"
+JOB_MISSED = "missed"
+JOB_TIMED_OUT = "timed-out"
+JOB_INTERRUPTED = "interrupted"
+JOB_UNCERTAIN = "uncertain"
+
 
 @dataclass(frozen=True)
 class Actor:
