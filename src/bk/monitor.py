@@ -18,7 +18,13 @@ from .gpu import GpuSnapshot, snapshot
 from .scheduler import list_active
 from .storage import FileLock, LedgerStore
 from .timeparse import parse_iso, to_iso, utc_now
-from .usage import GPU_LIVE_BUSY, ProcessUsage, assess_gpu_live_states, classify_process_usage
+from .usage import (
+    GPU_LIVE_BUSY,
+    ProcessUsage,
+    assess_gpu_live_states,
+    classify_process_usage,
+    summarize_process_command,
+)
 
 
 SnapshotProvider = Callable[[Config], List[GpuSnapshot]]
@@ -435,7 +441,7 @@ def _build_process_state(
                 "pid": process.pid,
                 "uid": process.uid,
                 "username": process.username,
-                "command": process.command,
+                "command": summarize_process_command(process.command),
                 "kind": process.kind,
                 "status": item.status,
                 "reservation_ids": list(item.reservation_ids),

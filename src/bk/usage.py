@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import math
+import shlex
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .gpu import GpuProcessSnapshot, GpuSnapshot
@@ -283,3 +285,22 @@ def _is_system_process(process: GpuProcessSnapshot) -> bool:
 
 def is_system_gpu_process(process: GpuProcessSnapshot) -> bool:
     return _is_system_process(process)
+
+
+def summarize_process_command(command: str) -> str:
+    """Return an identifying command label without exposing arbitrary arguments."""
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        argv = command.strip().split()
+    if not argv:
+        return "?"
+    executable = Path(argv[0]).name or argv[0]
+    if executable.lower().startswith("python") and len(argv) > 1:
+        if argv[1] == "-m" and len(argv) > 2:
+            return f"{executable} -m {argv[2]}"
+        if argv[1] == "-c":
+            return f"{executable} -c"
+        if not argv[1].startswith("-"):
+            return f"{executable} {Path(argv[1]).name}"
+    return executable

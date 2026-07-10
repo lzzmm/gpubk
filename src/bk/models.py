@@ -42,8 +42,9 @@ class BookingRequest:
     gpu_scores: Optional[Dict[int, float]] = None
     op_id: Optional[str] = None
     allow_queue: bool = False
-    command_argv: Optional[List[str]] = None
-    working_directory: Optional[str] = None
+    job_spec_id: Optional[str] = None
+    job_digest: Optional[str] = None
+    job_summary: Optional[str] = None
     expected_memory_mb: Optional[int] = None
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None
 

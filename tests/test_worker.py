@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -11,7 +12,14 @@ from bk.models import Actor, BookingError, BookingRequest
 from bk.scheduler import add_booking, cancel_booking
 from bk.storage import LedgerStore
 from bk.timeparse import to_iso, utc_now
-from bk.worker import claim_due_jobs, job_log_path, retry_job, run_worker
+from bk.worker import (
+    claim_due_jobs,
+    job_log_path,
+    job_spec_path,
+    prepare_job_spec,
+    retry_job,
+    run_worker,
+)
 
 
 def floor_5m(value):
@@ -44,6 +52,11 @@ class ScheduledJobTests(unittest.TestCase):
     def booking(self, actor=None, command=None):
         actor = actor or self.actor
         command = command or [sys.executable, "-c", "print('ok')"]
+        if actor.uid == self.actor.uid:
+            spec = prepare_job_spec(self.config, actor, command, str(self.work_dir))
+            spec_id, digest, summary = spec.spec_id, spec.digest, spec.summary
+        else:
+            spec_id, digest, summary = "00000000-0000-0000-0000-000000000001", "0" * 64, "private job"
         return add_booking(
             self.store,
             self.config,
@@ -53,8 +66,9 @@ class ScheduledJobTests(unittest.TestCase):
                 duration_seconds=10 * 60,
                 start_at=self.start,
                 preferred_gpus=[0],
-                command_argv=command,
-                working_directory=str(self.work_dir),
+                job_spec_id=spec_id,
+                job_digest=digest,
+                job_summary=summary,
             ),
         ).reservation
 
@@ -158,18 +172,39 @@ class ScheduledJobTests(unittest.TestCase):
 
     def test_job_command_requires_absolute_working_directory(self):
         with self.assertRaisesRegex(BookingError, "must be absolute"):
-            add_booking(
-                self.store,
+            prepare_job_spec(
                 self.config,
-                BookingRequest(
-                    actor=self.actor,
-                    count=1,
-                    duration_seconds=10 * 60,
-                    start_at=self.start,
-                    command_argv=["python", "train.py"],
-                    working_directory="relative/path",
-                ),
+                self.actor,
+                ["python", "train.py"],
+                "relative/path",
             )
+
+    def test_shared_ledger_contains_no_command_arguments_and_private_spec_is_locked_down(self):
+        secret = "api-token-should-stay-private"
+        reservation = self.booking(command=[sys.executable, "-c", f"print({secret!r})"])
+
+        ledger_text = self.store.ledger_path.read_text(encoding="utf-8")
+        self.assertNotIn(secret, ledger_text)
+        self.assertNotIn('"argv"', ledger_text)
+        spec_path = job_spec_path(self.config, reservation["job"]["spec_id"])
+        self.assertEqual(stat.S_IMODE(spec_path.stat().st_mode), 0o600)
+        self.assertIn(secret, spec_path.read_text(encoding="utf-8"))
+
+    def test_tampered_private_spec_is_rejected_before_execution(self):
+        marker = self.work_dir / "tampered"
+        reservation = self.booking(command=[sys.executable, "-c", "print('safe')"])
+        spec_path = job_spec_path(self.config, reservation["job"]["spec_id"])
+        payload = json.loads(spec_path.read_text(encoding="utf-8"))
+        payload["argv"] = [sys.executable, "-c", f"open({str(marker)!r}, 'w').write('bad')"]
+        spec_path.write_text(json.dumps(payload), encoding="utf-8")
+        spec_path.chmod(0o600)
+
+        summary = run_worker(self.config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True)
+
+        stored = next(item for item in self.store.load()["reservations"] if item["id"] == reservation["id"])
+        self.assertEqual(summary.failed, 1)
+        self.assertEqual(stored["job"]["status"], "failed")
+        self.assertFalse(marker.exists())
 
 
 if __name__ == "__main__":

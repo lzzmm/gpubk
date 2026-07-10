@@ -33,8 +33,8 @@ from .timeparse import (
     utc_now,
 )
 from .tui import run_tui
-from .usage import classify_process_usage
-from .worker import job_log_path, retry_job, run_worker
+from .usage import classify_process_usage, summarize_process_command
+from .worker import delete_job_spec, job_log_path, prepare_job_spec, retry_job, run_worker
 
 try:
     import readline  # noqa: F401
@@ -228,26 +228,44 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
 
     start_raw = args.start or "now"
     preferred = _parse_gpu_list(args.gpu) if args.gpu else None
-    advice = build_gpu_advice(config)
     expected_memory_mb = parse_memory_mb(args.mem) if args.mem else None
+    duration_seconds = parse_duration_seconds(args.duration)
+    start_at = parse_start(start_raw)
+    advice = build_gpu_advice(config)
+    actor = _current_actor()
+    job_spec = (
+        prepare_job_spec(config, actor, command_argv, os.getcwd())
+        if command_argv is not None
+        else None
+    )
     request = BookingRequest(
-        actor=_current_actor(),
+        actor=actor,
         count=args.count,
-        duration_seconds=parse_duration_seconds(args.duration),
-        start_at=parse_start(start_raw),
+        duration_seconds=duration_seconds,
+        start_at=start_at,
         mode=mode,
         preferred_gpus=preferred,
         gpu_order=advice.order,
         gpu_scores=advice.scores,
         allow_queue=args.start is None,
         op_id=args.op_id,
-        command_argv=command_argv,
-        working_directory=os.getcwd() if command_argv is not None else None,
+        job_spec_id=job_spec.spec_id if job_spec is not None else None,
+        job_digest=job_spec.digest if job_spec is not None else None,
+        job_summary=job_spec.summary if job_spec is not None else None,
         expected_memory_mb=expected_memory_mb,
         gpu_memory_capacity_mb=advice.memory_capacities_mb,
     )
-    result = add_booking(store, config, request)
+    try:
+        result = add_booking(store, config, request)
+    except Exception:
+        if job_spec is not None:
+            delete_job_spec(config, job_spec.spec_id)
+        raise
     reservation = result.reservation
+    if job_spec is not None and (
+        not result.created or reservation.get("job", {}).get("spec_id") != job_spec.spec_id
+    ):
+        delete_job_spec(config, job_spec.spec_id)
     if not result.created:
         status = "exists"
     elif result.queued:
@@ -261,8 +279,10 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
     )
     _print_booking_advice(config, store, reservation, advice, expected_memory_mb)
     if isinstance(reservation.get("job"), dict):
-        command_text = shlex.join(reservation["job"].get("argv", []))
-        print(f"job: {reservation['job'].get('status')} command={command_text}")
+        print(
+            f"job: {reservation['job'].get('status')} "
+            f"command={reservation['job'].get('summary', 'private command')}"
+        )
         print("worker: keep `bk w` running before the scheduled start")
     return 0
 
@@ -336,7 +356,7 @@ def _jobs_command(store: LedgerStore) -> int:
     print("#  ID       State        GPU       Start                  Command")
     for index, reservation in enumerate(reservations, 1):
         job = reservation["job"]
-        command = shlex.join(job.get("argv", []))
+        command = str(job.get("summary", "legacy/private command"))
         if len(command) > 48:
             command = command[:45] + "..."
         print(
@@ -404,30 +424,45 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
     command_raw = input("command optional, for example python train.py: ").strip()
     command_argv = shlex.split(command_raw) if command_raw else None
     advice = build_gpu_advice(config)
-    result = add_booking(
-        store,
-        config,
-        BookingRequest(
-            actor=actor,
-            count=count,
-            duration_seconds=duration,
-            start_at=start,
-            mode=mode_raw,
-            preferred_gpus=preferred,
-            gpu_order=advice.order,
-            gpu_scores=advice.scores,
-            allow_queue=allow_queue,
-            command_argv=command_argv,
-            working_directory=os.getcwd() if command_argv is not None else None,
-            expected_memory_mb=expected_memory_mb,
-            gpu_memory_capacity_mb=advice.memory_capacities_mb,
-        ),
+    job_spec = (
+        prepare_job_spec(config, actor, command_argv, os.getcwd())
+        if command_argv is not None
+        else None
     )
+    try:
+        result = add_booking(
+            store,
+            config,
+            BookingRequest(
+                actor=actor,
+                count=count,
+                duration_seconds=duration,
+                start_at=start,
+                mode=mode_raw,
+                preferred_gpus=preferred,
+                gpu_order=advice.order,
+                gpu_scores=advice.scores,
+                allow_queue=allow_queue,
+                job_spec_id=job_spec.spec_id if job_spec is not None else None,
+                job_digest=job_spec.digest if job_spec is not None else None,
+                job_summary=job_spec.summary if job_spec is not None else None,
+                expected_memory_mb=expected_memory_mb,
+                gpu_memory_capacity_mb=advice.memory_capacities_mb,
+            ),
+        )
+    except Exception:
+        if job_spec is not None:
+            delete_job_spec(config, job_spec.spec_id)
+        raise
     reservation = result.reservation
+    if job_spec is not None and (
+        not result.created or reservation.get("job", {}).get("spec_id") != job_spec.spec_id
+    ):
+        delete_job_spec(config, job_spec.spec_id)
     print(f"{'queued' if result.queued else 'created'}: {_short_id(reservation)} {format_local_range(reservation['start_at'], reservation['end_at'])}")
     _print_booking_advice(config, store, reservation, advice, expected_memory_mb)
     if isinstance(reservation.get("job"), dict):
-        print(f"job: pending command={shlex.join(reservation['job'].get('argv', []))}")
+        print(f"job: pending command={reservation['job'].get('summary', 'private command')}")
         print("worker: keep `bk w` running before the scheduled start")
     return 0
 
@@ -563,11 +598,20 @@ def _list_command(store: LedgerStore) -> int:
 
 def _doctor_command(config: Config, store: LedgerStore) -> int:
     storage_issues = store.health_issues()
-    issues = find_policy_violations(store.load(), config.max_shared_users)
-    if not issues and not storage_issues:
+    ledger = store.load()
+    issues = find_policy_violations(ledger, config.max_shared_users)
+    privacy_issues = [
+        item
+        for item in ledger.get("reservations", [])
+        if isinstance(item.get("job"), dict) and "argv" in item["job"]
+    ]
+    if not issues and not storage_issues and not privacy_issues:
         print("No policy issues found.")
         return 0
-    print(f"Found {len(storage_issues)} storage issue(s), {len(issues)} policy issue(s):")
+    print(
+        f"Found {len(storage_issues)} storage issue(s), {len(issues)} policy issue(s), "
+        f"{len(privacy_issues)} privacy issue(s):"
+    )
     for issue in storage_issues:
         details = " ".join(
             f"{key}={value}"
@@ -575,6 +619,11 @@ def _doctor_command(config: Config, store: LedgerStore) -> int:
             if key not in {"type", "message"}
         )
         print(f"{issue['type']} {details} {issue.get('message', '')}".rstrip())
+    for reservation in privacy_issues:
+        print(
+            f"legacy-inline-job-command id={_short_id(reservation)} "
+            "full argv is visible in the shared ledger; recreate this pending job"
+        )
     for issue in issues:
         if issue["type"] == "shared-capacity":
             print(
@@ -881,7 +930,7 @@ def _print_status(config: Config, store: LedgerStore) -> None:
             print(
                 f"    pid={process.pid} uid={process.uid if process.uid is not None else '?'} "
                 f"user={process.username} sm={sm} mem={process.gpu_memory_mb}MiB "
-                f"state={item.status} cmd={process.command or '?'}"
+                f"state={item.status} cmd={summarize_process_command(process.command)}"
             )
 
     print()

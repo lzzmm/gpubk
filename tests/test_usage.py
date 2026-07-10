@@ -9,6 +9,7 @@ from bk.usage import (
     USAGE_WRONG_GPU,
     USAGE_SYSTEM,
     classify_process_usage,
+    summarize_process_command,
 )
 
 
@@ -83,6 +84,14 @@ class UsageClassificationTests(unittest.TestCase):
 
         self.assertEqual(row.status, USAGE_UNRESERVED)
         self.assertTrue(row.violation)
+
+    def test_process_command_summary_does_not_expose_arbitrary_arguments(self):
+        secret = "super-secret-token"
+
+        summary = summarize_process_command(f"/usr/bin/python3 /home/alice/train.py --token {secret}")
+
+        self.assertEqual(summary, "python3 train.py")
+        self.assertNotIn(secret, summary)
 
 
 if __name__ == "__main__":

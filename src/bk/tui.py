@@ -21,7 +21,7 @@ from .scheduler import (
 )
 from .storage import LedgerStore
 from .timeparse import format_local_range, parse_iso, utc_now
-from .usage import ProcessUsage, classify_process_usage
+from .usage import ProcessUsage, classify_process_usage, summarize_process_command
 
 
 COLOR_HEADER = 1
@@ -581,7 +581,7 @@ def _process_table_line(item: ProcessUsage, width: int) -> str:
     sm = f"{process.sm_utilization_percent}%" if process.sm_utilization_percent is not None else "-"
     memory = f"{process.gpu_memory_mb}M" if process.gpu_memory_mb else "-"
     booking = ",".join(value[:6] for value in item.reservation_ids) or "-"
-    command = process.command or "?"
+    command = summarize_process_command(process.command)
     if width < 100:
         prefix = (
             f"{process.pid:>7} {_truncate(process.username, 10):<10} "

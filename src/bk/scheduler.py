@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import os
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -40,7 +39,7 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
     if request.duration_seconds <= 0:
         raise BookingError("duration must be positive")
     _validate_duration_granularity(request.duration_seconds)
-    command_argv, working_directory = _normalize_job_command(request.command_argv, request.working_directory)
+    job_metadata = _normalize_job_metadata(request.job_spec_id, request.job_digest, request.job_summary)
     op_id = _normalize_operation_id(request.op_id)
     expected_memory_mb = _normalize_expected_memory(request.expected_memory_mb)
     if request.mode == MODE_SHARED and config.require_shared_memory and expected_memory_mb is None:
@@ -76,8 +75,7 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
                     end,
                     request.mode,
                     expected_memory_mb,
-                    command_argv,
-                    working_directory,
+                    job_metadata,
                 )
                 if duplicate is not None:
                     return ledger, BookingResult(duplicate, False, "duplicate request ignored"), [], changed
@@ -91,8 +89,7 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
                     end,
                     request.mode,
                     expected_memory_mb,
-                    command_argv,
-                    working_directory,
+                    job_metadata,
                 )
                 if duplicate is not None:
                     return ledger, BookingResult(duplicate, False, "duplicate request ignored"), [], changed
@@ -137,10 +134,9 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
         }
         if expected_memory_mb is not None:
             reservation["expected_memory_mb"] = expected_memory_mb
-        if command_argv is not None:
+        if job_metadata is not None:
             reservation["job"] = {
-                "argv": command_argv,
-                "cwd": working_directory,
+                **job_metadata,
                 "status": JOB_PENDING,
                 "submitted_at": to_iso(now),
                 "claimed_at": None,
@@ -625,8 +621,7 @@ def _find_exact_duplicate(
     end: datetime,
     mode: str,
     expected_memory_mb: Optional[int],
-    command_argv: Optional[Sequence[str]],
-    working_directory: Optional[str],
+    job_metadata: Optional[dict],
 ) -> Optional[dict]:
     normalized_gpus = sorted(gpus)
     for item in list_active(ledger, start):
@@ -636,7 +631,7 @@ def _find_exact_duplicate(
             continue
         if sorted(item.get("gpus", [])) != normalized_gpus:
             continue
-        if not _same_request_metadata(item, expected_memory_mb, command_argv, working_directory):
+        if not _same_request_metadata(item, expected_memory_mb, job_metadata):
             continue
         if parse_iso(item["start_at"]) == start and parse_iso(item["end_at"]) == end:
             return item
@@ -651,8 +646,7 @@ def _find_auto_duplicate(
     end: datetime,
     mode: str,
     expected_memory_mb: Optional[int],
-    command_argv: Optional[Sequence[str]],
-    working_directory: Optional[str],
+    job_metadata: Optional[dict],
 ) -> Optional[dict]:
     for item in list_active(ledger, start):
         if int(item.get("uid")) != uid:
@@ -661,7 +655,7 @@ def _find_auto_duplicate(
             continue
         if len(item.get("gpus", [])) != count:
             continue
-        if not _same_request_metadata(item, expected_memory_mb, command_argv, working_directory):
+        if not _same_request_metadata(item, expected_memory_mb, job_metadata):
             continue
         if parse_iso(item["start_at"]) == start and parse_iso(item["end_at"]) == end:
             return item
@@ -671,8 +665,7 @@ def _find_auto_duplicate(
 def _same_request_metadata(
     reservation: dict,
     expected_memory_mb: Optional[int],
-    command_argv: Optional[Sequence[str]],
-    working_directory: Optional[str],
+    job_metadata: Optional[dict],
 ) -> bool:
     stored_memory = reservation.get("expected_memory_mb")
     try:
@@ -682,11 +675,11 @@ def _same_request_metadata(
     if normalized_stored_memory != expected_memory_mb:
         return False
     job = reservation.get("job")
-    if command_argv is None:
+    if job_metadata is None:
         return not isinstance(job, dict)
     if not isinstance(job, dict):
         return False
-    return list(job.get("argv", [])) == list(command_argv) and job.get("cwd") == working_directory
+    return job.get("digest") == job_metadata.get("digest")
 
 
 def _find_reservation(ledger: dict, reservation_id: str) -> Optional[dict]:
@@ -836,31 +829,33 @@ def _normalize_expected_memory(value: Optional[int]) -> Optional[int]:
     return parsed
 
 
-def _normalize_job_command(
-    command_argv: Optional[Sequence[str]],
-    working_directory: Optional[str],
-) -> Tuple[Optional[List[str]], Optional[str]]:
-    if command_argv is None:
-        if working_directory is not None:
-            raise BookingError("working directory requires a job command")
-        return None, None
-    argv = [str(item) for item in command_argv]
-    if not argv or not argv[0]:
-        raise BookingError("job command must not be empty")
-    if len(argv) > 256:
-        raise BookingError("job command has too many arguments")
-    if any("\x00" in item for item in argv):
-        raise BookingError("job command contains a NUL byte")
-    if sum(len(item.encode("utf-8")) for item in argv) > 64 * 1024:
-        raise BookingError("job command is too large")
-    if working_directory is None:
-        raise BookingError("job command requires an absolute working directory")
-    cwd = str(working_directory)
-    if not os.path.isabs(cwd):
-        raise BookingError("job working directory must be absolute")
-    if "\x00" in cwd or len(cwd.encode("utf-8")) > 4096:
-        raise BookingError("invalid job working directory")
-    return argv, cwd
+def _normalize_job_metadata(
+    spec_id: Optional[str],
+    digest: Optional[str],
+    summary: Optional[str],
+) -> Optional[dict]:
+    values = (spec_id, digest, summary)
+    if all(value is None for value in values):
+        return None
+    if any(value is None for value in values):
+        raise BookingError("job spec ID, digest, and summary must be provided together")
+    try:
+        normalized_spec_id = str(uuid.UUID(str(spec_id)))
+    except (ValueError, AttributeError) as exc:
+        raise BookingError("invalid job spec ID") from exc
+    normalized_digest = str(digest).lower()
+    if re.fullmatch(r"[0-9a-f]{64}", normalized_digest) is None:
+        raise BookingError("invalid job spec digest")
+    normalized_summary = str(summary).strip()
+    if not normalized_summary or len(normalized_summary) > 200:
+        raise BookingError("job summary must contain 1-200 characters")
+    if any(ord(char) < 32 for char in normalized_summary):
+        raise BookingError("job summary contains control characters")
+    return {
+        "spec_id": normalized_spec_id,
+        "digest": normalized_digest,
+        "summary": normalized_summary,
+    }
 
 
 def _normalize_operation_id(value: Optional[str]) -> Optional[str]:

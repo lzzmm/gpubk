@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import hmac
 import json
 import os
+import shlex
 import signal
 import socket
+import stat
 import subprocess
 import threading
 import time
@@ -54,6 +57,65 @@ class WorkerSummary:
     succeeded: int = 0
     failed: int = 0
     cancelled: int = 0
+
+
+@dataclass(frozen=True)
+class JobSpecReference:
+    spec_id: str
+    digest: str
+    summary: str
+
+
+def prepare_job_spec(
+    config: Config,
+    actor: Actor,
+    command_argv: List[str],
+    working_directory: str,
+) -> JobSpecReference:
+    if actor.uid != os.getuid():
+        raise BookingError("job spec actor must match the current process UID")
+    argv, cwd = _validate_submission_payload(command_argv, working_directory)
+    spec_id = str(uuid.uuid4())
+    payload = {
+        "version": 1,
+        "spec_id": spec_id,
+        "uid": actor.uid,
+        "argv": argv,
+        "cwd": cwd,
+        "created_at": to_iso(utc_now()),
+    }
+    digest = _job_spec_digest(payload)
+    payload["digest"] = digest
+    path = job_spec_path(config, spec_id)
+    _ensure_private_directory(path.parent, actor)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        _fsync_directory(path.parent)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        path.unlink(missing_ok=True)
+        raise
+    return JobSpecReference(spec_id, digest, _job_command_summary(argv))
+
+
+def delete_job_spec(config: Config, spec_id: str) -> None:
+    path = job_spec_path(config, spec_id)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def run_worker(
@@ -229,6 +291,15 @@ def job_log_path(config: Config, reservation_id: str) -> Path:
     return log_dir / f"{normalized}.log"
 
 
+def job_spec_path(config: Config, spec_id: str) -> Path:
+    log_dir = config.job_log_dir or (Path.home() / ".local" / "state" / "bk" / "jobs")
+    try:
+        normalized = str(uuid.UUID(str(spec_id)))
+    except (ValueError, AttributeError) as exc:
+        raise BookingError("invalid job spec ID") from exc
+    return log_dir / "specs" / f"{normalized}.json"
+
+
 def retry_job(
     store: LedgerStore,
     actor: Actor,
@@ -288,7 +359,7 @@ def _start_claimed_job(
         _mark_launch_failure(store, actor, reservation_id, claim_token, "invalid log path", None)
         return None
     try:
-        argv, cwd = _validated_job_payload(job)
+        argv, cwd = _validated_job_payload(config, actor, job)
         log_fh = _open_secure_log(log_path)
         header = {
             "event": "bk-job-start",
@@ -353,19 +424,99 @@ def _start_claimed_job(
     )
 
 
-def _validated_job_payload(job: dict) -> Tuple[List[str], str]:
+def _validated_job_payload(config: Config, actor: Actor, job: dict) -> Tuple[List[str], str]:
+    if job.get("spec_id") is not None:
+        payload = _read_job_spec(config, actor, str(job["spec_id"]))
+        expected_digest = str(job.get("digest", ""))
+        actual_digest = _job_spec_digest(payload)
+        if not hmac.compare_digest(expected_digest, actual_digest):
+            raise BookingError("private job spec digest does not match the shared ledger")
+        if not hmac.compare_digest(str(payload.get("digest", "")), actual_digest):
+            raise BookingError("private job spec is internally inconsistent")
+        raw_argv = payload.get("argv")
+        cwd = payload.get("cwd")
+        return _validate_submission_payload(raw_argv, cwd)
+
+    # Compatibility for pre-0.2 ledgers. New bookings never store argv in shared data.
     raw_argv = job.get("argv")
-    if not isinstance(raw_argv, list) or not raw_argv or not all(isinstance(item, str) for item in raw_argv):
-        raise BookingError("invalid job argv in ledger")
-    if any(not item or "\x00" in item for item in raw_argv[:1]) or any("\x00" in item for item in raw_argv):
-        raise BookingError("invalid job argv in ledger")
     cwd = job.get("cwd")
+    return _validate_submission_payload(raw_argv, cwd)
+
+
+def _validate_submission_payload(raw_argv, cwd) -> Tuple[List[str], str]:
+    if not isinstance(raw_argv, list) or not raw_argv or not all(isinstance(item, str) for item in raw_argv):
+        raise BookingError("invalid job argv")
+    if len(raw_argv) > 256 or any("\x00" in item for item in raw_argv):
+        raise BookingError("invalid job argv")
+    if not raw_argv[0] or sum(len(item.encode("utf-8")) for item in raw_argv) > 64 * 1024:
+        raise BookingError("invalid job argv")
     if not isinstance(cwd, str) or not os.path.isabs(cwd) or "\x00" in cwd:
-        raise BookingError("invalid job cwd in ledger")
+        raise BookingError("job working directory must be absolute")
+    if len(cwd.encode("utf-8")) > 4096:
+        raise BookingError("invalid job working directory")
     path = Path(cwd)
     if not path.is_dir():
         raise BookingError(f"job working directory does not exist: {cwd}")
     return list(raw_argv), cwd
+
+
+def _read_job_spec(config: Config, actor: Actor, spec_id: str) -> dict:
+    path = job_spec_path(config, spec_id)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(str(path), flags)
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise BookingError("job spec is not a regular file")
+        if metadata.st_uid != actor.uid:
+            raise BookingError("job spec is not owned by the reservation UID")
+        if stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise BookingError("job spec must not be accessible by group or other users")
+        if metadata.st_size > 128 * 1024:
+            raise BookingError("job spec is too large")
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+            fd = -1
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise BookingError("invalid private job spec")
+    if int(payload.get("uid", -1)) != actor.uid or payload.get("spec_id") != spec_id:
+        raise BookingError("private job spec identity mismatch")
+    return payload
+
+
+def _job_spec_digest(payload: dict) -> str:
+    signed = {
+        "version": payload.get("version"),
+        "uid": payload.get("uid"),
+        "argv": payload.get("argv"),
+        "cwd": payload.get("cwd"),
+    }
+    raw = json.dumps(signed, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _job_command_summary(argv: List[str]) -> str:
+    executable = Path(argv[0]).name or argv[0]
+    detail = ""
+    consumed = 1
+    if executable.lower().startswith("python") and len(argv) > 1:
+        if argv[1] == "-m" and len(argv) > 2:
+            detail = f" -m {argv[2]}"
+            consumed = 3
+        elif argv[1] == "-c":
+            detail = " -c"
+            consumed = 2
+        elif not argv[1].startswith("-"):
+            detail = f" {Path(argv[1]).name}"
+            consumed = 2
+    hidden_count = max(0, len(argv) - consumed)
+    suffix = f" (+{hidden_count} args)" if hidden_count else ""
+    return f"{executable}{detail}{suffix}"[:200]
 
 
 def _mark_running(
@@ -540,12 +691,16 @@ def _ensure_job_log_dir(config: Config, actor: Actor) -> Path:
     path = config.job_log_dir or (Path.home() / ".local" / "state" / "bk" / "jobs")
     if not path.is_absolute():
         raise BookingError(f"job log directory must be absolute: {path}")
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    stat = path.stat()
-    if stat.st_uid != actor.uid:
-        raise BookingError(f"job log directory is not owned by UID {actor.uid}: {path}")
-    path.chmod(0o700)
+    _ensure_private_directory(path, actor)
     return path
+
+
+def _ensure_private_directory(path: Path, actor: Actor) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    metadata = path.stat()
+    if metadata.st_uid != actor.uid:
+        raise BookingError(f"private job directory is not owned by UID {actor.uid}: {path}")
+    path.chmod(0o700)
 
 
 def _open_secure_log(path: Path):
@@ -604,3 +759,14 @@ def _install_signal_handlers(stop_event: threading.Event) -> Dict[int, object]:
 def _restore_signal_handlers(previous: Dict[int, object]) -> None:
     for signum, handler in previous.items():
         signal.signal(signum, handler)
+
+
+def _fsync_directory(path: Path) -> None:
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
