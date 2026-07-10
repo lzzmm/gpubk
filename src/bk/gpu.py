@@ -21,6 +21,7 @@ class GpuProcessSnapshot:
     gpu_memory_mb: int = 0
     sm_utilization_percent: Optional[int] = None
     kind: str = "C"
+    host_start_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class _HostIdentity:
     uid: Optional[int]
     username: str
     command: str
+    start_id: str
 
 
 _NVML_SAMPLER: Optional["_NvmlSampler"] = None
@@ -184,6 +186,7 @@ class _NvmlSampler:
                     gpu_memory_mb=int(item["memory"]),
                     sm_utilization_percent=utilization.get(pid),
                     kind="+".join(sorted(kinds)),
+                    host_start_id=identity.start_id,
                 )
             )
         return result
@@ -206,13 +209,13 @@ def _host_identity(pid: int) -> _HostIdentity:
         proc_stat = proc_dir.stat()
     except OSError:
         _IDENTITY_CACHE.pop(pid, None)
-        return _HostIdentity(uid=None, username="?", command="")
+        return _HostIdentity(uid=None, username="?", command="", start_id="")
     process_token = (int(proc_stat.st_ino), int(proc_stat.st_ctime_ns))
     cached = _IDENTITY_CACHE.get(pid)
     if cached is not None and cached[0] > now and cached[1] == process_token:
         return cached[2]
 
-    identity = _HostIdentity(uid=None, username="?", command="")
+    identity = _HostIdentity(uid=None, username="?", command="", start_id="")
     try:
         uid = proc_stat.st_uid
         try:
@@ -224,7 +227,12 @@ def _host_identity(pid: int) -> _HostIdentity:
             command = raw_command.decode("utf-8", errors="replace")
         else:
             command = (proc_dir / "comm").read_text(encoding="utf-8", errors="replace").strip()
-        identity = _HostIdentity(uid=uid, username=username, command=command)
+        identity = _HostIdentity(
+            uid=uid,
+            username=username,
+            command=command,
+            start_id=f"{process_token[0]}:{process_token[1]}",
+        )
     except OSError:
         pass
 
@@ -275,6 +283,7 @@ def _simulation_process(raw) -> GpuProcessSnapshot:
         gpu_memory_mb=int(raw.get("gpu_memory_mb", 0)),
         sm_utilization_percent=_optional_int(raw.get("sm_utilization_percent")),
         kind=str(raw.get("kind", "C")),
+        host_start_id=str(raw.get("host_start_id", "")),
     )
 
 

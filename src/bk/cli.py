@@ -11,6 +11,7 @@ from typing import List, Optional
 
 from .config import Config, load_config
 from .gpu import snapshot
+from .monitor import UsageAuditStore, run_monitor
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest, EditRequest
 from .scheduler import add_booking, cancel_booking, edit_booking, find_policy_violations, list_active
 from .storage import LedgerStore
@@ -41,6 +42,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _book_command(argv[1:], MODE_EXCLUSIVE, config, store)
         if head == "tui":
             return run_tui(config, store)
+        if head == "monitor":
+            return _monitor_command(argv[1:], config, store)
+        if head == "usage":
+            return _usage_command(argv[1:], config)
         if head in {"status", "timeline"}:
             _print_status(config, store)
             return 0
@@ -51,7 +56,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if head == "del":
             return _delete_command(argv[1:], store)
         if head == "reset":
-            return _reset_command(argv[1:], store)
+            return _reset_command(argv[1:], config, store)
         if head == "log":
             return _log_command(config, store)
         if head == "doctor":
@@ -139,13 +144,19 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
         _edit_command(args[1:], config, store)
         return True
     if head == "reset":
-        _reset_command(args[1:], store)
+        _reset_command(args[1:], config, store)
         return True
     if head == "add":
         _add_interactive(config, store)
         return True
     if head == "tui":
         run_tui(config, store)
+        return True
+    if head == "monitor":
+        _monitor_command(args[1:], config, store)
+        return True
+    if head == "usage":
+        _usage_command(args[1:], config)
         return True
     if _looks_like_auto_request(args):
         _book_command(args, MODE_SHARED, config, store)
@@ -193,6 +204,42 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
         f"{status}: {_short_id(reservation)} mode={reservation['mode']} "
         f"gpu={gpus} {format_local_range(reservation['start_at'], reservation['end_at'])}"
     )
+    return 0
+
+
+def _monitor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
+    parser = argparse.ArgumentParser(prog="bk monitor")
+    parser.add_argument("--interval", type=float, default=2.0, help="sampling interval in seconds (default: 2)")
+    parser.add_argument("--rollup", type=int, default=60, help="rollup window in seconds (default: 60)")
+    parser.add_argument("--once", action="store_true", help="collect one sample and exit")
+    parser.add_argument("--samples", type=int, help="collect a bounded number of samples and exit")
+    parser.add_argument("--verbose", action="store_true", help="print every sample instead of state changes only")
+    args = parser.parse_args(argv)
+    return run_monitor(
+        config,
+        store,
+        interval_seconds=args.interval,
+        rollup_seconds=args.rollup,
+        once=args.once,
+        max_samples=1 if args.once else args.samples,
+        verbose=args.verbose,
+    )
+
+
+def _usage_command(argv: List[str], config: Config) -> int:
+    parser = argparse.ArgumentParser(prog="bk usage")
+    parser.add_argument("--rollups", action="store_true", help="show utilization rollups instead of events")
+    parser.add_argument("--limit", type=int, default=20)
+    args = parser.parse_args(argv)
+    if args.limit < 1:
+        raise ValueError("--limit must be >= 1")
+    store = UsageAuditStore(config.data_dir, config.lock_timeout_seconds)
+    records = store.recent_rollups(args.limit) if args.rollups else store.recent_events(args.limit)
+    if not records:
+        print("no usage records")
+        return 0
+    for record in records:
+        print(json.dumps(record, ensure_ascii=False, sort_keys=True))
     return 0
 
 
@@ -377,7 +424,7 @@ def _doctor_command(config: Config, store: LedgerStore) -> int:
     return 0
 
 
-def _reset_command(argv: List[str], store: LedgerStore) -> int:
+def _reset_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     parser = argparse.ArgumentParser(prog="bk reset")
     parser.add_argument("--yes", action="store_true", help="required to reset without an interactive confirmation")
     args = parser.parse_args(argv)
@@ -386,10 +433,15 @@ def _reset_command(argv: List[str], store: LedgerStore) -> int:
         if answer != "reset":
             print("reset cancelled")
             return 1
-    result = store.reset()
+    audit_store = UsageAuditStore(config.data_dir, config.lock_timeout_seconds)
+    with audit_store.lock():
+        result = store.reset()
+        usage_result = audit_store.clear_unlocked()
     print(
         f"reset: removed {result['reservations']} reservation record(s), "
-        f"{result['logs']} log line(s), {result['backups']} backup file(s)"
+        f"{result['logs']} log line(s), {result['backups']} backup file(s), "
+        f"{usage_result['usage_events']} usage event(s), "
+        f"{usage_result['usage_rollups']} usage rollup(s)"
     )
     return 0
 
@@ -467,6 +519,8 @@ def _print_help(file=None) -> None:
   bk shared <count> <duration>
   bk exclusive <count> <duration>
   bk tui
+  bk monitor [--once] [--interval 2] [--rollup 60]
+  bk usage [--rollups] [--limit 20]
   bk add
   bk edit [number_or_short_id]
   bk del <reservation_id>
@@ -499,6 +553,8 @@ def _print_shell_help() -> None:
   list                      list active reservations
   log                       show your operation log
   doctor                    report policy violations in the ledger
+  monitor                   continuously audit GPU process usage
+  usage [--rollups]         show recent usage events or minute rollups
   reset --yes               clear ledger, logs, and backups in this data dir
   tui                       available as top-level command: bk tui
   quit                      exit

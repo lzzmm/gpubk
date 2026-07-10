@@ -15,6 +15,8 @@ bk edit <number_or_short_id>
 bk del <reservation_id>
 bk log
 bk doctor
+bk monitor
+bk usage
 bk reset --yes
 ```
 
@@ -24,6 +26,8 @@ bk reset --yes
 - `bk exclusive 1 4h`：排他模式，预约期间不允许其他人共享同一张卡。
 - `bk tui`：显式进入全屏 TUI 实验界面。
 - `bk doctor`：只读检查台账里违反当前策略的记录，例如 shared 超容量或 exclusive 重叠。
+- `bk monitor`：低开销持续采集 GPU 进程行为，记录状态变化和分钟级汇总。
+- `bk usage`：查看最近的进程事件；`bk usage --rollups` 查看利用率汇总。
 - `bk edit 1 --duration 8h`：用列表序号修改自己的预约。
 - `bk del 6e957ef1`：用短 ID 取消自己的预约。
 - `bk reset --yes`：清空当前数据目录里的台账、日志、备份。
@@ -78,6 +82,51 @@ python3 -m pip install -e '.[gpu]'
 - `unknown`：系统无法从 `/proc/<pid>` 读取 UID；只告警未知，不直接判定违规。
 
 shared 模式按 UID 分别匹配预约；同一 UID 的多个 CUDA 进程可以归属同一条预约。违规进程在 GPU 标签中显示 `!N`，并在进程表中标红。`bk status` 也会输出相同的进程与预约匹配结果。
+
+### 全天候审计
+
+前台启动监测器：
+
+```bash
+bk monitor
+```
+
+默认每 2 秒采样、每 60 秒写一批汇总。监测器不会每秒写文件：只有进程开始、结束或预约授权变化时才追加事件，利用率在窗口结束时批量追加。常用试验参数：
+
+```bash
+bk monitor --once
+bk monitor --samples 5 --interval 1 --rollup 5 --verbose
+bk usage --limit 20
+bk usage --rollups --limit 20
+```
+
+数据文件：
+
+- `usage-events.jsonl`：只追加的 `process-start`、`process-stop`、`authorization-change` 事件。
+- `usage-rollups.jsonl`：按 GPU、UID、授权状态和预约集合聚合的利用率；包含进程数、SM、显存、整卡利用率和观察时长。
+- `usage-state.json`：当前进程状态，用于监测器重启后避免重复产生开始事件。
+- `usage.lock`：保证同一数据目录只有一个监测器运行。
+
+预约存在但没有对应进程时仍会生成 `status=ok`、`avg_process_count=0` 的汇总，用来识别预约空置。`bk reset --yes` 会在监测器未运行时一起清理这些审计文件；监测器正在运行时 reset 会因 `usage.lock` 超时而拒绝执行。
+
+仓库提供 [deploy/bk-monitor.service](deploy/bk-monitor.service) 用户级 systemd 模板。正式启用前创建 `~/.config/bk/bk.env`：
+
+```bash
+BK_DATA_DIR=/data2/shared/bk
+BK_GPU_COUNT=8
+BK_MAX_SHARED_USERS=2
+```
+
+然后安装和启动：
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/bk-monitor.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now bk-monitor.service
+```
+
+服务模板使用 `Nice=10` 和 idle IO 调度，降低对训练任务的影响。实验部署建议先用 `--samples` 有界运行验证，不要直接启用常驻服务。
 
 没有安装 `nvidia-ml-py` 时会回退到 `nvidia-smi`，但只能稳定提供整卡级指标，进程级行为监测应以 NVML 模式运行。MIG 下 NVML 可能不提供进程 SM 利用率，此时该列显示 `-`，PID、UID 和显存归属仍可继续工作。在容器里运行时必须看到宿主机 `/proc` PID 命名空间，例如使用 `--pid=host`。
 

@@ -55,5 +55,6 @@ def _classify_process(gpu: int, process: GpuProcessSnapshot, current: Sequence[d
         ids = tuple(str(item.get("id", "")) for item in matches)
         return ProcessUsage(gpu, process, USAGE_AUTHORIZED, ids)
     if user_reservations:
-        return ProcessUsage(gpu, process, USAGE_WRONG_GPU)
+        ids = tuple(str(item.get("id", "")) for item in user_reservations)
+        return ProcessUsage(gpu, process, USAGE_WRONG_GPU, ids)
     return ProcessUsage(gpu, process, USAGE_UNRESERVED)

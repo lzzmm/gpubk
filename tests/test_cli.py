@@ -24,12 +24,14 @@ def ceil_5m(dt):
 
 
 class CliTests(unittest.TestCase):
-    def run_bk(self, args, data_dir):
+    def run_bk(self, args, data_dir, extra_env=None):
         env = os.environ.copy()
         env["PYTHONPATH"] = str(ROOT / "src")
         env["BK_DATA_DIR"] = str(data_dir)
         env["BK_GPU_COUNT"] = "1"
         env["BK_MAX_SHARED_USERS"] = "2"
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
             [sys.executable, "-m", "bk"] + args,
             text=True,
@@ -239,12 +241,61 @@ class CliTests(unittest.TestCase):
             self.assertIn("Legend: . free, M mine", result.stdout)
             self.assertIn("shared record count", result.stdout)
 
+    def test_monitor_once_writes_usage_events_and_rollups(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            simulation = data_dir / "gpu-sim.json"
+            simulation.write_text(
+                json.dumps(
+                    {
+                        "gpus": [
+                            {
+                                "index": 0,
+                                "name": "sim",
+                                "utilization_percent": 50,
+                                "processes": [
+                                    {
+                                        "pid": 1234,
+                                        "uid": os.getuid(),
+                                        "username": "current",
+                                        "command": "python train.py",
+                                        "gpu_memory_mb": 1024,
+                                        "sm_utilization_percent": 40,
+                                        "host_start_id": "start-1234",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            monitor = self.run_bk(
+                ["monitor", "--once"],
+                data_dir,
+                {"BK_GPU_SIM_FILE": str(simulation)},
+            )
+            events = self.run_bk(["usage"], data_dir)
+            rollups = self.run_bk(["usage", "--rollups"], data_dir)
+
+            self.assertEqual(monitor.returncode, 0, monitor.stderr)
+            self.assertIn("monitor started", monitor.stdout)
+            self.assertIn("process-start", monitor.stdout)
+            self.assertEqual(events.returncode, 0, events.stderr)
+            self.assertIn('"status": "unreserved"', events.stdout)
+            self.assertEqual(rollups.returncode, 0, rollups.stderr)
+            self.assertIn('"partial": true', rollups.stdout)
+
     def test_reset_clears_ledger_logs_and_backups(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             create = self.run_bk(["1", "30m"], data_dir)
             self.assertEqual(create.returncode, 0, create.stderr)
             self.assertTrue((data_dir / "ops.log").exists())
+            (data_dir / "usage-events.jsonl").write_text("{}\n", encoding="utf-8")
+            (data_dir / "usage-rollups.jsonl").write_text("{}\n", encoding="utf-8")
+            (data_dir / "usage-state.json").write_text('{"version": 1, "processes": {}}\n', encoding="utf-8")
 
             reset = self.run_bk(["reset", "--yes"], data_dir)
             self.assertEqual(reset.returncode, 0, reset.stderr)
@@ -252,6 +303,9 @@ class CliTests(unittest.TestCase):
             ledger = json.loads((data_dir / "ledger.json").read_text(encoding="utf-8"))
             self.assertEqual(ledger["reservations"], [])
             self.assertFalse((data_dir / "ops.log").exists())
+            self.assertFalse((data_dir / "usage-events.jsonl").exists())
+            self.assertFalse((data_dir / "usage-rollups.jsonl").exists())
+            self.assertFalse((data_dir / "usage-state.json").exists())
 
 
 if __name__ == "__main__":
