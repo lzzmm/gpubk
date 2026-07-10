@@ -18,6 +18,8 @@ bk d <number_or_short_id>
 bk l
 bk m
 bk u
+bk agent context
+bk agent recommend 2 1h30m --mem 12g
 bk reset --yes
 ```
 
@@ -32,6 +34,8 @@ bk reset --yes
 - `bk doctor`：只读检查台账里违反当前策略的记录，例如 shared 超容量或 exclusive 重叠。
 - `bk monitor`：低开销持续采集 GPU 进程行为，记录状态变化和分钟级汇总。
 - `bk usage`：查看最近的进程事件；`bk usage --rollups` 查看利用率汇总。
+- `bk agent context`：输出版本化、脱敏的完整资源上下文 JSON。
+- `bk agent recommend 2 1h30m --mem 12g`：只读计算合法卡组和最早时段，不写台账。
 - `bk edit 1 --duration 8h`：用列表序号修改自己的预约。
 - `bk del 6e957ef1`：用短 ID 取消自己的预约。
 - `bk reset --yes`：清空当前数据目录里的台账、日志、备份。
@@ -81,6 +85,44 @@ export BK_DIR_MODE=2770
 ```
 
 环境变量优先级高于 `config.json`。
+
+## Agent 与 JSON 接口
+
+Agent 不需要解析彩色 TUI 或人类文本。稳定机器接口使用 `schema_version=bk.agent.v1`：
+
+```bash
+bk agent context --compact
+bk agent recommend 2 1h30m --mode s --mem 12g --compact
+bk 2 1h30m --mem 12g --op-id agent-run-20260711-001 --json
+bk l --json
+bk j --json
+```
+
+`context` 包含当前 UID、调度策略、每卡实时状态、近期预测负载、显存、预约和能力声明；不包含完整进程参数、私有 job spec 或任意 token。`recommend` 是严格只读的，返回推荐卡组、起止时间、是否排队、置信度、每卡评分、预约压力、显存余量和警告。显式 `--start` 保持 exact 语义，冲突时 `available=false` 并给出 `nearest_available`。
+
+实际写入建议总是传唯一 `--op-id`。相同 UID 重试同一个 operation ID 会返回原结果，不会重复预约。`--json` 成功和业务错误都输出单个 JSON 对象；冲突/参数错误退出码为 `2`，只读推荐无合法精确时段退出码为 `3`。
+
+### 外部 AI allocator
+
+管理员可以选择配置一个本地 Agent 子进程：
+
+```bash
+export BK_ALLOCATOR_COMMAND='python3 /opt/bk/my_allocator.py'
+export BK_ALLOCATOR_TIMEOUT_SECONDS=3
+export BK_ALLOCATOR_WEIGHT=5
+```
+
+`bk` 以 `shell=False` 启动它，通过 stdin 发送 `bk.allocator.v1` JSON；Agent 在 stdout 返回：
+
+```json
+{
+  "schema_version": "bk.allocator.v1",
+  "gpu_order": [3, 2, 1, 0],
+  "reason": "spread recent thermal and memory pressure"
+}
+```
+
+`gpu_order` 必须是所有 GPU 索引的完整排列。外部顺序只以有界权重参与本地评分，最终方案仍强制经过 exclusive/shared 冲突、5 分钟粒度、显存预算和文件事务校验，Agent 无法绕过安全约束。超时、崩溃、非法 JSON、重复或越界卡号会回退内置算法并在 JSON 中给出 warning。该命令是明确的信任边界：默认关闭；启用后它以配置者当前 UID 运行，可自行访问网络或本地文件，因此只应配置受信任程序。
 
 私有默认权限为目录 `0700`、文件 `0600`。共享部署必须同时配置 `file_mode=0660`、`dir_mode=2770`，并让共享目录具有正确组所有权和 setgid 位；程序不会擅自 `chown` 或修改已存在目录的权限。原子替换产生的新台账、journal、备份和日志都会保持配置的文件模式。
 
@@ -304,6 +346,7 @@ e 将当前选中的预约载入时间轴编辑模式
 ↑/↓ 移动 GPU 光标
 space 选中/取消当前 GPU，支持多卡
 +/- 或 [/] 缩短/延长持续时间，每次 5 分钟
+m 输入每张 GPU 的预计显存，例如 12g；输入 - 清除声明
 1-9 设置 GPU 数量，并立即自动跳到最近满足数量的时间和卡组
 s/x 切换 shared/exclusive
 f 按当前已选 GPU 数量，自动查找任意 GPU 的最近可用时段
@@ -317,6 +360,7 @@ Esc 取消
 - `1-9`、`f` / `g` 从当前时间游标向后搜索，并把时间轴直接定位到结果；它们只更新预览，不会直接写入，仍需按 `Enter` 确认。
 - `f` 可以自动更换 GPU；如果当前没有选卡，则按 1 张 GPU 查找。`g` 要求至少选中一张 GPU，并保持这些卡不变。
 - Edit 会预载原预约的开始时间、时长、GPU 和模式；校验和自动找位时都会排除原记录，不会与自己冲突，按 `r` 可恢复原值。
+- Add/Edit 顶部同时显示预计显存和当前所选卡中最小的物理空闲显存；shared 预览会实时执行显存预算校验。
 - add/edit 进入时锁定时间轴基准，操作期间不会因跨过 5 分钟边界而自动跳格。
 - shared 预览使用青绿色，exclusive 预览使用橙色，冲突预览使用红色。
 - add 预览区间自身会闪烁；原来选中的预约在 add/edit 期间保持静止，避免两处同时闪烁。edit 预览保持常亮，便于和原区间比较。

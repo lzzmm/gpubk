@@ -70,6 +70,7 @@ class EditRequest:
     count: Optional[int] = None
     allow_queue: bool = False
     expected_memory_mb: Optional[int] = None
+    update_expected_memory: bool = False
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None
 
 

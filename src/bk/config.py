@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 
 DEFAULT_PRIVATE_FILE_MODE = 0o600
@@ -27,6 +28,9 @@ class Config:
     worker_claim_timeout_seconds: float = 30.0
     file_mode: int = DEFAULT_PRIVATE_FILE_MODE
     dir_mode: int = DEFAULT_PRIVATE_DIR_MODE
+    allocator_command: Optional[Tuple[str, ...]] = None
+    allocator_timeout_seconds: float = 3.0
+    allocator_weight: float = 5.0
 
 
 def _read_config_file(data_dir: Path) -> Dict[str, Any]:
@@ -141,6 +145,8 @@ def load_config() -> Config:
     else:
         state_home = Path(os.environ.get("XDG_STATE_HOME", "~/.local/state")).expanduser()
         job_log_dir = state_home / "bk" / "jobs"
+    allocator_raw = os.environ.get("BK_ALLOCATOR_COMMAND", raw.get("allocator_command"))
+    allocator_command = _command_value(allocator_raw)
 
     return Config(
         data_dir=data_dir,
@@ -157,4 +163,43 @@ def load_config() -> Config:
         worker_claim_timeout_seconds=_float_value(raw, "worker_claim_timeout_seconds", 30.0),
         file_mode=_mode_value(raw, "file_mode", DEFAULT_PRIVATE_FILE_MODE, directory=False),
         dir_mode=_mode_value(raw, "dir_mode", DEFAULT_PRIVATE_DIR_MODE, directory=True),
+        allocator_command=allocator_command,
+        allocator_timeout_seconds=_float_value(
+            {
+                **raw,
+                "allocator_timeout_seconds": os.environ.get(
+                    "BK_ALLOCATOR_TIMEOUT_SECONDS",
+                    raw.get("allocator_timeout_seconds", 3.0),
+                ),
+            },
+            "allocator_timeout_seconds",
+            3.0,
+        ),
+        allocator_weight=_float_value(
+            {
+                **raw,
+                "allocator_weight": os.environ.get(
+                    "BK_ALLOCATOR_WEIGHT",
+                    raw.get("allocator_weight", 5.0),
+                ),
+            },
+            "allocator_weight",
+            5.0,
+        ),
     )
+
+
+def _command_value(value: Any) -> Optional[Tuple[str, ...]]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        argv = shlex.split(value)
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        argv = list(value)
+    else:
+        raise ValueError("allocator_command must be a command string or string array")
+    if not argv or not argv[0] or len(argv) > 64:
+        raise ValueError("allocator_command must contain 1-64 arguments")
+    if any("\x00" in item for item in argv):
+        raise ValueError("allocator_command contains a NUL byte")
+    return tuple(argv)

@@ -201,7 +201,7 @@ def edit_booking(store: LedgerStore, config: Config, request: EditRequest) -> Bo
             raise BookingError(f"unsupported booking mode: {mode}")
         expected_memory_mb = _normalize_expected_memory(
             request.expected_memory_mb
-            if request.expected_memory_mb is not None
+            if request.update_expected_memory
             else reservation.get("expected_memory_mb")
         )
         if mode == MODE_SHARED and config.require_shared_memory and expected_memory_mb is None:
@@ -886,6 +886,16 @@ def _reservation_pressure_score(
         overlap = max(0.0, (min(end, item_end) - max(start, item_start)).total_seconds())
         overlap_total += overlap
     return round(100.0 * overlap_total / duration / max(1, max_shared_users), 3)
+
+
+def reservation_pressure_score(
+    ledger: dict,
+    gpu: int,
+    start: datetime,
+    end: datetime,
+    max_shared_users: int,
+) -> float:
+    return _reservation_pressure_score(ledger, gpu, start, end, max_shared_users)
 
 
 def _validate_gpu_index(config: Config, gpu: int) -> None:

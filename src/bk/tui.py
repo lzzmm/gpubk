@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Sequence, Tuple
 
+from .advisor import build_gpu_advice
+from .allocator import AllocatorDecision, apply_external_allocator
 from .config import Config
 from .gpu import GpuSnapshot, snapshot
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest, EditRequest
@@ -20,7 +22,7 @@ from .scheduler import (
     max_shared_record_count_for_reservation,
 )
 from .storage import LedgerStore
-from .timeparse import format_local_range, parse_iso, utc_now
+from .timeparse import format_local_range, parse_iso, parse_memory_mb, utc_now
 from .usage import ProcessUsage, classify_process_usage, summarize_process_command
 
 
@@ -78,6 +80,9 @@ class TuiState:
     add_duration_steps: int = 6
     add_selected_gpus: set[int] = field(default_factory=set)
     add_booking_mode: str = MODE_SHARED
+    add_expected_memory_mb: Optional[int] = None
+    gpu_memory_capacity_mb: dict[int, int] = field(default_factory=dict)
+    gpu_memory_free_mb: dict[int, int] = field(default_factory=dict)
 
     @property
     def slot_minutes(self) -> int:
@@ -161,7 +166,7 @@ def _init_curses(stdscr) -> None:
 
 def _handle_key(stdscr, key: int, config: Config, store: LedgerStore, state: TuiState) -> None:
     if state.editor_active:
-        _handle_add_key(key, config, store, state)
+        _handle_add_key(key, config, store, state, stdscr=stdscr)
         return
     if key in (ord("r"), ord("R")):
         state.message = "refreshed"
@@ -223,6 +228,7 @@ def _handle_key(stdscr, key: int, config: Config, store: LedgerStore, state: Tui
                 "TUI refreshes telemetry every second without a key press",
                 "a add   e edit selected   d delete selected",
                 "Add/Edit: arrows move time/GPU, space toggles GPU, +/- duration",
+                "Add/Edit: m sets expected memory per GPU; - clears it",
                 "Add/Edit: 1-9 set GPU count + auto-find, f any GPUs, g fixed GPUs",
                 "Add/Edit: s shared, x exclusive, r reset, Enter submit, Esc cancel",
                 "Timeline: . free, solid = one booking, split = two shared bookings",
@@ -293,6 +299,14 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
     focused_gpu = state.selected_gpu if state.focus == FOCUS_GPUS and not state.editor_active else None
     selected_id = _timeline_selected_id(active, state)
     gpu_snapshots = _normalized_snapshots(config)
+    state.gpu_memory_capacity_mb = {
+        gpu.index: gpu.memory_total_mb for gpu in gpu_snapshots if gpu.memory_total_mb > 0
+    }
+    state.gpu_memory_free_mb = {
+        gpu.index: max(0, gpu.memory_total_mb - gpu.memory_used_mb)
+        for gpu in gpu_snapshots
+        if gpu.memory_total_mb > 0
+    }
     usage_by_gpu = classify_process_usage(gpu_snapshots, active, now)
     gpu_by_index = {gpu.index: gpu for gpu in gpu_snapshots}
 
@@ -429,10 +443,11 @@ def _editor_banner_text(state: TuiState, preview: AddPreview) -> str:
     local_start = preview.start.astimezone()
     local_end = preview.end.astimezone()
     status = "READY" if preview.valid else "BLOCKED"
+    memory = _editor_memory_label(state)
     return (
         f" {operation} {mode} | {len(preview.selected_gpus)} GPU [{gpu_text}] | "
         f"{_weekday_label(local_start)} {local_start:%m-%d %H:%M}->{local_end:%H:%M} | "
-        f"{_duration_text(local_end - local_start)} | {status} "
+        f"{_duration_text(local_end - local_start)} | {memory} | {status} "
     )
 
 
@@ -726,9 +741,9 @@ def _draw_footer(stdscr, height: int, width: int, state: TuiState, preview: Opti
         message = state.message or _preview_status_text(preview, operation)
         message_color = COLOR_ERROR if state.error or not preview.valid else _preview_color(preview.mode)
         if state.add_mode:
-            footer = " ADD | arrows | Space | 1-9 GPUs | +/- dur | s/x | f/g find | r | Enter/Esc "
+            footer = " ADD | arrows | Space | 1-9 GPUs | +/- dur | m memory | s/x | f/g | r | Enter/Esc "
         else:
-            footer = " EDIT | arrows | Space | 1-9 GPUs | +/- dur | s/x | f/g find | r | Enter/Esc "
+            footer = " EDIT | arrows | Space | 1-9 GPUs | +/- dur | m memory | s/x | f/g | r | Enter/Esc "
     elif state.focus == FOCUS_GPUS:
         message = state.message or f"GPU {state.selected_gpu} focus"
         message_color = COLOR_ERROR if state.error else COLOR_SELECTED
@@ -751,6 +766,7 @@ def _start_add_select(config: Config, state: TuiState) -> None:
     state.add_duration_steps = max(1, state.add_duration_steps)
     state.add_selected_gpus = {state.add_cursor_gpu} if config.gpu_count else set()
     state.add_booking_mode = MODE_SHARED
+    state.add_expected_memory_mb = None
     state.message = ""
     state.error = False
 
@@ -782,11 +798,20 @@ def _load_edit_state(config: Config, state: TuiState, reservation: dict) -> None
     state.add_selected_gpus = gpus
     state.add_cursor_gpu = min(gpus) if gpus else 0
     state.add_booking_mode = reservation.get("mode") if reservation.get("mode") in {MODE_SHARED, MODE_EXCLUSIVE} else MODE_SHARED
+    raw_memory = reservation.get("expected_memory_mb")
+    state.add_expected_memory_mb = int(raw_memory) if raw_memory is not None else None
     state.message = ""
     state.error = False
 
 
-def _handle_add_key(key: int, config: Config, store: LedgerStore, state: TuiState) -> None:
+def _handle_add_key(
+    key: int,
+    config: Config,
+    store: LedgerStore,
+    state: TuiState,
+    *,
+    stdscr=None,
+) -> None:
     operation = "edit" if state.edit_mode else "add"
     if key in (27, ord("q"), ord("Q")):
         _close_editor(state)
@@ -835,6 +860,25 @@ def _handle_add_key(key: int, config: Config, store: LedgerStore, state: TuiStat
         state.add_booking_mode = MODE_EXCLUSIVE
         _clear_editor_feedback(state)
         return
+    if key in (ord("m"), ord("M")):
+        if stdscr is None:
+            state.message = "press m in the live TUI to enter expected memory"
+            state.error = False
+            return
+        default = _memory_input_text(state.add_expected_memory_mb)
+        raw = _prompt_line(stdscr, "Memory per GPU (12g/4096m, - clears)", default)
+        if raw == "-":
+            state.add_expected_memory_mb = None
+        elif raw:
+            try:
+                state.add_expected_memory_mb = parse_memory_mb(raw)
+            except ValueError as exc:
+                state.message = str(exc)
+                state.error = True
+                return
+        state.message = f"expected memory: {_editor_memory_label(state)}"
+        state.error = False
+        return
     if key in (ord("r"), ord("R")):
         _reset_editor(config, store, state)
         return
@@ -870,6 +914,9 @@ def _handle_add_key(key: int, config: Config, store: LedgerStore, state: TuiStat
                         preferred_gpus=list(preview.selected_gpus),
                         count=len(preview.selected_gpus),
                         allow_queue=False,
+                        expected_memory_mb=state.add_expected_memory_mb,
+                        update_expected_memory=True,
+                        gpu_memory_capacity_mb=state.gpu_memory_capacity_mb,
                     ),
                 )
             else:
@@ -884,6 +931,8 @@ def _handle_add_key(key: int, config: Config, store: LedgerStore, state: TuiStat
                         mode=preview.mode,
                         preferred_gpus=list(preview.selected_gpus),
                         allow_queue=False,
+                        expected_memory_mb=state.add_expected_memory_mb,
+                        gpu_memory_capacity_mb=state.gpu_memory_capacity_mb,
                     ),
                 )
         except BookingError as exc:
@@ -921,6 +970,24 @@ def _find_add_slot(
     duration = timedelta(minutes=max(1, state.add_duration_steps) * ADD_STEP_MINUTES)
     mode = state.add_booking_mode if state.add_booking_mode in {MODE_SHARED, MODE_EXCLUSIVE} else MODE_SHARED
     ledger = _availability_ledger(store.load(), state)
+    advice = build_gpu_advice(config)
+    if advice.memory_capacities_mb:
+        state.gpu_memory_capacity_mb = advice.memory_capacities_mb
+    allocator = (
+        apply_external_allocator(
+            config,
+            store,
+            _current_actor(),
+            advice,
+            count=count,
+            duration_seconds=int(duration.total_seconds()),
+            start_at=earliest_start,
+            mode=mode,
+            expected_memory_mb=state.add_expected_memory_mb,
+        )
+        if not fixed_gpus
+        else AllocatorDecision(list(advice.order), dict(advice.scores), "fixed-gpu")
+    )
     slot = find_earliest_slot(
         ledger,
         config,
@@ -931,6 +998,10 @@ def _find_add_slot(
         _current_actor().uid,
         preferred_gpus=selected if fixed_gpus else None,
         allow_queue=True,
+        gpu_order=allocator.order,
+        gpu_scores=allocator.scores,
+        expected_memory_mb=state.add_expected_memory_mb,
+        gpu_memory_capacity_mb=state.gpu_memory_capacity_mb,
     )
     if slot is None:
         scope = "selected GPUs" if fixed_gpus else f"{count} GPU"
@@ -952,8 +1023,11 @@ def _find_add_slot(
     search_kind = "fixed" if fixed_gpus else "auto"
     state.message = (
         f"{search_kind} found {count} GPU [{gpu_text}] at "
-        f"{_weekday_label(local_start)} {local_start:%m-%d %H:%M}; Enter confirms"
+        f"{_weekday_label(local_start)} {local_start:%m-%d %H:%M}; "
+        f"{allocator.source}; Enter confirms"
     )
+    if allocator.warning:
+        state.message = f"{state.message} ({allocator.warning})"
     state.error = False
 
 
@@ -1126,6 +1200,9 @@ def _build_add_preview(ledger: dict, config: Config, state: TuiState, view_start
             mode,
             _current_actor().uid,
             config.max_shared_users,
+            state.add_expected_memory_mb,
+            state.gpu_memory_capacity_mb,
+            config.shared_memory_reserve_mb,
         )
         if not ok:
             return AddPreview(start, end, selected, cursor_gpu, mode, False, reason, blink=state.add_mode)
@@ -1143,6 +1220,32 @@ def _preview_status_text(preview: AddPreview, operation: str = "add") -> str:
         f"{_weekday_label(local_start)} {local_start:%m-%d %H:%M}->{local_end:%m-%d %H:%M} "
         f"{duration} | {status}"
     )
+
+
+def _memory_input_text(value: Optional[int]) -> str:
+    if value is None:
+        return ""
+    if value % 1024 == 0:
+        return f"{value // 1024}g"
+    return f"{value}m"
+
+
+def _editor_memory_label(state: TuiState) -> str:
+    expected = "auto" if state.add_expected_memory_mb is None else _memory_compact(state.add_expected_memory_mb)
+    selected_free = [
+        state.gpu_memory_free_mb[gpu]
+        for gpu in state.add_selected_gpus
+        if gpu in state.gpu_memory_free_mb
+    ]
+    if selected_free:
+        return f"Mem {expected} free {_memory_compact(min(selected_free))}"
+    return f"Mem {expected}"
+
+
+def _memory_compact(value: int) -> str:
+    if value >= 1024:
+        return f"{value / 1024:.1f}G"
+    return f"{value}M"
 
 
 def _preview_color(mode: str) -> int:

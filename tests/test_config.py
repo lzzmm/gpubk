@@ -1,4 +1,5 @@
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -50,6 +51,22 @@ class ConfigTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(ValueError, "executable bits"):
                     load_config()
+
+    def test_allocator_command_is_opt_in_and_shell_split_without_shell_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "BK_DATA_DIR": tmp,
+                    "BK_ALLOCATOR_COMMAND": f"{sys.executable} -m example_allocator",
+                    "BK_ALLOCATOR_WEIGHT": "7.5",
+                },
+                clear=True,
+            ):
+                config = load_config()
+
+            self.assertEqual(config.allocator_command, (sys.executable, "-m", "example_allocator"))
+            self.assertEqual(config.allocator_weight, 7.5)
 
 
 if __name__ == "__main__":

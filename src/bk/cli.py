@@ -10,6 +10,7 @@ from datetime import timedelta
 from typing import List, Optional
 
 from .advisor import GpuAdvice, build_gpu_advice
+from .allocator import AllocatorDecision, apply_external_allocator
 from .config import Config, load_config
 from .gpu import snapshot
 from .monitor import UsageAuditStore, run_monitor
@@ -22,6 +23,7 @@ from .scheduler import (
     list_active,
     shared_memory_headroom_for_reservation,
 )
+from .service import AGENT_SCHEMA_VERSION, build_agent_context, public_reservation, recommend_booking
 from .storage import LedgerStore
 from .timeparse import (
     format_local,
@@ -72,7 +74,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if head in {"worker", "w"}:
             return _worker_command(argv[1:], config, store)
         if head in {"jobs", "j"}:
-            return _jobs_command(store)
+            return _jobs_command(argv[1:], store)
         if head in {"job-log", "jl"}:
             return _job_log_command(argv[1:], config, store)
         if head in {"job-retry", "jr"}:
@@ -80,6 +82,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         if head in {"status", "timeline", "st"}:
             _print_status(config, store)
             return 0
+        if head in {"agent", "ai"}:
+            return _agent_command(argv[1:], config, store)
         if head in {"add", "a"}:
             return _add_interactive(config, store)
         if head in {"edit", "e"}:
@@ -93,7 +97,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if head in {"doctor", "dr"}:
             return _doctor_command(config, store)
         if head in {"list", "ls", "l"}:
-            return _list_command(store)
+            return _list_command(argv[1:], store)
         if head in {"-h", "--help", "help"}:
             _print_help()
             return 0
@@ -101,6 +105,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         _print_help(file=sys.stderr)
         return 2
     except (BookingError, ValueError, TimeoutError, OSError) as exc:
+        if _json_requested(argv):
+            print(
+                json.dumps(
+                    {
+                        "schema_version": AGENT_SCHEMA_VERSION,
+                        "kind": "error",
+                        "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+            return 2
         print(f"bk: {exc}", file=sys.stderr)
         return 2
 
@@ -160,7 +177,7 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
         _print_status(config, store)
         return True
     if head in {"list", "ls", "l"}:
-        _list_command(store)
+        _list_command(args[1:], store)
         return True
     if head in {"log", "logs", "lg"}:
         _log_command(config, store)
@@ -193,13 +210,16 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
         _worker_command(args[1:], config, store)
         return True
     if head in {"jobs", "j"}:
-        _jobs_command(store)
+        _jobs_command(args[1:], store)
         return True
     if head in {"job-log", "jl"}:
         _job_log_command(args[1:], config, store)
         return True
     if head in {"job-retry", "jr"}:
         _job_retry_command(args[1:], store)
+        return True
+    if head in {"agent", "ai"}:
+        _agent_command(args[1:], config, store)
         return True
     if _looks_like_auto_request(args):
         _book_command(args, MODE_SHARED, config, store)
@@ -224,6 +244,7 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
     parser.add_argument("--gpu", help="comma separated GPU indexes, for example 0,1")
     parser.add_argument("--mem", help="expected memory on each GPU, for example 12g or 4096m")
     parser.add_argument("--op-id", help="idempotency key for agents and retry-safe scripts")
+    parser.add_argument("--json", action="store_true", help="emit a stable machine-readable result")
     args = parser.parse_args(booking_argv)
 
     start_raw = args.start or "now"
@@ -233,6 +254,21 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
     start_at = parse_start(start_raw)
     advice = build_gpu_advice(config)
     actor = _current_actor()
+    allocator = (
+        apply_external_allocator(
+            config,
+            store,
+            actor,
+            advice,
+            count=args.count,
+            duration_seconds=duration_seconds,
+            start_at=start_at,
+            mode=mode,
+            expected_memory_mb=expected_memory_mb,
+        )
+        if preferred is None
+        else AllocatorDecision(list(advice.order), dict(advice.scores), "fixed-gpu")
+    )
     job_spec = (
         prepare_job_spec(config, actor, command_argv, os.getcwd())
         if command_argv is not None
@@ -245,8 +281,8 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
         start_at=start_at,
         mode=mode,
         preferred_gpus=preferred,
-        gpu_order=advice.order,
-        gpu_scores=advice.scores,
+        gpu_order=allocator.order,
+        gpu_scores=allocator.scores,
         allow_queue=args.start is None,
         op_id=args.op_id,
         job_spec_id=job_spec.spec_id if job_spec is not None else None,
@@ -272,12 +308,25 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
         status = "queued"
     else:
         status = "created"
+    if args.json:
+        print(
+            json.dumps(
+                _booking_result_payload(status, reservation, actor, advice, allocator, store.last_warning),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 0
     gpus = ",".join(str(item) for item in reservation["gpus"])
     print(
         f"{status}: {_short_id(reservation)} mode={reservation['mode']} "
         f"gpu={gpus} {format_local_range(reservation['start_at'], reservation['end_at'])}"
     )
     _print_booking_advice(config, store, reservation, advice, expected_memory_mb)
+    if allocator.source == "external":
+        print(f"allocator: external{f' ({allocator.reason})' if allocator.reason else ''}")
+    elif allocator.warning:
+        print(f"warning: {allocator.warning}", file=sys.stderr)
     if isinstance(reservation.get("job"), dict):
         print(
             f"job: {reservation['job'].get('status')} "
@@ -347,9 +396,25 @@ def _worker_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     return 0 if summary.failed == 0 else 1
 
 
-def _jobs_command(store: LedgerStore) -> int:
+def _jobs_command(argv: List[str], store: LedgerStore) -> int:
+    parser = argparse.ArgumentParser(prog="bk jobs")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
     actor = _current_actor()
     reservations = _own_job_reservations(store, actor)
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "schema_version": AGENT_SCHEMA_VERSION,
+                    "kind": "jobs",
+                    "jobs": [public_reservation(item, actor) for item in reservations],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 0
     if not reservations:
         print("No jobs.")
         return 0
@@ -407,9 +472,66 @@ def _job_retry_command(argv: List[str], store: LedgerStore) -> int:
     return 0
 
 
+def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
+    parser = argparse.ArgumentParser(prog="bk agent")
+    subparsers = parser.add_subparsers(dest="action", required=True)
+    context_parser = subparsers.add_parser("context", aliases=["ctx"], help="emit privacy-safe allocation context")
+    context_parser.add_argument("--compact", action="store_true")
+    recommend_parser = subparsers.add_parser("recommend", aliases=["rec"], help="compute a read-only legal placement")
+    recommend_parser.add_argument("count", type=int)
+    recommend_parser.add_argument("duration")
+    recommend_parser.add_argument("--mode", default="s", choices=["s", "shared", "x", "exclusive"])
+    recommend_parser.add_argument("--start", help="exact ISO start; omitted means earliest queueable slot")
+    recommend_parser.add_argument("--gpu", help="fixed comma-separated GPU indexes")
+    recommend_parser.add_argument("--mem", help="expected memory per GPU, e.g. 12g")
+    recommend_parser.add_argument("--compact", action="store_true")
+    args = parser.parse_args(argv)
+    actor = _current_actor()
+    try:
+        if args.action in {"context", "ctx"}:
+            payload = build_agent_context(config, store, actor)
+            compact = args.compact
+            exit_code = 0
+        else:
+            mode = MODE_EXCLUSIVE if args.mode in {"x", "exclusive"} else MODE_SHARED
+            payload = recommend_booking(
+                config,
+                store,
+                actor,
+                count=args.count,
+                duration_seconds=parse_duration_seconds(args.duration),
+                start_at=parse_start(args.start or "now"),
+                mode=mode,
+                preferred_gpus=_parse_gpu_list(args.gpu) if args.gpu else None,
+                expected_memory_mb=parse_memory_mb(args.mem) if args.mem else None,
+                allow_queue=args.start is None,
+            )
+            compact = args.compact
+            exit_code = 0 if payload["available"] else 3
+    except (BookingError, ValueError, OSError) as exc:
+        payload = {
+            "schema_version": AGENT_SCHEMA_VERSION,
+            "kind": "error",
+            "error": {"type": exc.__class__.__name__, "message": str(exc)},
+        }
+        compact = getattr(args, "compact", False)
+        exit_code = 2
+    print(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=None if compact else 2,
+        )
+    )
+    return exit_code
+
+
 def _add_interactive(config: Config, store: LedgerStore) -> int:
     actor = _current_actor()
-    mode_raw = input("mode [shared/exclusive] (shared): ").strip() or MODE_SHARED
+    mode_raw = input("mode [s/x] (shared): ").strip() or MODE_SHARED
+    if mode_raw in {"s", "x"}:
+        mode_raw = MODE_SHARED if mode_raw == "s" else MODE_EXCLUSIVE
     if mode_raw not in {MODE_SHARED, MODE_EXCLUSIVE}:
         raise ValueError("mode must be shared or exclusive")
     count = int(input("gpu count: ").strip())
@@ -486,17 +608,21 @@ def _edit_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     parser.add_argument("--start")
     parser.add_argument("--gpu", help="comma separated GPU indexes; use with --count to change GPU count")
     parser.add_argument("--count", type=int)
-    parser.add_argument("--mode", choices=[MODE_SHARED, MODE_EXCLUSIVE])
+    parser.add_argument("--mode", choices=["s", MODE_SHARED, "x", MODE_EXCLUSIVE])
+    parser.add_argument("--mem", help="expected memory per GPU; use - to clear")
     parser.add_argument("--queue", action="store_true", help="allow moving to the next available slot")
     args = parser.parse_args(argv)
 
     actor = _current_actor()
     token = args.reservation_id or _prompt_reservation_token(store, actor, "edit")
     reservation_id = _resolve_own_reservation_id(store, token, actor)
-    if not any([args.duration, args.start, args.gpu, args.count, args.mode, args.queue]):
+    if not any([args.duration, args.start, args.gpu, args.count, args.mode, args.mem, args.queue]):
         return _edit_interactive(config, store, reservation_id, actor)
 
     preferred = _parse_gpu_list(args.gpu) if args.gpu else None
+    advice = build_gpu_advice(config)
+    expected_memory_mb = None if args.mem == "-" else (parse_memory_mb(args.mem) if args.mem else None)
+    edit_mode = MODE_EXCLUSIVE if args.mode == "x" else (MODE_SHARED if args.mode == "s" else args.mode)
     result = edit_booking(
         store,
         config,
@@ -505,10 +631,15 @@ def _edit_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             reservation_id=reservation_id,
             start_at=parse_start(args.start) if args.start else None,
             duration_seconds=parse_duration_seconds(args.duration) if args.duration else None,
-            mode=args.mode,
+            mode=edit_mode,
             preferred_gpus=preferred,
+            gpu_order=advice.order,
+            gpu_scores=advice.scores,
             count=args.count,
             allow_queue=args.queue,
+            expected_memory_mb=expected_memory_mb,
+            update_expected_memory=args.mem is not None,
+            gpu_memory_capacity_mb=advice.memory_capacities_mb,
         ),
     )
     _print_edit_result(result.reservation, result)
@@ -520,14 +651,21 @@ def _edit_interactive(config: Config, store: LedgerStore, reservation_id: str, a
     print(f"editing {_short_id(reservation)}")
     print(f"current: mode={reservation['mode']} gpu={','.join(map(str, reservation.get('gpus', [])))} {format_local_range(reservation['start_at'], reservation['end_at'])}")
     mode = input(f"mode [{reservation['mode']}]: ").strip() or None
+    if mode in {"s", "x"}:
+        mode = MODE_SHARED if mode == "s" else MODE_EXCLUSIVE
     if mode and mode not in {MODE_SHARED, MODE_EXCLUSIVE}:
-        raise ValueError("mode must be shared or exclusive")
+        raise ValueError("mode must be s/shared or x/exclusive")
     duration = input("duration (blank keep, e.g. 30m/4h): ").strip()
     start = input("start ISO/now (blank keep): ").strip()
     gpu_raw = input("gpu list (blank keep, e.g. 0,1): ").strip()
     count_raw = input("gpu count for auto-pick (blank keep): ").strip()
+    current_memory = reservation.get("expected_memory_mb")
+    memory_default = _format_memory_mb(int(current_memory)) if current_memory is not None else "auto"
+    memory_raw = input(f"expected memory per GPU [{memory_default}] (- clears, blank keep): ").strip()
     queue_raw = input("queue if conflict? [y/N]: ").strip().lower()
     preferred = _parse_gpu_list(gpu_raw) if gpu_raw else None
+    advice = build_gpu_advice(config)
+    expected_memory_mb = None if memory_raw == "-" else (parse_memory_mb(memory_raw) if memory_raw else None)
     result = edit_booking(
         store,
         config,
@@ -538,8 +676,13 @@ def _edit_interactive(config: Config, store: LedgerStore, reservation_id: str, a
             duration_seconds=parse_duration_seconds(duration) if duration else None,
             mode=mode,
             preferred_gpus=preferred,
+            gpu_order=advice.order,
+            gpu_scores=advice.scores,
             count=int(count_raw) if count_raw else None,
             allow_queue=queue_raw in {"y", "yes"},
+            expected_memory_mb=expected_memory_mb,
+            update_expected_memory=bool(memory_raw),
+            gpu_memory_capacity_mb=advice.memory_capacities_mb,
         ),
     )
     _print_edit_result(result.reservation, result)
@@ -576,12 +719,28 @@ def _log_command(config: Config, store: LedgerStore) -> int:
     return 0
 
 
-def _list_command(store: LedgerStore) -> int:
+def _list_command(argv: List[str], store: LedgerStore) -> int:
+    parser = argparse.ArgumentParser(prog="bk list")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
     active = list_active(store.load())
+    actor = _current_actor()
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "schema_version": AGENT_SCHEMA_VERSION,
+                    "kind": "reservations",
+                    "reservations": [public_reservation(item, actor) for item in active],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 0
     if not active:
         print("No active reservations.")
         return 0
-    actor = _current_actor()
     mine = _own_active_reservations(store, actor)
     mine_index = {reservation["id"]: index + 1 for index, reservation in enumerate(mine)}
     for reservation in active:
@@ -691,6 +850,11 @@ def _split_job_command(argv: List[str]) -> tuple[List[str], Optional[List[str]]]
     return argv[:separator], command
 
 
+def _json_requested(argv: List[str]) -> bool:
+    booking_args = argv[: argv.index("--")] if "--" in argv else argv
+    return "--json" in booking_args
+
+
 def _print_booking_advice(
     config: Config,
     store: LedgerStore,
@@ -759,6 +923,47 @@ def _print_booking_advice(
                 f"note: --mem omitted; assumed {_format_memory_mb(min(assumptions))} per GPU "
                 f"from shared limit {config.max_shared_users}"
             )
+
+
+def _booking_result_payload(
+    status: str,
+    reservation: dict,
+    actor: Actor,
+    advice: GpuAdvice,
+    allocator: AllocatorDecision,
+    warning: Optional[str],
+) -> dict:
+    selected = []
+    for gpu in reservation.get("gpus", []):
+        live = advice.live_states[int(gpu)]
+        historical = advice.historical_loads[int(gpu)]
+        selected.append(
+            {
+                "gpu": int(gpu),
+                "load_score": allocator.scores[int(gpu)],
+                "live_status": live.status,
+                "live_reason": live.reason,
+                "recent_predicted_load_percent": round(historical.predicted_percent, 3),
+                "history_sample_count": historical.sample_count,
+            }
+        )
+    warnings = [warning] if warning else []
+    if allocator.warning:
+        warnings.append(allocator.warning)
+    if any(item["live_status"] == "busy" for item in selected):
+        warnings.append("selected GPU is currently busy; live task end time is unknown")
+    return {
+        "schema_version": AGENT_SCHEMA_VERSION,
+        "kind": "booking_result",
+        "status": status,
+        "reservation": public_reservation(reservation, actor),
+        "allocation": {"selected": selected},
+        "allocator": {
+            "source": allocator.source,
+            "reason": allocator.reason,
+        },
+        "warnings": warnings,
+    }
 
 
 def _format_memory_mb(value: Optional[int]) -> str:
@@ -860,6 +1065,8 @@ def _print_help(file=None) -> None:
   bk j                          list this UID's jobs
   bk jl <number_or_short_id>    show a job log
   bk jr <number_or_short_id>    retry a failed job
+  bk agent context              machine-readable resource context
+  bk agent recommend 2 1h30m   read-only placement recommendation
   bk a                          guided add
   bk e [number_or_short_id]     edit
   bk d <number_or_short_id>     delete
@@ -871,6 +1078,7 @@ def _print_help(file=None) -> None:
 
 duration examples: 30m, 1h30m, 1d
 shared memory: --mem 12g (expected memory per GPU)
+agent writes: add --op-id <unique-key> --json
 default mode: shared
 omitted --start: queue to the earliest available slot
 explicit --start: exact time, no automatic move
@@ -899,6 +1107,8 @@ def _print_shell_help() -> None:
   j | jobs                  list scheduled job states
   jl <number|short_id>      show a job log
   jr <number|short_id>      retry a failed job
+  agent context             emit stable allocation context JSON
+  agent recommend 2 1h30m  compute a read-only legal placement
   reset --yes               clear ledger, logs, and backups in this data dir
   t | tui                   open full-screen TUI
   quit                      exit

@@ -121,6 +121,18 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertTrue(preview.blink)
         self.assertIn("shared capacity full", preview.reason)
 
+    def test_preview_rejects_shared_memory_oversubscription(self):
+        existing = reservation("one", os.getuid(), MODE_SHARED, [0], self.start, self.end)
+        existing["expected_memory_mb"] = 16 * 1024
+        state = self.state()
+        state.add_expected_memory_mb = 12 * 1024
+        state.gpu_memory_capacity_mb = {0: 24 * 1024}
+
+        preview = _build_add_preview(self.ledger([existing]), self.config, state, self.start)
+
+        self.assertFalse(preview.valid)
+        self.assertIn("shared memory full", preview.reason)
+
     def test_preview_rejects_exclusive_overlap_on_any_selected_gpu(self):
         existing = [reservation("one", os.getuid() + 1, MODE_SHARED, [1], self.start, self.end)]
 
@@ -310,6 +322,17 @@ class TuiAddPreviewTests(unittest.TestCase):
             self.assertEqual(state.add_duration_steps, 5)
             _handle_add_key(ord("]"), config, store, state)
             self.assertEqual(state.add_duration_steps, 6)
+
+    def test_memory_key_without_live_screen_explains_how_to_enter_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp), gpu_count=1)
+            store = LedgerStore(config.data_dir)
+            state = self.state()
+
+            _handle_add_key(ord("m"), config, store, state)
+
+            self.assertIn("live TUI", state.message)
+            self.assertFalse(state.error)
 
     def test_arrow_navigation_moves_between_gpu_and_reservation_focus(self):
         with tempfile.TemporaryDirectory() as tmp:

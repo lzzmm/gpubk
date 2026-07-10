@@ -325,6 +325,21 @@ class CliTests(unittest.TestCase):
             self.assertEqual(ledger["reservations"][0]["start_at"], "2030-01-01T00:00:00Z")
             self.assertEqual(ledger["reservations"][0]["end_at"], "2030-01-01T01:00:00Z")
 
+    def test_edit_accepts_short_mode_and_can_clear_memory_declaration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            create = self.run_bk(
+                ["1", "30m", "--mem", "4g", "--start", "2030-01-01T00:00:00Z"],
+                data_dir,
+            )
+            edit = self.run_bk(["e", "1", "--mode", "x", "--mem", "-"], data_dir)
+
+            self.assertEqual(create.returncode, 0, create.stderr)
+            self.assertEqual(edit.returncode, 0, edit.stderr)
+            ledger = json.loads((data_dir / "ledger.json").read_text(encoding="utf-8"))
+            self.assertEqual(ledger["reservations"][0]["mode"], "exclusive")
+            self.assertNotIn("expected_memory_mb", ledger["reservations"][0])
+
     def test_status_shows_ascii_timeline(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.run_bk(["status"], Path(tmp))
@@ -421,6 +436,53 @@ class CliTests(unittest.TestCase):
             ledger = json.loads((data_dir / "ledger.json").read_text(encoding="utf-8"))
             self.assertEqual(len(ledger["reservations"]), 1)
             self.assertIn("exists:", second.stdout)
+
+    def test_agent_context_and_recommendation_are_valid_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            context = self.run_bk(["agent", "context", "--compact"], data_dir)
+            recommendation = self.run_bk(["agent", "recommend", "1", "30m", "--compact"], data_dir)
+
+            self.assertEqual(context.returncode, 0, context.stderr)
+            context_payload = json.loads(context.stdout)
+            self.assertEqual(context_payload["schema_version"], "bk.agent.v1")
+            self.assertEqual(context_payload["kind"], "context")
+            self.assertEqual(recommendation.returncode, 0, recommendation.stderr)
+            recommendation_payload = json.loads(recommendation.stdout)
+            self.assertTrue(recommendation_payload["available"])
+            self.assertEqual(recommendation_payload["recommendation"]["gpus"], [0])
+
+    def test_booking_and_list_json_outputs_need_no_text_scraping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            created = self.run_bk(["1", "30m", "--json"], data_dir)
+            listed = self.run_bk(["l", "--json"], data_dir)
+
+            self.assertEqual(created.returncode, 0, created.stderr)
+            created_payload = json.loads(created.stdout)
+            self.assertEqual(created_payload["kind"], "booking_result")
+            self.assertEqual(created_payload["status"], "created")
+            self.assertEqual(listed.returncode, 0, listed.stderr)
+            listed_payload = json.loads(listed.stdout)
+            self.assertEqual(len(listed_payload["reservations"]), 1)
+            self.assertEqual(
+                listed_payload["reservations"][0]["id"],
+                created_payload["reservation"]["id"],
+            )
+
+    def test_booking_json_error_is_structured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            start = "2030-01-01T00:00:00Z"
+            first = self.run_bk(["x", "1", "30m", "--start", start], data_dir)
+            conflict = self.run_bk(["1", "30m", "--start", start, "--json"], data_dir)
+
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(conflict.returncode, 2)
+            payload = json.loads(conflict.stdout)
+            self.assertEqual(payload["kind"], "error")
+            self.assertIn("conflict", payload["error"]["message"])
+            self.assertEqual(conflict.stderr, "")
 
     def test_reset_clears_ledger_logs_and_backups(self):
         with tempfile.TemporaryDirectory() as tmp:
