@@ -80,6 +80,7 @@ python3 -m pip install -e '.[gpu]'
 - `wrong-gpu`：该 UID 当前有预约，但没有预约正在使用的这张 GPU。
 - `unreserved`：该 UID 当前没有任何有效预约。
 - `unknown`：系统无法从 `/proc/<pid>` 读取 UID；只告警未知，不直接判定违规。
+- `system`：已知的显示服务或 NVIDIA 守护进程，例如 Xorg；保留可见性，但不计为违规。普通 root 计算进程不会自动获得豁免。
 
 shared 模式按 UID 分别匹配预约；同一 UID 的多个 CUDA 进程可以归属同一条预约。违规进程在 GPU 标签中显示 `!N`，并在进程表中标红。`bk status` 也会输出相同的进程与预约匹配结果。
 

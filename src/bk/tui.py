@@ -531,7 +531,7 @@ def _draw_process_panel(
         return
     rows = max(0, height - top - 4)
     for offset, item in enumerate(usage[:rows]):
-        color = COLOR_ERROR if item.violation else (COLOR_MUTED if item.status == "unknown" else COLOR_MINE)
+        color = COLOR_ERROR if item.violation else (COLOR_MUTED if item.status in {"unknown", "system"} else COLOR_MINE)
         attr = curses.A_BOLD if item.violation else 0
         _addstr(stdscr, top + 2 + offset, 0, _process_table_line(item, width), width, color, attr)
 

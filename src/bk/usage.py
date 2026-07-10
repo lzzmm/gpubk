@@ -12,6 +12,17 @@ USAGE_AUTHORIZED = "ok"
 USAGE_WRONG_GPU = "wrong-gpu"
 USAGE_UNRESERVED = "unreserved"
 USAGE_UNKNOWN = "unknown"
+USAGE_SYSTEM = "system"
+
+SYSTEM_GPU_PROCESS_NAMES = {
+    "gnome-shell",
+    "kwin_wayland",
+    "kwin_x11",
+    "nvidia-persistenced",
+    "nvidia-powerd",
+    "xorg",
+    "xwayland",
+}
 
 
 @dataclass(frozen=True)
@@ -47,6 +58,8 @@ def classify_process_usage(
 
 
 def _classify_process(gpu: int, process: GpuProcessSnapshot, current: Sequence[dict]) -> ProcessUsage:
+    if _is_system_process(process):
+        return ProcessUsage(gpu, process, USAGE_SYSTEM)
     if process.uid is None:
         return ProcessUsage(gpu, process, USAGE_UNKNOWN)
     user_reservations = [item for item in current if int(item.get("uid", -1)) == process.uid]
@@ -58,3 +71,9 @@ def _classify_process(gpu: int, process: GpuProcessSnapshot, current: Sequence[d
         ids = tuple(str(item.get("id", "")) for item in user_reservations)
         return ProcessUsage(gpu, process, USAGE_WRONG_GPU, ids)
     return ProcessUsage(gpu, process, USAGE_UNRESERVED)
+
+
+def _is_system_process(process: GpuProcessSnapshot) -> bool:
+    executable = process.command.strip().split(maxsplit=1)[0] if process.command.strip() else ""
+    name = executable.rsplit("/", 1)[-1].lower()
+    return name in SYSTEM_GPU_PROCESS_NAMES

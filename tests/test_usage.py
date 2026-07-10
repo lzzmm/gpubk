@@ -7,6 +7,7 @@ from bk.usage import (
     USAGE_UNKNOWN,
     USAGE_UNRESERVED,
     USAGE_WRONG_GPU,
+    USAGE_SYSTEM,
     classify_process_usage,
 )
 
@@ -64,6 +65,24 @@ class UsageClassificationTests(unittest.TestCase):
         row = classify_process_usage(snapshots, [future], self.now)[0][0]
 
         self.assertEqual(row.status, USAGE_UNRESERVED)
+
+    def test_known_display_service_is_system_usage_not_violation(self):
+        process = GpuProcessSnapshot(47520, 0, "root", "/usr/lib/xorg/Xorg vt1")
+        snapshots = [GpuSnapshot(0, "sim", processes=(process,))]
+
+        row = classify_process_usage(snapshots, [], self.now)[0][0]
+
+        self.assertEqual(row.status, USAGE_SYSTEM)
+        self.assertFalse(row.violation)
+
+    def test_arbitrary_root_compute_process_is_not_implicitly_exempt(self):
+        process = GpuProcessSnapshot(99, 0, "root", "python root-training.py")
+        snapshots = [GpuSnapshot(0, "sim", processes=(process,))]
+
+        row = classify_process_usage(snapshots, [], self.now)[0][0]
+
+        self.assertEqual(row.status, USAGE_UNRESERVED)
+        self.assertTrue(row.violation)
 
 
 if __name__ == "__main__":
