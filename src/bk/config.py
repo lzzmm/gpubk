@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
-DEFAULT_DATA_DIR = "/data2/shared/bk"
+DEFAULT_PRIVATE_FILE_MODE = 0o600
+DEFAULT_PRIVATE_DIR_MODE = 0o700
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,8 @@ class Config:
     job_log_dir: Optional[Path] = None
     worker_poll_seconds: float = 1.0
     worker_claim_timeout_seconds: float = 30.0
+    file_mode: int = DEFAULT_PRIVATE_FILE_MODE
+    dir_mode: int = DEFAULT_PRIVATE_DIR_MODE
 
 
 def _read_config_file(data_dir: Path) -> Dict[str, Any]:
@@ -85,8 +88,33 @@ def _nonnegative_int_value(raw: Dict[str, Any], key: str, default: int) -> int:
     return parsed
 
 
+def _mode_value(raw: Dict[str, Any], key: str, default: int, *, directory: bool) -> int:
+    value = raw.get(key, default)
+    try:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized.startswith("0o"):
+                normalized = normalized[2:]
+            parsed = int(normalized, 8)
+        else:
+            parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be an octal mode such as 0600 or 2770") from exc
+    allowed = 0o7777 if directory else 0o777
+    if parsed < 0 or parsed & ~allowed:
+        raise ValueError(f"invalid {key}")
+    if not directory and parsed & 0o111:
+        raise ValueError("file_mode must not contain executable bits")
+    return parsed
+
+
+def _default_data_dir() -> Path:
+    data_home = Path(os.environ.get("XDG_DATA_HOME", "~/.local/share")).expanduser()
+    return data_home / "bk"
+
+
 def load_config() -> Config:
-    data_dir = Path(os.environ.get("BK_DATA_DIR", DEFAULT_DATA_DIR)).expanduser()
+    data_dir = Path(os.environ["BK_DATA_DIR"]).expanduser() if "BK_DATA_DIR" in os.environ else _default_data_dir()
     raw = _read_config_file(data_dir)
 
     env_map = {
@@ -100,6 +128,8 @@ def load_config() -> Config:
         "shared_memory_reserve_mb": "BK_SHARED_MEMORY_RESERVE_MB",
         "worker_poll_seconds": "BK_WORKER_POLL_SECONDS",
         "worker_claim_timeout_seconds": "BK_WORKER_CLAIM_TIMEOUT_SECONDS",
+        "file_mode": "BK_FILE_MODE",
+        "dir_mode": "BK_DIR_MODE",
     }
     for key, env_name in env_map.items():
         if env_name in os.environ:
@@ -125,4 +155,6 @@ def load_config() -> Config:
         job_log_dir=job_log_dir,
         worker_poll_seconds=_float_value(raw, "worker_poll_seconds", 1.0),
         worker_claim_timeout_seconds=_float_value(raw, "worker_claim_timeout_seconds", 30.0),
+        file_mode=_mode_value(raw, "file_mode", DEFAULT_PRIVATE_FILE_MODE, directory=False),
+        dir_mode=_mode_value(raw, "dir_mode", DEFAULT_PRIVATE_DIR_MODE, directory=True),
     )

@@ -46,7 +46,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
         config = load_config()
-        store = LedgerStore(config.data_dir, config.lock_timeout_seconds, config.backup_keep)
+        store = LedgerStore(
+            config.data_dir,
+            config.lock_timeout_seconds,
+            config.backup_keep,
+            config.file_mode,
+            config.dir_mode,
+        )
         if not argv:
             return _interactive_shell(config, store)
 
@@ -287,7 +293,12 @@ def _usage_command(argv: List[str], config: Config) -> int:
     args = parser.parse_args(argv)
     if args.limit < 1:
         raise ValueError("--limit must be >= 1")
-    store = UsageAuditStore(config.data_dir, config.lock_timeout_seconds)
+    store = UsageAuditStore(
+        config.data_dir,
+        config.lock_timeout_seconds,
+        config.file_mode,
+        config.dir_mode,
+    )
     records = store.recent_rollups(args.limit) if args.rollups else store.recent_events(args.limit)
     if not records:
         print("no usage records")
@@ -551,11 +562,19 @@ def _list_command(store: LedgerStore) -> int:
 
 
 def _doctor_command(config: Config, store: LedgerStore) -> int:
+    storage_issues = store.health_issues()
     issues = find_policy_violations(store.load(), config.max_shared_users)
-    if not issues:
+    if not issues and not storage_issues:
         print("No policy issues found.")
         return 0
-    print(f"Found {len(issues)} policy issue(s):")
+    print(f"Found {len(storage_issues)} storage issue(s), {len(issues)} policy issue(s):")
+    for issue in storage_issues:
+        details = " ".join(
+            f"{key}={value}"
+            for key, value in issue.items()
+            if key not in {"type", "message"}
+        )
+        print(f"{issue['type']} {details} {issue.get('message', '')}".rstrip())
     for issue in issues:
         if issue["type"] == "shared-capacity":
             print(
@@ -583,7 +602,12 @@ def _reset_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         if answer != "reset":
             print("reset cancelled")
             return 1
-    audit_store = UsageAuditStore(config.data_dir, config.lock_timeout_seconds)
+    audit_store = UsageAuditStore(
+        config.data_dir,
+        config.lock_timeout_seconds,
+        config.file_mode,
+        config.dir_mode,
+    )
     with audit_store.lock():
         result = store.reset()
         usage_result = audit_store.clear_unlocked()

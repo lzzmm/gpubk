@@ -1,0 +1,161 @@
+import json
+import multiprocessing
+import stat
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from bk.config import Config
+from bk.models import Actor, BookingError, BookingRequest
+from bk.scheduler import add_booking
+from bk.storage import LedgerStore
+from bk.timeparse import parse_iso
+
+
+def _concurrent_booking(data_dir, start_at, uid, result_queue):
+    config = Config(data_dir=Path(data_dir), gpu_count=1, max_shared_users=2)
+    store = LedgerStore(config.data_dir)
+    try:
+        add_booking(
+            store,
+            config,
+            BookingRequest(
+                actor=Actor(uid, f"user{uid}"),
+                count=1,
+                duration_seconds=30 * 60,
+                start_at=parse_iso(start_at),
+                preferred_gpus=[0],
+            ),
+        )
+        result_queue.put("ok")
+    except BookingError:
+        result_queue.put("conflict")
+
+
+class LedgerStorageTests(unittest.TestCase):
+    def test_atomic_files_keep_configured_shared_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "shared"
+            store = LedgerStore(data_dir, file_mode=0o660, dir_mode=0o2770)
+
+            def mutate(ledger):
+                ledger["reservations"].append({"id": "one"})
+                return ledger, "ok", [{"action": "test"}], True
+
+            self.assertEqual(store.transaction(mutate), "ok")
+
+            self.assertEqual(stat.S_IMODE(data_dir.stat().st_mode), 0o2770)
+            self.assertEqual(stat.S_IMODE(store.ledger_path.stat().st_mode), 0o660)
+            self.assertEqual(stat.S_IMODE(store.log_path.stat().st_mode), 0o660)
+            self.assertEqual(stat.S_IMODE(store.lock_path.stat().st_mode), 0o660)
+            backup = next(store.backup_dir.glob("ledger-*.json"))
+            self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o660)
+
+    def test_durable_journal_recovers_after_apply_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store = LedgerStore(data_dir)
+
+            def mutate(ledger):
+                ledger["reservations"].append({"id": "durable"})
+                return ledger, "accepted", [{"action": "add", "reservation_id": "durable"}], True
+
+            with mock.patch.object(store, "_apply_journal_unlocked", side_effect=OSError("injected failure")):
+                result = store.transaction(mutate)
+
+            self.assertEqual(result, "accepted")
+            self.assertTrue(store.journal_path.exists())
+            self.assertIn("deferred recovery", store.last_warning)
+
+            recovered = LedgerStore(data_dir)
+            ledger = recovered.load()
+            self.assertEqual([item["id"] for item in ledger["reservations"]], ["durable"])
+            self.assertFalse(recovered.journal_path.exists())
+            lines = recovered.log_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertEqual(json.loads(lines[0])["reservation_id"], "durable")
+
+    def test_recovery_does_not_duplicate_an_already_appended_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store = LedgerStore(data_dir)
+            journal = {
+                "version": 1,
+                "transaction_id": "tx-one",
+                "created_at": "2030-01-01T00:00:00Z",
+                "ledger": {
+                    "version": 1,
+                    "last_transaction_id": "tx-one",
+                    "reservations": [{"id": "one"}],
+                },
+                "logs": [
+                    {
+                        "event_id": "event-one",
+                        "transaction_id": "tx-one",
+                        "action": "add",
+                    }
+                ],
+            }
+            store.ensure()
+            store._write_journal(journal)
+            store._append_missing_logs(journal["logs"])
+
+            store.load()
+            store.load()
+
+            lines = store.log_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertEqual(json.loads(lines[0])["event_id"], "event-one")
+
+    def test_invalid_journal_is_not_silently_discarded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LedgerStore(Path(tmp))
+            store.ensure()
+            store.journal_path.write_text("not-json", encoding="utf-8")
+
+            with self.assertRaisesRegex(OSError, "invalid transaction journal"):
+                store.load()
+
+            self.assertTrue(store.journal_path.exists())
+
+    def test_private_defaults_do_not_grant_group_or_world_access(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LedgerStore(Path(tmp) / "private")
+
+            store.transaction(lambda ledger: (ledger, None, [{"action": "read"}], False))
+
+            self.assertEqual(stat.S_IMODE(store.data_dir.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(store.log_path.stat().st_mode), 0o600)
+
+    def test_cross_process_booking_transaction_never_oversells_shared_capacity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            start_at = "2030-01-01T00:00:00Z"
+            context = multiprocessing.get_context("spawn")
+            results = context.Queue()
+            processes = [
+                context.Process(
+                    target=_concurrent_booking,
+                    args=(str(data_dir), start_at, 1000 + index, results),
+                )
+                for index in range(8)
+            ]
+            for process in processes:
+                process.start()
+            for process in processes:
+                process.join(timeout=10)
+                self.assertEqual(process.exitcode, 0)
+
+            outcomes = [results.get(timeout=1) for _process in processes]
+            self.assertEqual(outcomes.count("ok"), 2)
+            self.assertEqual(outcomes.count("conflict"), 6)
+            store = LedgerStore(data_dir)
+            self.assertEqual(len(store.load()["reservations"]), 2)
+            events = [json.loads(line) for line in store.log_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(events), 2)
+            self.assertEqual(len({item["event_id"] for item in events}), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

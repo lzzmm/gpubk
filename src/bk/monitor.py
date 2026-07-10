@@ -35,9 +35,17 @@ class MonitorSample:
 
 
 class UsageAuditStore:
-    def __init__(self, data_dir: Path, lock_timeout_seconds: float = 10.0):
+    def __init__(
+        self,
+        data_dir: Path,
+        lock_timeout_seconds: float = 10.0,
+        file_mode: int = 0o600,
+        dir_mode: int = 0o700,
+    ):
         self.data_dir = data_dir
         self.lock_timeout_seconds = lock_timeout_seconds
+        self.file_mode = file_mode
+        self.dir_mode = dir_mode
         self.lock_path = data_dir / "usage.lock"
         self.state_path = data_dir / "usage-state.json"
         self.events_path = data_dir / "usage-events.jsonl"
@@ -45,11 +53,11 @@ class UsageAuditStore:
         self.load_path = data_dir / "usage-load.json"
 
     def ensure(self) -> None:
-        self.data_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_directory(self.data_dir, self.dir_mode)
 
     def lock(self) -> FileLock:
         self.ensure()
-        return FileLock(self.lock_path, self.lock_timeout_seconds)
+        return FileLock(self.lock_path, self.lock_timeout_seconds, self.file_mode, self.dir_mode)
 
     def load_state(self) -> Dict[str, dict]:
         self.ensure()
@@ -74,6 +82,7 @@ class UsageAuditStore:
         fd, tmp_name = tempfile.mkstemp(prefix=".usage-state.", suffix=".tmp", dir=str(self.data_dir))
         tmp_path = Path(tmp_name)
         try:
+            os.fchmod(fd, self.file_mode)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(payload)
                 fh.flush()
@@ -113,6 +122,7 @@ class UsageAuditStore:
         fd, tmp_name = tempfile.mkstemp(prefix=".usage-load.", suffix=".tmp", dir=str(self.data_dir))
         tmp_path = Path(tmp_name)
         try:
+            os.fchmod(fd, self.file_mode)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(payload)
                 fh.flush()
@@ -140,7 +150,8 @@ class UsageAuditStore:
         if not items:
             return 0
         self.ensure()
-        with path.open("a", encoding="utf-8") as fh:
+        fd = _open_or_create_append(path, self.file_mode)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
             for item in items:
                 fh.write(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n")
             fh.flush()
@@ -343,7 +354,12 @@ def run_monitor(
 ) -> int:
     if max_samples is not None and max_samples < 1:
         raise ValueError("--samples must be >= 1")
-    audit_store = UsageAuditStore(config.data_dir, config.lock_timeout_seconds)
+    audit_store = UsageAuditStore(
+        config.data_dir,
+        config.lock_timeout_seconds,
+        config.file_mode,
+        config.dir_mode,
+    )
     stop_event = threading.Event()
     previous_handlers = _install_signal_handlers(stop_event)
     samples = 0
@@ -610,3 +626,22 @@ def _line_count(path: Path) -> int:
         return 0
     with path.open("r", encoding="utf-8") as fh:
         return sum(1 for _line in fh)
+
+
+def _ensure_directory(path: Path, mode: int) -> None:
+    try:
+        path.mkdir(parents=True, mode=mode)
+        path.chmod(mode)
+    except FileExistsError:
+        if not path.is_dir():
+            raise NotADirectoryError(path)
+
+
+def _open_or_create_append(path: Path, mode: int) -> int:
+    flags = os.O_WRONLY | os.O_APPEND
+    try:
+        fd = os.open(str(path), flags | os.O_CREAT | os.O_EXCL, mode)
+        os.fchmod(fd, mode)
+        return fd
+    except FileExistsError:
+        return os.open(str(path), flags)

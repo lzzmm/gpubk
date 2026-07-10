@@ -63,7 +63,12 @@ def build_gpu_advice(
     generated_at = at or utc_now()
     devices = list(snapshot(config) if snapshots is None else snapshots)
     if history is None:
-        history = UsageAuditStore(config.data_dir, config.lock_timeout_seconds).load_load_history()
+        history = UsageAuditStore(
+            config.data_dir,
+            config.lock_timeout_seconds,
+            config.file_mode,
+            config.dir_mode,
+        ).load_load_history()
     live = assess_gpu_live_states(devices, config.gpu_count)
     historical = historical_gpu_loads(history, config.gpu_count, generated_at)
     scores = combined_gpu_scores(live, historical)
