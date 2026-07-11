@@ -9,7 +9,7 @@ from unittest import mock
 from bk.config import Config
 from bk.models import Actor, BookingError, BookingRequest
 from bk.scheduler import add_booking
-from bk.storage import LedgerStore
+from bk.storage import FileLock, LedgerStore
 from bk.timeparse import parse_iso
 
 
@@ -34,6 +34,14 @@ def _concurrent_booking(data_dir, start_at, uid, result_queue):
 
 
 class LedgerStorageTests(unittest.TestCase):
+    def test_unheld_file_lock_uses_explicit_runtime_guard(self):
+        lock = FileLock(Path("unused.lock"), timeout_seconds=1)
+
+        with self.assertRaisesRegex(RuntimeError, "file lock is not held"):
+            lock._write_metadata()
+        with self.assertRaisesRegex(RuntimeError, "file lock is not held"):
+            lock.__exit__(None, None, None)
+
     def test_empty_load_is_side_effect_free(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "not-created"

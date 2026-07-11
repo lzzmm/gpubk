@@ -4,9 +4,10 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from bk.advisor import build_gpu_advice
-from bk.allocator import ALLOCATOR_SCHEMA_VERSION, apply_external_allocator
+from bk.allocator import ALLOCATOR_SCHEMA_VERSION, _run_allocator_process, apply_external_allocator
 from bk.config import Config
 from bk.gpu import GpuSnapshot
 from bk.models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingRequest
@@ -91,6 +92,18 @@ class ExternalAllocatorTests(unittest.TestCase):
         self.assertEqual(decision.source, "builtin-fallback")
         self.assertEqual(decision.order, advice.order)
         self.assertIn("permutation", decision.warning)
+
+    def test_missing_subprocess_pipe_fails_closed_without_assertions(self):
+        process = mock.Mock(stdin=None, stdout=mock.Mock(), stderr=mock.Mock())
+
+        with (
+            mock.patch("bk.allocator.subprocess.Popen", return_value=process),
+            mock.patch("bk.allocator._kill_allocator_process_group") as kill_group,
+        ):
+            with self.assertRaisesRegex(OSError, "pipes are unavailable"):
+                _run_allocator_process(["allocator"], "{}", 1.0)
+
+        kill_group.assert_called_once_with(process)
 
     def test_slow_external_allocator_times_out_and_falls_back(self):
         config = Config(

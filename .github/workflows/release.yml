@@ -1,0 +1,148 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: >-
+          python -m pip install -e '.[mcp]'
+          bandit build check-wheel-contents pip-audit ruff twine validate-pyproject
+      - run: python -m compileall -q src tests benchmarks
+      - run: ruff check src tests benchmarks
+      - run: bandit -q -r src/bk --severity-level medium
+      - run: PYTHONPATH=src python benchmarks/scheduler_queue.py --days 1
+      - run: python -m unittest discover -s tests -p 'test_*.py'
+      - run: pip-audit
+      - run: validate-pyproject pyproject.toml
+      - name: Verify tag matches package version
+        id: package
+        shell: bash
+        run: |
+          version=$(PYTHONPATH=src python -c 'from bk import __version__; print(__version__)')
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "tag $GITHUB_REF_NAME does not match package version $version" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]] && grep -Fq "## $version - Unreleased" CHANGELOG.md; then
+            echo "CHANGELOG.md still marks $version as Unreleased" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - run: check-wheel-contents dist/*.whl
+      - name: Smoke-test built wheel
+        shell: bash
+        run: |
+          python -m venv /tmp/gpubk-release-smoke
+          /tmp/gpubk-release-smoke/bin/python -m pip install --no-deps dist/*.whl
+          test "$(/tmp/gpubk-release-smoke/bin/bk --version)" = "bk ${{ steps.package.outputs.version }}"
+          BK_DATA_DIR=/tmp/gpubk-release-data BK_GPU_COUNT=2 \
+            /tmp/gpubk-release-smoke/bin/bk agent context --compact > /tmp/gpubk-release-context.json
+          test ! -e /tmp/gpubk-release-data
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-testpypi:
+    if: vars.TESTPYPI_RELEASE_ENABLED == 'true'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/gpubk
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: python-package-distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        with:
+          packages-dir: dist/
+          repository-url: https://test.pypi.org/legacy/
+
+  verify-testpypi:
+    needs: [build, publish-testpypi]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install the uploaded package
+        shell: bash
+        run: |
+          python -m venv /tmp/gpubk-index-smoke
+          installed=false
+          for attempt in {1..12}; do
+            if /tmp/gpubk-index-smoke/bin/python -m pip install --no-cache-dir --no-deps \
+              --index-url https://test.pypi.org/simple/ "gpubk==${{ needs.build.outputs.version }}"; then
+              installed=true
+              break
+            fi
+            sleep 10
+          done
+          test "$installed" = true
+          test "$(/tmp/gpubk-index-smoke/bin/bk --version)" = "bk ${{ needs.build.outputs.version }}"
+
+  publish-pypi:
+    if: >-
+      github.event_name == 'push' &&
+      github.ref_type == 'tag' &&
+      vars.PYPI_RELEASE_ENABLED == 'true'
+    needs: [build, verify-testpypi]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/gpubk
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: python-package-distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        with:
+          packages-dir: dist/
+
+  verify-pypi:
+    needs: [build, publish-pypi]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install the uploaded package
+        shell: bash
+        run: |
+          python -m venv /tmp/gpubk-index-smoke
+          installed=false
+          for attempt in {1..12}; do
+            if /tmp/gpubk-index-smoke/bin/python -m pip install --no-cache-dir --no-deps \
+              "gpubk==${{ needs.build.outputs.version }}"; then
+              installed=true
+              break
+            fi
+            sleep 10
+          done
+          test "$installed" = true
+          test "$(/tmp/gpubk-index-smoke/bin/bk --version)" = "bk ${{ needs.build.outputs.version }}"

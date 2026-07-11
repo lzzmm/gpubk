@@ -93,10 +93,10 @@ def _run_allocator_process(argv: List[str], payload: str, timeout_seconds: float
         start_new_session=True,
         close_fds=True,
     )
-    assert process.stdin is not None
-    assert process.stdout is not None
-    assert process.stderr is not None
     streams = (process.stdin, process.stdout, process.stderr)
+    if any(stream is None for stream in streams):
+        _kill_allocator_process_group(process)
+        raise OSError("allocator subprocess pipes are unavailable")
     selector = selectors.DefaultSelector()
     payload_bytes = payload.encode("utf-8")
     payload_offset = 0

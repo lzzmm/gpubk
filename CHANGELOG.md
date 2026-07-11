@@ -31,3 +31,6 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Normalize editable and installed coverage paths in CI so subprocess data cannot count the same package twice and falsely fail the coverage gate.
 - Make secure-config tests independent of the host umask used on shared lab servers.
 - Show allocatable free VRAM in compact GPU rows and never render partially truncated trailing metrics.
+- Add token-free Trusted Publishing through TestPyPI verification and protected PyPI promotion of one immutable artifact.
+- Add package-structure, metadata, and medium/high-severity static security gates to CI.
+- Replace optimization-sensitive production assertions with explicit fail-closed runtime checks.

@@ -48,11 +48,41 @@ class ReleaseConfigurationTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertIn("python -m pip install -e '.[mcp]' coverage ruff pip-audit", workflow)
+        self.assertIn("python -m pip install -e '.[mcp]'", workflow)
+        for tool in ("bandit", "coverage", "ruff", "pip-audit"):
+            self.assertIn(tool, workflow)
         self.assertRegex(
             pyproject,
             r'(?s)\[tool\.coverage\.paths\]\s+source = \[\s+"src/bk",\s+"\*/site-packages/bk",\s+\]',
         )
+
+    def test_ci_runs_security_and_package_structure_checks(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+        self.assertIn("bandit -q -r src/bk --severity-level medium", workflow)
+        self.assertIn("validate-pyproject pyproject.toml", workflow)
+        self.assertIn("check-wheel-contents dist/*.whl", workflow)
+
+    def test_release_uses_trusted_publishers_and_one_promoted_artifact(self):
+        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+
+        self.assertIn('tags:\n      - "v[0-9]*.[0-9]*.[0-9]*"', workflow)
+        self.assertIn('"$GITHUB_REF_NAME" != "v$version"', workflow)
+        self.assertIn("CHANGELOG.md still marks $version as Unreleased", workflow)
+        self.assertEqual(workflow.count("python -m build"), 1)
+        self.assertIn("name: python-package-distributions", workflow)
+        self.assertIn("environment:\n      name: testpypi", workflow)
+        self.assertIn("environment:\n      name: pypi", workflow)
+        self.assertIn("needs: [build, verify-testpypi]", workflow)
+        self.assertIn("vars.TESTPYPI_RELEASE_ENABLED == 'true'", workflow)
+        self.assertIn("vars.PYPI_RELEASE_ENABLED == 'true'", workflow)
+        self.assertIn("github.event_name == 'push'", workflow)
+        self.assertIn("github.ref_type == 'tag'", workflow)
+        self.assertIn("id-token: write", workflow)
+        self.assertIn("https://test.pypi.org/legacy/", workflow)
+        self.assertIn("pypa/gh-action-pypi-publish@", workflow)
+        self.assertNotIn("password:", workflow)
+        self.assertNotIn("TWINE_PASSWORD", workflow)
 
     def test_public_release_metadata_is_complete(self):
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")

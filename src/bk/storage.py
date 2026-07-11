@@ -60,19 +60,24 @@ class FileLock:
                 time.sleep(0.05)
 
     def _write_metadata(self) -> None:
-        assert self._fh is not None
-        self._fh.seek(0)
-        self._fh.truncate()
+        fh = self._require_handle()
+        fh.seek(0)
+        fh.truncate()
         payload = {"pid": os.getpid(), "locked_at": datetime.now(timezone.utc).isoformat()}
-        self._fh.write(json.dumps(payload, ensure_ascii=False))
-        self._fh.flush()
-        os.fsync(self._fh.fileno())
+        fh.write(json.dumps(payload, ensure_ascii=False))
+        fh.flush()
+        os.fsync(fh.fileno())
 
     def __exit__(self, exc_type, exc, tb):
-        assert self._fh is not None
-        fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
-        self._fh.close()
+        fh = self._require_handle()
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        fh.close()
         self._fh = None
+
+    def _require_handle(self):
+        if self._fh is None:
+            raise RuntimeError("file lock is not held")
+        return self._fh
 
 
 class LedgerStore:
