@@ -52,6 +52,17 @@ class UsageMonitorTests(unittest.TestCase):
         self.assertEqual([item["index"] for item in recent], [5000, 5001, 5002])
         self.assertLessEqual(loads.call_count, 4)
 
+    def test_read_only_loads_do_not_create_an_empty_data_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "not-created"
+            store = UsageAuditStore(data_dir)
+
+            self.assertEqual(store.load_state(), {})
+            self.assertEqual(store.load_load_history(), {"version": 1, "updated_at": None, "gpus": {}})
+            self.assertEqual(store.recent_events(), [])
+            self.assertEqual(store.recent_rollups(), [])
+            self.assertFalse(data_dir.exists())
+
     def test_event_append_rejects_symbolic_link_without_touching_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"

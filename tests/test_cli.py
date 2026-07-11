@@ -441,7 +441,7 @@ class CliTests(unittest.TestCase):
 
     def test_agent_context_and_recommendation_are_valid_json(self):
         with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp)
+            data_dir = Path(tmp) / "not-created"
             context = self.run_bk(["agent", "context", "--compact"], data_dir)
             recommendation = self.run_bk(["agent", "recommend", "1", "30m", "--compact"], data_dir)
 
@@ -453,7 +453,7 @@ class CliTests(unittest.TestCase):
             recommendation_payload = json.loads(recommendation.stdout)
             self.assertTrue(recommendation_payload["available"])
             self.assertEqual(recommendation_payload["recommendation"]["gpus"], [0])
-            self.assertEqual(list(data_dir.iterdir()), [])
+            self.assertFalse(data_dir.exists())
 
     def test_booking_and_list_json_outputs_need_no_text_scraping(self):
         with tempfile.TemporaryDirectory() as tmp:

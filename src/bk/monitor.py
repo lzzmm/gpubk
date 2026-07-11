@@ -66,7 +66,6 @@ class UsageAuditStore:
         return FileLock(self.lock_path, self.lock_timeout_seconds, self.file_mode, self.dir_mode)
 
     def load_state(self) -> Dict[str, dict]:
-        self.ensure()
         if not self.state_path.exists():
             return {}
         try:
@@ -113,7 +112,6 @@ class UsageAuditStore:
         return self._recent_jsonl(self.rollups_path, limit)
 
     def load_load_history(self) -> dict:
-        self.ensure()
         if not self.load_path.exists():
             return {"version": 1, "updated_at": None, "gpus": {}}
         try:
