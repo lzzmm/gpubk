@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,10 @@ dynamic = ["version"]
 description = "Offline, load-aware GPU booking CLI, curses TUI, worker, and agent interface."
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [{ name = "GPUbk maintainers" }]
+authors = [{ name = "lzzmm", email = "cortexcyh@gmail.com" }]
+maintainers = [{ name = "lzzmm", email = "cortexcyh@gmail.com" }]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 keywords = ["gpu", "scheduler", "booking", "tui", "nvml", "mcp", "agent"]
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -27,6 +30,12 @@ classifiers = [
   "Topic :: System :: Systems Administration",
 ]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/lzzmm/gpubk"
+Repository = "https://github.com/lzzmm/gpubk"
+Issues = "https://github.com/lzzmm/gpubk/issues"
+Changelog = "https://github.com/lzzmm/gpubk/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 gpu = ["nvidia-ml-py>=12"]

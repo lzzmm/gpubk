@@ -1,7 +1,7 @@
 # Release Checklist
 
-1. Choose and add the owner-approved open-source license. Do not publish without an explicit license decision.
-2. Confirm author/maintainer metadata and source URLs in `pyproject.toml`.
+1. Confirm the owner-approved Apache-2.0 `LICENSE` is included in both wheel and sdist metadata.
+2. Confirm the `lzzmm` author/maintainer metadata and `https://github.com/lzzmm/gpubk` URLs in `pyproject.toml`.
 3. Update `src/bk/__init__.py` and `CHANGELOG.md`; package metadata reads the version from `bk.__version__`.
 4. Run core tests:
 

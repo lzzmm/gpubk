@@ -1,3 +1,4 @@
+import hashlib
 import re
 import unittest
 from pathlib import Path
@@ -6,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ACTION_REF = re.compile(r"^\s*-\s+uses:\s+([^\s@]+)@([^\s#]+)")
 COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
+APACHE_2_NORMALIZED_SHA256 = "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
 
 
 class ReleaseConfigurationTests(unittest.TestCase):
@@ -41,6 +43,19 @@ class ReleaseConfigurationTests(unittest.TestCase):
                     unpinned.append(f"{path.relative_to(ROOT)}:{number}: {match.group(0).strip()}")
 
         self.assertEqual(unpinned, [], "mutable GitHub Action refs:\n" + "\n".join(unpinned))
+
+    def test_public_release_metadata_is_complete(self):
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+        self.assertIn('authors = [{ name = "lzzmm", email = "cortexcyh@gmail.com" }]', pyproject)
+        self.assertIn('maintainers = [{ name = "lzzmm", email = "cortexcyh@gmail.com" }]', pyproject)
+        self.assertRegex(pyproject, r'(?m)^license = "Apache-2\.0"$')
+        self.assertRegex(pyproject, r'(?m)^license-files = \["LICENSE"\]$')
+        self.assertIn('Repository = "https://github.com/lzzmm/gpubk"', pyproject)
+        self.assertIn('Issues = "https://github.com/lzzmm/gpubk/issues"', pyproject)
+
+        license_digest = hashlib.sha256((ROOT / "LICENSE").read_bytes()).hexdigest()
+        self.assertEqual(license_digest, APACHE_2_NORMALIZED_SHA256)
 
 
 if __name__ == "__main__":

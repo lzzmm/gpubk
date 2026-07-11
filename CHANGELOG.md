@@ -21,3 +21,6 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Add machine-readable MCP risk annotations for read-only, idempotent, destructive, and closed-world tools.
 - Bind shared ledgers to one scheduling and storage policy so per-user environment overrides cannot silently change capacity rules.
 - Keep ordinary read-only CLI, Agent, and MCP calls free of empty-directory initialization side effects while preserving durable WAL recovery.
+- Reject untrusted shared configuration, symbolic-link and special-file redirection across ledger, audit, and private job paths.
+- Bound external allocator output and terminate its whole process group on timeout or protocol overflow.
+- Adopt Apache-2.0 and publish maintainer and GitHub project metadata for the `gpubk` distribution.
