@@ -3,3 +3,4 @@ include RELEASING.md
 include SECURITY.md
 recursive-include src/bk/data *
 recursive-include tests test_*.py
+recursive-include benchmarks *.py

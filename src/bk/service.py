@@ -14,7 +14,7 @@ from .scheduler import (
     add_booking,
     find_earliest_slot,
     list_active,
-    reservation_pressure_score,
+    reservation_pressure_scores,
     shared_memory_headroom_for_reservation,
 )
 from .storage import LedgerStore
@@ -51,20 +51,17 @@ def submit_booking(
 ) -> BookingSubmission:
     _validate_recommendation_request(config, count, duration_seconds, start_at, mode, expected_memory_mb, allow_queue)
     gpu_advice = advice or build_gpu_advice(config)
-    allocator = (
-        apply_external_allocator(
-            config,
-            store,
-            actor,
-            gpu_advice,
-            count=count,
-            duration_seconds=duration_seconds,
-            start_at=start_at,
-            mode=mode,
-            expected_memory_mb=expected_memory_mb,
-        )
-        if preferred_gpus is None
-        else AllocatorDecision(list(gpu_advice.order), dict(gpu_advice.scores), "fixed-gpu")
+    allocator = _allocation_decision(
+        config,
+        store,
+        actor,
+        gpu_advice,
+        count,
+        duration_seconds,
+        start_at,
+        mode,
+        preferred_gpus,
+        expected_memory_mb,
     )
     if command_argv is not None and working_directory is None:
         working_directory = os.getcwd()
@@ -132,6 +129,7 @@ def build_agent_context(
             "require_shared_memory": config.require_shared_memory,
             "shared_memory_reserve_mb": config.shared_memory_reserve_mb,
             "queue_search_hours": config.queue_search_hours,
+            "ledger_retention_days": config.ledger_retention_days,
         },
         "gpu_advice": gpu_advice.as_dict(),
         "reservations": [_public_reservation(item, actor) for item in active],
@@ -163,20 +161,17 @@ def recommend_booking(
     _validate_recommendation_request(config, count, duration_seconds, start_at, mode, expected_memory_mb, allow_queue)
     generated_at = utc_now()
     gpu_advice = advice or build_gpu_advice(config, at=generated_at)
-    allocator = (
-        apply_external_allocator(
-            config,
-            store,
-            actor,
-            gpu_advice,
-            count=count,
-            duration_seconds=duration_seconds,
-            start_at=start_at,
-            mode=mode,
-            expected_memory_mb=expected_memory_mb,
-        )
-        if preferred_gpus is None
-        else AllocatorDecision(list(gpu_advice.order), dict(gpu_advice.scores), "fixed-gpu")
+    allocator = _allocation_decision(
+        config,
+        store,
+        actor,
+        gpu_advice,
+        count,
+        duration_seconds,
+        start_at,
+        mode,
+        preferred_gpus,
+        expected_memory_mb,
     )
     ledger = store.load()
     duration = timedelta(seconds=duration_seconds)
@@ -263,37 +258,16 @@ def recommend_booking(
         config.max_shared_users,
         config.shared_memory_reserve_mb,
     )
-    snapshot_by_gpu = {item.index: item for item in gpu_advice.snapshots}
-    gpu_details = []
-    for gpu in gpus:
-        live = gpu_advice.live_states[gpu]
-        history = gpu_advice.historical_loads[gpu]
-        snapshot = snapshot_by_gpu.get(gpu)
-        gpu_details.append(
-            {
-                "gpu": gpu,
-                "load_score": allocator.scores[gpu],
-                "reservation_pressure_score": reservation_pressure_score(
-                    ledger,
-                    gpu,
-                    scheduled_start,
-                    scheduled_end,
-                    config.max_shared_users,
-                ),
-                "live_status": live.status,
-                "live_reason": live.reason,
-                "recent_predicted_load_percent": round(history.predicted_percent, 3),
-                "history_sample_count": history.sample_count,
-                "memory_total_mb": snapshot.memory_total_mb if snapshot and snapshot.memory_total_mb else None,
-                "memory_free_now_mb": (
-                    max(0, snapshot.memory_total_mb - snapshot.memory_used_mb)
-                    if snapshot and snapshot.memory_total_mb
-                    else None
-                ),
-                "projected_memory_headroom_mb": projected.get(gpu),
-            }
-        )
-    confidence = _recommendation_confidence(gpu_details, snapshot_by_gpu)
+    gpu_details, confidence = _recommendation_gpu_details(
+        config,
+        ledger,
+        gpu_advice,
+        allocator,
+        gpus,
+        scheduled_start,
+        scheduled_end,
+        projected,
+    )
     response["recommendation"] = {
         "gpus": list(gpus),
         "start_at": to_iso(scheduled_start),
@@ -309,6 +283,68 @@ def recommend_booking(
     if any(item["history_sample_count"] == 0 for item in gpu_details):
         response["warnings"].append("recent load history is incomplete; keep bk monitor running for better forecasts")
     return response
+
+
+def _allocation_decision(
+    config: Config,
+    store: LedgerStore,
+    actor: Actor,
+    advice: GpuAdvice,
+    count: int,
+    duration_seconds: int,
+    start_at: datetime,
+    mode: str,
+    preferred_gpus: Optional[Sequence[int]],
+    expected_memory_mb: Optional[int],
+) -> AllocatorDecision:
+    if preferred_gpus is not None:
+        return AllocatorDecision(list(advice.order), dict(advice.scores), "fixed-gpu")
+    return apply_external_allocator(
+        config,
+        store,
+        actor,
+        advice,
+        count=count,
+        duration_seconds=duration_seconds,
+        start_at=start_at,
+        mode=mode,
+        expected_memory_mb=expected_memory_mb,
+    )
+
+
+def _recommendation_gpu_details(
+    config: Config,
+    ledger: dict,
+    advice: GpuAdvice,
+    allocator: AllocatorDecision,
+    gpus: Sequence[int],
+    start: datetime,
+    end: datetime,
+    projected_memory: Dict[int, int],
+) -> tuple[List[dict], str]:
+    snapshots = {item.index: item for item in advice.snapshots}
+    pressure_scores = reservation_pressure_scores(ledger, gpus, start, end, config.max_shared_users)
+    details = []
+    for gpu in gpus:
+        live = advice.live_states[gpu]
+        history = advice.historical_loads[gpu]
+        snapshot = snapshots.get(gpu)
+        total_memory = snapshot.memory_total_mb if snapshot and snapshot.memory_total_mb else None
+        details.append(
+            {
+                "gpu": gpu,
+                "load_score": allocator.scores[gpu],
+                "reservation_pressure_score": pressure_scores[gpu],
+                "live_status": live.status,
+                "live_reason": live.reason,
+                "recent_predicted_load_percent": round(history.predicted_percent, 3),
+                "history_sample_count": history.sample_count,
+                "memory_total_mb": total_memory,
+                "memory_free_now_mb": max(0, total_memory - snapshot.memory_used_mb) if total_memory else None,
+                "projected_memory_headroom_mb": projected_memory.get(gpu),
+            }
+        )
+    return details, _recommendation_confidence(details, snapshots)
 
 
 def public_reservation(reservation: dict, actor: Actor) -> dict:

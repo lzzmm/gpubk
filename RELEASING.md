@@ -6,7 +6,9 @@
 4. Run core tests:
 
    ```bash
-   python -m compileall -q src tests
+   python -m compileall -q src tests benchmarks
+   ruff check src tests benchmarks
+   PYTHONPATH=src python benchmarks/scheduler_queue.py
    coverage run -m unittest discover -s tests -p 'test_*.py'
    coverage combine
    coverage report

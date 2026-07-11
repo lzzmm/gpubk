@@ -7,11 +7,10 @@ import signal
 import tempfile
 import threading
 import time
-from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from .config import Config
 from .gpu import GpuSnapshot, snapshot
@@ -168,16 +167,17 @@ class UsageAuditStore:
     def _recent_jsonl(path: Path, limit: int) -> List[dict]:
         if limit < 1 or not path.exists():
             return []
-        items: deque[dict] = deque(maxlen=limit)
-        with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                try:
-                    value = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(value, dict):
-                    items.append(value)
-        return list(items)
+        newest_first = []
+        for raw_line in _reverse_lines(path):
+            try:
+                value = json.loads(raw_line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if isinstance(value, dict):
+                newest_first.append(value)
+                if len(newest_first) == limit:
+                    break
+        return list(reversed(newest_first))
 
 
 class UsageMonitor:
@@ -632,6 +632,25 @@ def _line_count(path: Path) -> int:
         return 0
     with path.open("r", encoding="utf-8") as fh:
         return sum(1 for _line in fh)
+
+
+def _reverse_lines(path: Path, chunk_size: int = 64 * 1024) -> Iterator[bytes]:
+    """Yield non-empty binary lines newest-first without scanning the whole file."""
+    with path.open("rb") as fh:
+        position = fh.seek(0, os.SEEK_END)
+        remainder = b""
+        while position > 0:
+            read_size = min(chunk_size, position)
+            position -= read_size
+            fh.seek(position)
+            parts = (fh.read(read_size) + remainder).split(b"\n")
+            if position > 0:
+                remainder = parts.pop(0)
+            else:
+                remainder = b""
+            for line in reversed(parts):
+                if line:
+                    yield line
 
 
 def _ensure_directory(path: Path, mode: int) -> None:

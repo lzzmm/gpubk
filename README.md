@@ -73,6 +73,7 @@ export BK_DATA_DIR=/data2/shared/bk
 export BK_GPU_COUNT=8
 export BK_MAX_SHARED_USERS=2
 export BK_QUEUE_SEARCH_HOURS=168
+export BK_LEDGER_RETENTION_DAYS=90
 export BK_REQUIRE_SHARED_MEMORY=false
 export BK_SHARED_MEMORY_RESERVE_MB=512
 export BK_JOB_LOG_DIR="$HOME/.local/state/bk/jobs"
@@ -87,6 +88,7 @@ export BK_DIR_MODE=2770
   "gpu_count": 8,
   "max_shared_users": 2,
   "queue_search_hours": 168,
+  "ledger_retention_days": 90,
   "lock_timeout_seconds": 10,
   "require_shared_memory": false,
   "shared_memory_reserve_mb": 512,
@@ -96,6 +98,8 @@ export BK_DIR_MODE=2770
 ```
 
 环境变量优先级高于 `config.json`。
+
+为避免热台账随多年历史无限膨胀，已结束或取消超过 `ledger_retention_days` 的预约会在后续写事务中从 `ledger.json` 移除；完整新增、取消和任务事件仍保留在只追加 `ops.log`。设为 `0` 可关闭清理，但长期共享部署不建议这样做。超过保留期后，同一个 operation ID 不再提供幂等重放保证。
 
 ## Agent 与 JSON 接口
 
@@ -425,3 +429,13 @@ TUI 时间轴：
 - 新增预览可用时高亮，不可用时标红并在底部显示原因。
 - 下方表格选中的预约会在上方时间轴中闪烁提示。
 - 下方表格包含序号、短 ID、用户名、模式、GPU、共享容量、开始、结束、持续时间。
+
+## 性能回归
+
+仓库包含无第三方依赖的 8 卡满负载排队基准：
+
+```bash
+PYTHONPATH=src python3 benchmarks/scheduler_queue.py
+```
+
+输出为 `bk.benchmark.v1` JSON，默认构造 2688 条预约并搜索 7 天后的首个 8 卡时段。单元测试同时约束每条活动记录在一次搜索中最多解析一次开始和结束时间，并约束 TUI 整帧时间格不重复解析预约时间；这比依赖具体机器速度的固定毫秒阈值更稳定。

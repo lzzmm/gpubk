@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from dataclasses import replace
@@ -6,7 +7,7 @@ from pathlib import Path
 
 from bk.config import Config
 from bk.models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest
-from bk.scheduler import add_booking
+from bk.scheduler import add_booking, find_available_gpus
 from bk.storage import LedgerStore
 from bk.timeparse import parse_iso, utc_now
 
@@ -184,6 +185,23 @@ class SchedulerModeTests(unittest.TestCase):
 
         self.assertEqual(result.reservation["gpus"], [1])
 
+    def test_public_availability_api_preserves_optional_argument_order(self):
+        config = Config(data_dir=Path(self.tmp.name), gpu_count=2)
+
+        available = find_available_gpus(
+            {"version": 1, "reservations": []},
+            config,
+            1,
+            self.start,
+            self.start + timedelta(hours=1),
+            MODE_SHARED,
+            1001,
+            [1, 0],
+            {0: 10.0, 1: 0.0},
+        )
+
+        self.assertEqual(available, [1])
+
     def test_shared_memory_budget_blocks_oversubscription(self):
         capacities = {0: 24 * 1024}
         add_booking(
@@ -244,6 +262,44 @@ class SchedulerModeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(BookingError, "multiple of 5 minutes"):
             add_booking(self.store, self.config, self.request(1001, MODE_SHARED, duration_seconds=60))
+
+    def test_new_booking_prunes_old_terminal_records_but_keeps_audit_log(self):
+        now = utc_now()
+        old = now - timedelta(days=120)
+        recent = now - timedelta(days=5)
+        old_record = {
+            "id": "old-active",
+            "op_id": "old-active-op",
+            "uid": 1001,
+            "username": "user1001",
+            "gpus": [0],
+            "mode": MODE_SHARED,
+            "start_at": old.isoformat(),
+            "end_at": (old + timedelta(hours=1)).isoformat(),
+            "status": "active",
+            "created_at": old.isoformat(),
+            "updated_at": old.isoformat(),
+        }
+        old_cancelled = {**old_record, "id": "old-cancelled", "status": "cancelled"}
+        recent_cancelled = {
+            **old_record,
+            "id": "recent-cancelled",
+            "status": "cancelled",
+            "updated_at": recent.isoformat(),
+        }
+        self.store.ensure()
+        self.store.ledger_path.write_text(
+            json.dumps({"version": 1, "reservations": [old_record, old_cancelled, recent_cancelled]}),
+            encoding="utf-8",
+        )
+        self.store.log_path.write_text('{"event_id":"historic-audit"}\n', encoding="utf-8")
+        config = replace(self.config, ledger_retention_days=30)
+
+        created = add_booking(self.store, config, self.request(2000, MODE_SHARED))
+
+        ids = {item["id"] for item in self.store.load()["reservations"]}
+        self.assertEqual(ids, {"recent-cancelled", created.reservation["id"]})
+        self.assertIn("historic-audit", self.store.log_path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

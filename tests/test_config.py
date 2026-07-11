@@ -31,6 +31,7 @@ class ConfigTests(unittest.TestCase):
                         "file_mode": "0660",
                         "dir_mode": "2770",
                         "require_shared_memory": True,
+                        "ledger_retention_days": 45,
                     }
                 ),
                 encoding="utf-8",
@@ -41,6 +42,18 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.file_mode, 0o660)
             self.assertEqual(config.dir_mode, 0o2770)
             self.assertTrue(config.require_shared_memory)
+            self.assertEqual(config.ledger_retention_days, 45)
+
+    def test_zero_retention_disables_hot_ledger_pruning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(
+                "os.environ",
+                {"BK_DATA_DIR": tmp, "BK_LEDGER_RETENTION_DAYS": "0"},
+                clear=True,
+            ):
+                config = load_config()
+
+            self.assertEqual(config.ledger_retention_days, 0)
 
     def test_file_mode_rejects_executable_bits(self):
         with tempfile.TemporaryDirectory() as tmp:

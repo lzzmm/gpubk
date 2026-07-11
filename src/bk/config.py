@@ -18,6 +18,7 @@ class Config:
     gpu_count: int = 1
     max_shared_users: int = 2
     queue_search_hours: int = 168
+    ledger_retention_days: int = 90
     lock_timeout_seconds: float = 10.0
     backup_keep: int = 10
     timeline_hours: int = 24
@@ -125,6 +126,7 @@ def load_config() -> Config:
         "gpu_count": "BK_GPU_COUNT",
         "max_shared_users": "BK_MAX_SHARED_USERS",
         "queue_search_hours": "BK_QUEUE_SEARCH_HOURS",
+        "ledger_retention_days": "BK_LEDGER_RETENTION_DAYS",
         "lock_timeout_seconds": "BK_LOCK_TIMEOUT_SECONDS",
         "backup_keep": "BK_BACKUP_KEEP",
         "timeline_hours": "BK_TIMELINE_HOURS",
@@ -153,6 +155,7 @@ def load_config() -> Config:
         gpu_count=_int_value(raw, "gpu_count", 1),
         max_shared_users=_int_value(raw, "max_shared_users", 2),
         queue_search_hours=_int_value(raw, "queue_search_hours", 168),
+        ledger_retention_days=_nonnegative_int_value(raw, "ledger_retention_days", 90),
         lock_timeout_seconds=_float_value(raw, "lock_timeout_seconds", 10.0),
         backup_keep=_int_value(raw, "backup_keep", 10),
         timeline_hours=_int_value(raw, "timeline_hours", 24),

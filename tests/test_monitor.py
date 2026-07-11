@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from bk.config import Config
 from bk.gpu import GpuProcessSnapshot, GpuSnapshot
@@ -33,6 +34,23 @@ def reservation(rid, uid, gpu, start, end):
 class UsageMonitorTests(unittest.TestCase):
     def setUp(self):
         self.now = datetime(2030, 1, 1, 12, 0, 1, tzinfo=timezone.utc)
+
+    def test_recent_events_reads_only_the_tail_needed_for_the_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = UsageAuditStore(Path(tmp))
+            store.ensure()
+            with store.events_path.open("w", encoding="utf-8") as fh:
+                for index in range(5000):
+                    fh.write(json.dumps({"index": index}) + "\n")
+                fh.write("not-json\n")
+                for index in range(5000, 5003):
+                    fh.write(json.dumps({"index": index}) + "\n")
+
+            with mock.patch("bk.monitor.json.loads", wraps=json.loads) as loads:
+                recent = store.recent_events(3)
+
+        self.assertEqual([item["index"] for item in recent], [5000, 5001, 5002])
+        self.assertLessEqual(loads.call_count, 4)
 
     @staticmethod
     def write_ledger(path, reservations):

@@ -4,10 +4,12 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from bk.config import Config
 from bk.gpu import GpuProcessSnapshot, GpuSnapshot
 from bk.models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingRequest
+from bk.schedule_index import ReservationIndex
 from bk.scheduler import add_booking
 from bk.storage import LedgerStore
 from bk.tui import (
@@ -48,7 +50,7 @@ from bk.tui import (
     _visible_shared_reservations,
     _weekday_label,
 )
-from bk.timeparse import utc_now
+from bk.timeparse import parse_iso, utc_now
 from bk.usage import ProcessUsage, USAGE_AUTHORIZED, USAGE_UNRESERVED
 
 
@@ -98,6 +100,31 @@ class TuiAddPreviewTests(unittest.TestCase):
 
     def ledger(self, reservations):
         return {"version": 1, "reservations": reservations}
+
+    def test_indexed_timeline_cells_do_not_reparse_reservation_times(self):
+        active = []
+        for number in range(200):
+            start = self.start + timedelta(minutes=(number * 5) % 600)
+            active.append(reservation(str(number), number, MODE_SHARED, [number % 8], start, start + timedelta(hours=1)))
+        index = ReservationIndex.from_ledger(self.ledger(active), self.start)
+
+        with mock.patch("bk.tui.parse_iso", wraps=parse_iso) as parser:
+            colors = _reservation_color_map(active, index)
+            for gpu in range(8):
+                for col in range(100):
+                    left = self.start + timedelta(minutes=5 * col)
+                    _cell_for_gpu(
+                        gpu,
+                        colors,
+                        active,
+                        left,
+                        left + timedelta(minutes=5),
+                        None,
+                        col,
+                        reservation_index=index,
+                    )
+
+        self.assertEqual(parser.call_count, 0)
 
     def test_preview_allows_shared_overlap_under_record_limit(self):
         existing = reservation("one", os.getuid(), MODE_SHARED, [0], self.start, self.end)

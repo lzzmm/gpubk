@@ -24,6 +24,7 @@ from .models import (
     BookingResult,
     EditRequest,
 )
+from .schedule_index import ReservationIndex, ReservationSpan
 from .storage import LedgerStore
 from .timeparse import parse_iso, to_iso, utc_now
 
@@ -48,7 +49,7 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
 
     def mutate(ledger: dict):
         now = utc_now()
-        changed = _expire_old_reservations(ledger, now)
+        changed = _maintain_ledger(ledger, now, config.ledger_retention_days)
         start = _normalize_start(request.start_at, request.allow_queue)
         duration = timedelta(seconds=request.duration_seconds)
         end = start + duration
@@ -184,7 +185,7 @@ def cancel_booking(store: LedgerStore, reservation_id: str, actor: Actor) -> dic
 def edit_booking(store: LedgerStore, config: Config, request: EditRequest) -> BookingResult:
     def mutate(ledger: dict):
         now = utc_now()
-        _expire_old_reservations(ledger, now)
+        _maintain_ledger(ledger, now, config.ledger_retention_days)
         reservation = _find_reservation(ledger, request.reservation_id)
         if reservation is None:
             raise BookingError("reservation not found")
@@ -291,15 +292,7 @@ def edit_booking(store: LedgerStore, config: Config, request: EditRequest) -> Bo
 
 
 def list_active(ledger: dict, now: Optional[datetime] = None) -> List[dict]:
-    now = now or utc_now()
-    active = []
-    for reservation in ledger.get("reservations", []):
-        if reservation.get("status") != STATUS_ACTIVE:
-            continue
-        if parse_iso(reservation["end_at"]) <= now:
-            continue
-        active.append(reservation)
-    return sorted(active, key=_reservation_sort_key)
+    return ReservationIndex.from_ledger(ledger, now or utc_now()).records()
 
 
 def find_available_gpus(
@@ -344,25 +337,51 @@ def find_available_gpus_with_reason(
     expected_memory_mb: Optional[int] = None,
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None,
 ) -> Tuple[List[int], str]:
+    index = ReservationIndex.from_ledger(ledger, start)
+    return _find_available_gpus_with_reason(
+        index,
+        config,
+        count,
+        start,
+        end,
+        mode,
+        gpu_order,
+        gpu_scores,
+        expected_memory_mb,
+        gpu_memory_capacity_mb,
+    )
+
+
+def _find_available_gpus_with_reason(
+    index: ReservationIndex,
+    config: Config,
+    count: int,
+    start: datetime,
+    end: datetime,
+    mode: str,
+    gpu_order: Optional[Sequence[int]] = None,
+    gpu_scores: Optional[Dict[int, float]] = None,
+    expected_memory_mb: Optional[int] = None,
+    gpu_memory_capacity_mb: Optional[Dict[int, int]] = None,
+) -> Tuple[List[int], str]:
     available = []
     reasons = []
     order = _normalize_gpu_order(gpu_order, config)
     base_rank = {gpu: rank for rank, gpu in enumerate(order)}
     for gpu in order:
-        ok, reason = availability_detail(
-            ledger,
+        ok, reason = _availability_detail_indexed(
+            index,
             gpu,
             start,
             end,
             mode,
-            uid,
             config.max_shared_users,
             expected_memory_mb,
             gpu_memory_capacity_mb,
             config.shared_memory_reserve_mb,
         )
         if ok:
-            pressure = _reservation_pressure_score(ledger, gpu, start, end, config.max_shared_users)
+            pressure = _reservation_pressure_score_indexed(index, gpu, start, end, config.max_shared_users)
             score = float((gpu_scores or {}).get(gpu, 0.0)) + pressure
             available.append((score, base_rank[gpu], gpu))
         else:
@@ -390,7 +409,9 @@ def find_earliest_slot(
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None,
 ) -> Optional[Tuple[datetime, List[int]]]:
     search_until = earliest_start + timedelta(hours=config.queue_search_hours)
-    candidate_starts = _candidate_starts(ledger, earliest_start, search_until)
+    now = utc_now()
+    index = ReservationIndex.from_ledger(ledger, min(earliest_start, now))
+    candidate_starts = _candidate_starts_from_index(index, earliest_start, search_until, now)
     if not allow_queue:
         candidate_starts = [earliest_start]
 
@@ -399,13 +420,12 @@ def find_earliest_slot(
         if preferred_gpus is not None:
             reasons = []
             for gpu in preferred_gpus:
-                ok, reason = availability_detail(
-                    ledger,
+                ok, reason = _availability_detail_indexed(
+                    index,
                     gpu,
                     candidate_start,
                     candidate_end,
                     mode,
-                    uid,
                     config.max_shared_users,
                     expected_memory_mb,
                     gpu_memory_capacity_mb,
@@ -417,14 +437,13 @@ def find_earliest_slot(
                 return candidate_start, list(preferred_gpus)
             continue
 
-        gpus, _reason = find_available_gpus_with_reason(
-            ledger,
+        gpus, _reason = _find_available_gpus_with_reason(
+            index,
             config,
             count,
             candidate_start,
             candidate_end,
             mode,
-            uid,
             gpu_order,
             gpu_scores,
             expected_memory_mb,
@@ -460,38 +479,59 @@ def availability_detail(
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None,
     shared_memory_reserve_mb: int = 0,
 ) -> Tuple[bool, str]:
-    relevant = [
-        item
-        for item in list_active(ledger, start)
-        if gpu in item.get("gpus", []) and _overlaps(start, end, parse_iso(item["start_at"]), parse_iso(item["end_at"]))
-    ]
+    index = ReservationIndex.from_ledger(ledger, start)
+    return _availability_detail_indexed(
+        index,
+        gpu,
+        start,
+        end,
+        mode,
+        max_shared_users,
+        expected_memory_mb,
+        gpu_memory_capacity_mb,
+        shared_memory_reserve_mb,
+    )
+
+
+def _availability_detail_indexed(
+    index: ReservationIndex,
+    gpu: int,
+    start: datetime,
+    end: datetime,
+    mode: str,
+    max_shared_users: int,
+    expected_memory_mb: Optional[int] = None,
+    gpu_memory_capacity_mb: Optional[Dict[int, int]] = None,
+    shared_memory_reserve_mb: int = 0,
+) -> Tuple[bool, str]:
+    relevant = index.overlapping(gpu, start, end)
     if mode == MODE_EXCLUSIVE:
         if relevant:
-            if any(item.get("mode") == MODE_EXCLUSIVE for item in relevant):
+            if any(item.mode == MODE_EXCLUSIVE for item in relevant):
                 return False, f"exclusive conflict on GPU {gpu}"
             return False, f"GPU {gpu} already has shared reservations"
         return True, ""
     if mode != MODE_SHARED:
         return False, f"unsupported booking mode: {mode}"
-    if any(item.get("mode") == MODE_EXCLUSIVE for item in relevant):
+    if any(item.mode == MODE_EXCLUSIVE for item in relevant):
         return False, f"exclusive conflict on GPU {gpu}"
 
     points = {start, end}
     for item in relevant:
-        points.add(max(start, parse_iso(item["start_at"])))
-        points.add(min(end, parse_iso(item["end_at"])))
+        points.add(max(start, item.start))
+        points.add(min(end, item.end))
     ordered = sorted(points)
     for left, right in zip(ordered, ordered[1:]):
         if left >= right:
             continue
-        segment_count = _shared_record_count_in_segment(relevant, left, right)
+        segment_count = _shared_record_count_in_spans(relevant, left, right)
         if segment_count + 1 > max_shared_users:
             return False, f"shared capacity full on GPU {gpu}"
         capacity = (gpu_memory_capacity_mb or {}).get(gpu)
         if capacity:
             usable = max(0, capacity - shared_memory_reserve_mb)
             requested = expected_memory_mb or max(1, usable // max_shared_users)
-            committed = _shared_memory_in_segment(relevant, left, right, usable, max_shared_users)
+            committed = _shared_memory_in_spans(relevant, left, right, usable, max_shared_users)
             if requested > usable or committed + requested > usable:
                 return (
                     False,
@@ -607,6 +647,38 @@ def _shared_memory_in_segment(
             continue
         try:
             expected = int(item.get("expected_memory_mb") or default_memory)
+        except (TypeError, ValueError):
+            expected = default_memory
+        total += max(1, expected)
+    return total
+
+
+def _shared_record_count_in_spans(
+    reservations: Sequence[ReservationSpan],
+    start: datetime,
+    end: datetime,
+) -> int:
+    return sum(
+        1
+        for item in reservations
+        if item.mode == MODE_SHARED and _overlaps(start, end, item.start, item.end)
+    )
+
+
+def _shared_memory_in_spans(
+    reservations: Sequence[ReservationSpan],
+    start: datetime,
+    end: datetime,
+    usable_memory_mb: int,
+    max_shared_users: int,
+) -> int:
+    default_memory = max(1, usable_memory_mb // max_shared_users)
+    total = 0
+    for item in reservations:
+        if item.mode != MODE_SHARED or not _overlaps(start, end, item.start, item.end):
+            continue
+        try:
+            expected = int(item.record.get("expected_memory_mb") or default_memory)
         except (TypeError, ValueError):
             expected = default_memory
         total += max(1, expected)
@@ -770,6 +842,30 @@ def _expire_old_reservations(ledger: dict, now: datetime) -> bool:
     return changed
 
 
+def _maintain_ledger(ledger: dict, now: datetime, retention_days: int) -> bool:
+    changed = _expire_old_reservations(ledger, now)
+    if retention_days <= 0:
+        return changed
+    cutoff = now - timedelta(days=retention_days)
+    retained = []
+    for reservation in ledger.get("reservations", []):
+        status = reservation.get("status")
+        if status == STATUS_EXPIRED:
+            terminal_at = parse_iso(reservation["end_at"])
+        elif status == STATUS_CANCELLED:
+            terminal_at = parse_iso(reservation.get("updated_at") or reservation["end_at"])
+        else:
+            retained.append(reservation)
+            continue
+        if terminal_at > cutoff:
+            retained.append(reservation)
+        else:
+            changed = True
+    if len(retained) != len(ledger.get("reservations", [])):
+        ledger["reservations"] = retained
+    return changed
+
+
 def _normalize_preferred_gpus(gpus: Optional[Sequence[int]]) -> Optional[List[int]]:
     if gpus is None:
         return None
@@ -869,8 +965,8 @@ def _normalize_operation_id(value: Optional[str]) -> Optional[str]:
     return normalized
 
 
-def _reservation_pressure_score(
-    ledger: dict,
+def _reservation_pressure_score_indexed(
+    index: ReservationIndex,
     gpu: int,
     start: datetime,
     end: datetime,
@@ -878,12 +974,10 @@ def _reservation_pressure_score(
 ) -> float:
     duration = max(1.0, (end - start).total_seconds())
     overlap_total = 0.0
-    for item in list_active(ledger, start):
-        if item.get("mode") != MODE_SHARED or gpu not in item.get("gpus", []):
+    for item in index.overlapping(gpu, start, end):
+        if item.mode != MODE_SHARED:
             continue
-        item_start = parse_iso(item["start_at"])
-        item_end = parse_iso(item["end_at"])
-        overlap = max(0.0, (min(end, item_end) - max(start, item_start)).total_seconds())
+        overlap = max(0.0, (min(end, item.end) - max(start, item.start)).total_seconds())
         overlap_total += overlap
     return round(100.0 * overlap_total / duration / max(1, max_shared_users), 3)
 
@@ -895,7 +989,21 @@ def reservation_pressure_score(
     end: datetime,
     max_shared_users: int,
 ) -> float:
-    return _reservation_pressure_score(ledger, gpu, start, end, max_shared_users)
+    return reservation_pressure_scores(ledger, [gpu], start, end, max_shared_users)[gpu]
+
+
+def reservation_pressure_scores(
+    ledger: dict,
+    gpus: Sequence[int],
+    start: datetime,
+    end: datetime,
+    max_shared_users: int,
+) -> Dict[int, float]:
+    index = ReservationIndex.from_ledger(ledger, start)
+    return {
+        gpu: _reservation_pressure_score_indexed(index, gpu, start, end, max_shared_users)
+        for gpu in gpus
+    }
 
 
 def _validate_gpu_index(config: Config, gpu: int) -> None:
@@ -908,9 +1016,22 @@ def _overlaps(start_a: datetime, end_a: datetime, start_b: datetime, end_b: date
 
 
 def _candidate_starts(ledger: dict, earliest_start: datetime, search_until: datetime) -> List[datetime]:
+    now = utc_now()
+    index = ReservationIndex.from_ledger(ledger, min(earliest_start, now))
+    return _candidate_starts_from_index(index, earliest_start, search_until, now)
+
+
+def _candidate_starts_from_index(
+    index: ReservationIndex,
+    earliest_start: datetime,
+    search_until: datetime,
+    now: datetime,
+) -> List[datetime]:
     candidates = {_ceil_to_granularity(earliest_start)}
-    for reservation in list_active(ledger, utc_now()):
-        end = _ceil_to_granularity(parse_iso(reservation["end_at"]))
+    for reservation in index.spans:
+        if reservation.end <= now:
+            continue
+        end = _ceil_to_granularity(reservation.end)
         if earliest_start <= end <= search_until:
             candidates.add(end)
     return sorted(candidates)
@@ -1026,14 +1147,6 @@ def _combine_reasons(reasons: Sequence[str]) -> str:
         if reason and reason not in seen:
             seen.append(reason)
     return "; ".join(seen[:3])
-
-
-def _reservation_sort_key(reservation: dict) -> Tuple[datetime, datetime, str]:
-    return (
-        parse_iso(reservation["start_at"]),
-        parse_iso(reservation["end_at"]),
-        str(reservation.get("id", "")),
-    )
 
 
 def _log_item(actor: Actor, action: str, reservation: dict, result: str, message: str) -> dict:

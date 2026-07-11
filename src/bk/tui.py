@@ -11,6 +11,7 @@ from .config import Config
 from .gpu import GpuSnapshot, snapshot
 from .identity import current_actor
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest, EditRequest
+from .schedule_index import ReservationIndex
 from .scheduler import (
     add_booking,
     availability_detail,
@@ -293,7 +294,8 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
 
     now = utc_now()
     ledger = store.load()
-    active = list_active(ledger, now)
+    reservation_index = ReservationIndex.from_ledger(ledger, now)
+    active = reservation_index.records()
     state.selected_gpu = min(max(state.selected_gpu, 0), config.gpu_count - 1)
     focused_gpu = state.selected_gpu if state.focus == FOCUS_GPUS and not state.editor_active else None
     selected_id = _timeline_selected_id(active, state)
@@ -316,7 +318,7 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
     view_start = state.editor_view_start if state.editor_active and state.editor_view_start else default_view_start
     view_end = view_start + timedelta(minutes=timeline_width * state.slot_minutes)
     preview = _build_add_preview(ledger, config, state, view_start) if state.editor_active else None
-    color_map = _reservation_color_map(active)
+    color_map = _reservation_color_map(active, reservation_index)
 
     _draw_header(stdscr, config, now, view_start, view_end, width, state)
     _draw_editor_banner(stdscr, 2, width, state, preview)
@@ -342,6 +344,7 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
             config.max_shared_users,
             focused_gpu == gpu.index,
             usage_by_gpu.get(gpu.index, []),
+            reservation_index,
         )
         row += 1
 
@@ -359,6 +362,7 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
         config.max_shared_users,
         height,
         focused_gpu,
+        reservation_index,
     )
 
     if focused_gpu is not None:
@@ -467,9 +471,10 @@ def _draw_gpu_row(
     shared_limit: int,
     focused: bool = False,
     process_usage: Sequence[ProcessUsage] = (),
+    reservation_index: Optional[ReservationIndex] = None,
 ) -> None:
     view_end = start + timedelta(minutes=slot_minutes * timeline_width)
-    peak_shared = _peak_shared_count_for_gpu(active, gpu.index, start, view_end)
+    peak_shared = _peak_shared_count_for_gpu(active, gpu.index, start, view_end, reservation_index)
     violations = sum(1 for item in process_usage if item.violation)
     label = _gpu_label(gpu, label_width, peak_shared, shared_limit, violations)
     cursor_active = preview is not None and gpu.index == preview.cursor_gpu
@@ -492,7 +497,18 @@ def _draw_gpu_row(
             if preview_cell is not None:
                 char, color, attr = preview_cell
             else:
-                char, color, attr = _cell_for_gpu(gpu.index, color_map, active, left, right, selected_id, col, lane, band_rows)
+                char, color, attr = _cell_for_gpu(
+                    gpu.index,
+                    color_map,
+                    active,
+                    left,
+                    right,
+                    selected_id,
+                    col,
+                    lane,
+                    band_rows,
+                    reservation_index,
+                )
             _addstr(stdscr, row + lane, label_width + col, char, width, color, attr)
 
 
@@ -510,11 +526,12 @@ def _draw_selected_gpu_lanes(
     shared_limit: int,
     height: int,
     focused_gpu: Optional[int] = None,
+    reservation_index: Optional[ReservationIndex] = None,
 ) -> int:
     view_end = start + timedelta(minutes=slot_minutes * timeline_width)
     if focused_gpu is not None:
         gpu = focused_gpu
-        related = _visible_shared_reservations(active, gpu, start, view_end)
+        related = _visible_shared_reservations(active, gpu, start, view_end, reservation_index)
         minimum_lanes = 1
         reserved_rows = 6
     else:
@@ -536,11 +553,13 @@ def _draw_selected_gpu_lanes(
         hidden = len(related) - lanes if lane == lanes - 1 else 0
         label = _share_lane_label(gpu, lane, len(related), reservation, hidden)
         label_color = _reservation_color(reservation, color_map)
+        reservation_start = parse_iso(reservation["start_at"])
+        reservation_end = parse_iso(reservation["end_at"])
         _addstr(stdscr, row + lane, 0, label[:label_width].ljust(label_width), width, label_color)
         for col in range(timeline_width):
             left = start + timedelta(minutes=slot_minutes * col)
             right = left + timedelta(minutes=slot_minutes)
-            if parse_iso(reservation["start_at"]) < right and left < parse_iso(reservation["end_at"]):
+            if reservation_start < right and left < reservation_end:
                 char = BAR_CHAR
                 color = label_color
                 attr = _selected_bar_attr() if reservation.get("id") == selected_id else curses.A_BOLD
@@ -619,14 +638,21 @@ def _cell_for_gpu(
     col: int = 0,
     lane: int = 0,
     lane_count: int = 1,
+    reservation_index: Optional[ReservationIndex] = None,
 ) -> Tuple[str, int, int]:
-    overlapping = [
-        item
-        for item in active
-        if gpu in item.get("gpus", [])
-        and parse_iso(item["start_at"]) < end
-        and start < parse_iso(item["end_at"])
-    ]
+    if reservation_index is None:
+        overlapping = sorted(
+            [
+                item
+                for item in active
+                if gpu in item.get("gpus", [])
+                and parse_iso(item["start_at"]) < end
+                and start < parse_iso(item["end_at"])
+            ],
+            key=lambda item: (parse_iso(item["start_at"]), parse_iso(item["end_at"]), str(item.get("id", ""))),
+        )
+    else:
+        overlapping = [item.record for item in reservation_index.overlapping(gpu, start, end)]
     if not overlapping:
         return FREE_CHAR, COLOR_FREE, 0
     exclusive = _choose_selected_or_first([item for item in overlapping if item.get("mode") == MODE_EXCLUSIVE], selected_id)
@@ -634,14 +660,7 @@ def _cell_for_gpu(
         if selected_id and exclusive.get("id") == selected_id:
             return BAR_CHAR, _reservation_color(exclusive, color_map), _selected_bar_attr()
         return BAR_CHAR, _reservation_color(exclusive, color_map), curses.A_BOLD
-    shared_items = sorted(
-        [
-            item
-            for item in overlapping
-            if item.get("mode") == MODE_SHARED
-        ],
-        key=lambda item: (parse_iso(item["start_at"]), parse_iso(item["end_at"]), str(item.get("id", ""))),
-    )
+    shared_items = [item for item in overlapping if item.get("mode") == MODE_SHARED]
     chosen = _choose_selected_or_first(shared_items, selected_id)
     if chosen is None:
         return FREE_CHAR, COLOR_FREE, 0
@@ -1282,7 +1301,12 @@ def _capacity_text(reservation: dict, active: Sequence[dict], shared_limit: int)
     return f"{peak}/{shared_limit}"
 
 
-def _reservation_color_map(active: Sequence[dict]) -> dict[str, int]:
+def _reservation_color_map(
+    active: Sequence[dict],
+    reservation_index: Optional[ReservationIndex] = None,
+) -> dict[str, int]:
+    if reservation_index is not None:
+        return _indexed_reservation_color_map(reservation_index)
     assignments: dict[str, int] = {}
     ordered = sorted(active, key=lambda item: (parse_iso(item["start_at"]), parse_iso(item["end_at"]), str(item.get("id", ""))))
     palette = [COLOR_RES_BASE + offset for offset in range(len(RESERVATION_COLORS))]
@@ -1299,6 +1323,24 @@ def _reservation_color_map(active: Sequence[dict]) -> dict[str, int]:
                 continue
             blocked.add(assignments[other_id])
         assignments[rid] = _pick_palette_color(palette, index, blocked)
+    return assignments
+
+
+def _indexed_reservation_color_map(index: ReservationIndex) -> dict[str, int]:
+    assignments: dict[str, int] = {}
+    active_by_gpu: dict[int, list[tuple[datetime, int, str]]] = {}
+    palette = [COLOR_RES_BASE + offset for offset in range(len(RESERVATION_COLORS))]
+    for preferred_index, span in enumerate(index.spans):
+        rid = str(span.record.get("id", ""))
+        blocked = set()
+        for gpu in span.gpus:
+            current = [item for item in active_by_gpu.get(gpu, []) if item[0] > span.start]
+            active_by_gpu[gpu] = current
+            blocked.update(item[1] for item in current if item[2] != rid)
+        color = _pick_palette_color(palette, preferred_index, blocked)
+        assignments[rid] = color
+        for gpu in span.gpus:
+            active_by_gpu.setdefault(gpu, []).append((span.end, color, rid))
     return assignments
 
 
@@ -1376,7 +1418,14 @@ def _visible_shared_reservations(
     gpu: int,
     view_start: datetime,
     view_end: datetime,
+    reservation_index: Optional[ReservationIndex] = None,
 ) -> List[dict]:
+    if reservation_index is not None:
+        return [
+            item.record
+            for item in reservation_index.overlapping(gpu, view_start, view_end)
+            if item.mode == MODE_SHARED
+        ]
     return sorted(
         [
             item
@@ -1445,7 +1494,28 @@ def _share_lane_label(gpu: int, lane: int, total: int, reservation: dict, hidden
     return f"G{gpu} {lane + 1}/{total} {str(reservation.get('id', ''))[:6]} {username}{suffix}"
 
 
-def _peak_shared_count_for_gpu(active: Sequence[dict], gpu: int, start: datetime, end: datetime) -> int:
+def _peak_shared_count_for_gpu(
+    active: Sequence[dict],
+    gpu: int,
+    start: datetime,
+    end: datetime,
+    reservation_index: Optional[ReservationIndex] = None,
+) -> int:
+    if reservation_index is not None:
+        spans = [item for item in reservation_index.overlapping(gpu, start, end) if item.mode == MODE_SHARED]
+        points = {start, end}
+        for item in spans:
+            points.add(max(start, item.start))
+            points.add(min(end, item.end))
+        ordered = sorted(points)
+        return max(
+            (
+                sum(1 for item in spans if item.start < right and left < item.end)
+                for left, right in zip(ordered, ordered[1:])
+                if left < right
+            ),
+            default=0,
+        )
     shared = [
         item
         for item in active
@@ -1538,7 +1608,7 @@ def _choose_selected_or_first(items: Sequence[dict], selected_id: Optional[str])
         for item in items:
             if item.get("id") == selected_id:
                 return item
-    return sorted(items, key=lambda item: (parse_iso(item["start_at"]), parse_iso(item["end_at"]), str(item.get("id", ""))))[0]
+    return items[0]
 
 
 def _reservations_overlap(left: dict, right: dict) -> bool:
