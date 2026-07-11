@@ -47,7 +47,8 @@ class ConfigTests(unittest.TestCase):
     def test_shared_modes_and_memory_policy_parse_from_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
-            (data_dir / "config.json").write_text(
+            config_path = data_dir / "config.json"
+            config_path.write_text(
                 json.dumps(
                     {
                         "file_mode": "0660",
@@ -58,6 +59,7 @@ class ConfigTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            config_path.chmod(0o600)
             with mock.patch.dict("os.environ", {"BK_DATA_DIR": str(data_dir)}, clear=True):
                 config = load_config()
 

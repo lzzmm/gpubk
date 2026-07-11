@@ -29,3 +29,4 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Reject edits after a reservation starts or when an exact replacement start is in the past across both TUI and scheduler APIs.
 - Add auto-detected dark/light TUI themes, a live theme toggle, and terminal-default neutral text for readable black and white backgrounds.
 - Normalize editable and installed coverage paths in CI so subprocess data cannot count the same package twice and falsely fail the coverage gate.
+- Make secure-config tests independent of the host umask used on shared lab servers.
