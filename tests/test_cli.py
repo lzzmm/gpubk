@@ -23,6 +23,11 @@ def ceil_5m(dt):
     return datetime.fromtimestamp(timestamp, timezone.utc)
 
 
+def floor_5m(dt):
+    timestamp = int(dt.timestamp())
+    return datetime.fromtimestamp(timestamp - (timestamp % 300), timezone.utc)
+
+
 class CliTests(unittest.TestCase):
     def run_bk(self, args, data_dir, extra_env=None):
         env = os.environ.copy()
@@ -67,8 +72,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("GPUbk booking", result.stdout)
             self.assertIn("bk> ", result.stdout)
-            self.assertIn("GPU 0: unknown", result.stdout)
-            self.assertIn("GPU 1: unknown", result.stdout)
+            self.assertIn("GPU status", result.stdout)
+            self.assertIn("0    unknown", result.stdout)
+            self.assertIn("1    unknown", result.stdout)
 
     def test_plain_interactive_shell_can_create_booking(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -138,9 +144,11 @@ class CliTests(unittest.TestCase):
                 - datetime.fromisoformat(booking["start_at"].replace("Z", "+00:00")),
                 timedelta(minutes=90),
             )
-            self.assertIn("selection: GPU 1", result.stdout)
+            self.assertIn("gpu=1", result.stdout)
+            self.assertNotIn("selection: GPU 1", result.stdout)
             self.assertIn("avoided currently busy GPU 0", result.stdout)
-            self.assertIn("now-free=", result.stdout)
+            self.assertIn("physical-free-now=", result.stdout)
+            self.assertIn("reservation-budget-after=", result.stdout)
 
     def test_auto_alias_defaults_to_shared(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -148,6 +156,73 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             ledger = json.loads((Path(tmp) / "ledger.json").read_text(encoding="utf-8"))
             self.assertEqual(ledger["reservations"][0]["mode"], "shared")
+
+    def test_implicit_now_starts_in_the_current_five_minute_slot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_bk(["1", "30m"], Path(tmp))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            reservation = json.loads((Path(tmp) / "ledger.json").read_text(encoding="utf-8"))["reservations"][0]
+            created_at = datetime.fromisoformat(reservation["created_at"].replace("Z", "+00:00"))
+            self.assertEqual(reservation["start_at"], iso(floor_5m(created_at)))
+
+    def test_human_at_option_accepts_relative_time_without_queueing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            before = datetime.now(timezone.utc)
+            result = self.run_bk(["1", "30m", "--at", "+30m"], Path(tmp))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            reservation = json.loads((Path(tmp) / "ledger.json").read_text(encoding="utf-8"))["reservations"][0]
+            start = datetime.fromisoformat(reservation["start_at"].replace("Z", "+00:00"))
+            self.assertGreaterEqual(start, before + timedelta(minutes=30))
+            self.assertEqual(int(start.timestamp()) % 300, 0)
+
+    def test_guided_add_recovers_each_invalid_field_in_place(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            user_input = "\n".join(
+                [
+                    "",       # shared
+                    "many",   # invalid GPU count
+                    "1",
+                    "7m",     # invalid duration
+                    "30m",
+                    "hwo",    # invalid start
+                    "now",
+                    "",       # automatic GPUs
+                    "",       # automatic VRAM estimate
+                    "",       # no command
+                    "",       # confirm
+                    "",
+                ]
+            )
+
+            result = self.run_bk_with_input(["add"], Path(tmp), user_input)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertGreaterEqual(result.stdout.count("Invalid input:"), 3)
+            self.assertIn("tomorrow 09:00", result.stdout)
+            self.assertIn("Review", result.stdout)
+            self.assertIn("created:", result.stdout)
+            ledger = json.loads((Path(tmp) / "ledger.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(ledger["reservations"]), 1)
+
+    def test_guided_add_can_go_back_and_cancel_without_writing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            user_input = "\n".join(["", "1", "back", "2", "cancel", ""])
+
+            result = self.run_bk_with_input(["add"], Path(tmp), user_input)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("cancelled", result.stdout)
+            self.assertFalse((Path(tmp) / "ledger.json").exists())
+
+    def test_guided_add_eof_cancels_cleanly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_bk_with_input(["add"], Path(tmp), "")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("cancelled", result.stdout)
+            self.assertNotIn("Traceback", result.stderr)
 
     def test_exclusive_command_uses_exclusive_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -311,7 +386,7 @@ class CliTests(unittest.TestCase):
             result = self.run_bk(["st"], Path(tmp))
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("GPU summary", result.stdout)
+            self.assertIn("GPU status", result.stdout)
 
     def test_edit_by_short_id_changes_duration(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -343,13 +418,186 @@ class CliTests(unittest.TestCase):
             self.assertEqual(ledger["reservations"][0]["mode"], "exclusive")
             self.assertNotIn("expected_memory_mb", ledger["reservations"][0])
 
-    def test_status_shows_ascii_timeline(self):
+    def test_direct_edit_accepts_friendly_local_time(self):
         with tempfile.TemporaryDirectory() as tmp:
-            result = self.run_bk(["status"], Path(tmp))
+            data_dir = Path(tmp)
+            start = iso(ceil_5m(datetime.now(timezone.utc) + timedelta(days=1)))
+            create = self.run_bk(["1", "30m", "--start", start], data_dir)
+            edit = self.run_bk(["e", "1", "--at", "+2d"], data_dir)
+
+            self.assertEqual(create.returncode, 0, create.stderr)
+            self.assertEqual(edit.returncode, 0, edit.stderr)
+            ledger = json.loads((data_dir / "ledger.json").read_text(encoding="utf-8"))
+            edited_start = datetime.fromisoformat(ledger["reservations"][0]["start_at"].replace("Z", "+00:00"))
+            self.assertGreater(edited_start, datetime.now(timezone.utc) + timedelta(days=1, hours=23))
+            self.assertEqual(int(edited_start.timestamp()) % 300, 0)
+
+    def test_guided_edit_recovers_invalid_fields_and_confirms_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            start = iso(ceil_5m(datetime.now(timezone.utc) + timedelta(days=1)))
+            create = self.run_bk(["1", "30m", "--start", start], data_dir, {"BK_GPU_COUNT": "2"})
+            user_input = "\n".join(
+                [
+                    "",      # keep mode
+                    "7m",    # invalid duration
+                    "45m",
+                    "hwo",   # invalid start
+                    "",      # keep start
+                    "",      # keep GPUs
+                    "",      # keep count
+                    "",      # keep memory
+                    "",      # do not queue
+                    "",      # confirm
+                    "",
+                ]
+            )
+            edit = self.run_bk_with_input(["e", "1"], data_dir, user_input)
+
+            self.assertEqual(create.returncode, 0, create.stderr)
+            self.assertEqual(edit.returncode, 0, edit.stderr)
+            self.assertGreaterEqual(edit.stdout.count("Invalid input:"), 2)
+            self.assertIn("Review", edit.stdout)
+            self.assertIn("duration=45m", edit.stdout)
+            self.assertIn("updated:", edit.stdout)
+            ledger = json.loads((data_dir / "ledger.json").read_text(encoding="utf-8"))
+            reservation = ledger["reservations"][0]
+            duration = datetime.fromisoformat(reservation["end_at"].replace("Z", "+00:00")) - datetime.fromisoformat(
+                reservation["start_at"].replace("Z", "+00:00")
+            )
+            self.assertEqual(duration, timedelta(minutes=45))
+
+    def test_status_is_compact_and_timeline_is_a_separate_aligned_view(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            status = self.run_bk(["status"], Path(tmp))
+            timeline = self.run_bk(["tl", "30m", "--step", "5m"], Path(tmp))
+
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertIn("GPU status", status.stdout)
+            self.assertIn("VRAM free/total", status.stdout)
+            self.assertNotIn("Timeline |", status.stdout)
+            self.assertEqual(timeline.returncode, 0, timeline.stderr)
+            self.assertIn("5m/cell | 6 cells", timeline.stdout)
+            self.assertIn("Legend: ·· free, MM mine", timeline.stdout)
+            minute_line = next(line for line in timeline.stdout.splitlines() if line.startswith("Min"))
+            gpu_line = next(line for line in timeline.stdout.splitlines() if line.startswith("G0"))
+            self.assertEqual(len(minute_line), len(gpu_line))
+            self.assertEqual((len(minute_line[6:]) + 1) // 3, 6)
+            self.assertEqual((len(gpu_line[6:]) + 1) // 3, 6)
+
+    def test_timeline_controls_window_step_start_and_gpu_filter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_bk(
+                ["timeline", "--from", "+30m", "--window", "2h", "--step", "15m", "--gpu", "0"],
+                Path(tmp),
+                {"BK_GPU_COUNT": "2"},
+            )
+
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("Timeline", result.stdout)
-            self.assertIn("Legend: . free, M mine", result.stdout)
-            self.assertIn("shared record count", result.stdout)
+            self.assertIn("15m/cell | 8 cells", result.stdout)
+            self.assertIn("G0", result.stdout)
+            self.assertNotIn("G1", result.stdout)
+
+    def test_status_and_default_timeline_fit_a_72_column_terminal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"BK_GPU_COUNT": "8", "COLUMNS": "72"}
+            status = self.run_bk(["st"], Path(tmp), env)
+            timeline = self.run_bk(["tl"], Path(tmp), env)
+
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertEqual(timeline.returncode, 0, timeline.stderr)
+            self.assertTrue(all(len(line) <= 72 for line in status.stdout.splitlines()), status.stdout)
+            self.assertTrue(all(len(line) <= 72 for line in timeline.stdout.splitlines()), timeline.stdout)
+            self.assertEqual(timeline.stdout.count("Min   "), 2)
+
+    def test_narrow_status_with_a_reservation_remains_compact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            env = {"BK_GPU_COUNT": "8", "COLUMNS": "72"}
+            created = self.run_bk(["2", "1h30m", "--quiet"], data_dir, env)
+            status = self.run_bk(["st"], data_dir, env)
+
+            self.assertEqual(created.returncode, 0, created.stderr)
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertTrue(all(len(line) <= 72 for line in status.stdout.splitlines()), status.stdout)
+            self.assertIn("G=0,1", status.stdout)
+
+    def test_timeline_auto_step_scales_a_long_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_bk(
+                ["tl", "1d", "--step", "auto"],
+                Path(tmp),
+                {"BK_GPU_COUNT": "2", "COLUMNS": "72"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("2h/cell | 12 cells", result.stdout)
+            self.assertTrue(all(len(line) <= 72 for line in result.stdout.splitlines()), result.stdout)
+
+    def test_verbose_booking_restores_load_score_details(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            simulation = data_dir / "gpu-sim.json"
+            simulation.write_text(
+                json.dumps(
+                    {
+                        "gpus": [
+                            {
+                                "index": 0,
+                                "name": "idle",
+                                "memory_used_mb": 0,
+                                "memory_total_mb": 24000,
+                                "utilization_percent": 0,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_bk(
+                ["1", "30m", "--verbose"],
+                data_dir,
+                {"BK_GPU_SIM_FILE": str(simulation)},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("selection: GPU 0", result.stdout)
+
+    def test_quiet_booking_prints_one_result_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_bk(["1", "30m", "--quiet"], Path(tmp))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(result.stdout.splitlines()), 1)
+            self.assertTrue(result.stdout.startswith("created:"), result.stdout)
+
+    def test_slots_lists_multiple_read_only_placement_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            result = self.run_bk(
+                ["slots", "1", "30m", "--limit", "2"],
+                data_dir,
+                {"BK_GPU_COUNT": "2"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Earliest shared options", result.stdout)
+            self.assertIn("read-only", result.stdout)
+            self.assertIn(" 1 0", result.stdout)
+            self.assertIn(" 2 1", result.stdout)
+            self.assertIn("Book option 1: bk 1 30m --gpu 0 --at", result.stdout)
+            self.assertFalse((data_dir / "ledger.json").exists())
+
+    def test_help_prioritizes_common_cli_workflows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_bk(["--help"], Path(tmp), {"COLUMNS": "72"})
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("BOOK\n", result.stdout)
+            self.assertIn("VIEW\n", result.stdout)
+            self.assertIn("bk 2 1h30m", result.stdout)
+            self.assertIn("bk e ID --at 20:00", result.stdout)
+            self.assertTrue(all(len(line) <= 72 for line in result.stdout.splitlines()), result.stdout)
 
     def test_monitor_once_writes_usage_events_and_rollups(self):
         with tempfile.TemporaryDirectory() as tmp:

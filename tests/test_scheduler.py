@@ -122,6 +122,26 @@ class SchedulerModeTests(unittest.TestCase):
         self.assertEqual(retried.reservation["id"], first.reservation["id"])
         self.assertEqual(len(self.store.load()["reservations"]), 1)
 
+    def test_implicit_now_operation_id_remains_idempotent_across_a_slot_boundary(self):
+        request_time = self.start + timedelta(minutes=1)
+        request = self.request(
+            1001,
+            MODE_SHARED,
+            start=request_time,
+            allow_queue=True,
+            op_id="agent-now-across-boundary",
+        )
+
+        with mock.patch("bk.scheduler.utc_now", return_value=request_time):
+            first = add_booking(self.store, self.config, request)
+        with mock.patch("bk.scheduler.utc_now", return_value=request_time + timedelta(minutes=5)):
+            retried = add_booking(self.store, self.config, request)
+
+        self.assertTrue(first.created)
+        self.assertFalse(retried.created)
+        self.assertEqual(retried.reservation["id"], first.reservation["id"])
+        self.assertEqual(len(self.store.load()["reservations"]), 1)
+
     def test_edit_operation_id_is_idempotent_and_cannot_be_reused(self):
         actor = Actor(uid=1001, username="user1001")
         created = add_booking(self.store, self.config, self.request(actor.uid, MODE_SHARED))
@@ -383,15 +403,31 @@ class SchedulerModeTests(unittest.TestCase):
                 ),
             )
 
-    def test_implicit_now_start_is_rounded_up_to_five_minute_grid(self):
-        unaligned = self.start + timedelta(minutes=1)
-        result = add_booking(
-            self.store,
-            self.config,
-            self.request(1001, MODE_SHARED, start=unaligned, allow_queue=True),
-        )
+    def test_implicit_now_start_uses_the_current_five_minute_slot(self):
+        now = self.start + timedelta(minutes=1, seconds=17)
 
-        self.assertEqual(int(parse_iso(result.reservation["start_at"]).timestamp()) % 300, 0)
+        with mock.patch("bk.scheduler.utc_now", return_value=now):
+            result = add_booking(
+                self.store,
+                self.config,
+                self.request(1001, MODE_SHARED, start=now, allow_queue=True),
+            )
+
+        self.assertEqual(parse_iso(result.reservation["start_at"]), self.start)
+        self.assertEqual(parse_iso(result.reservation["end_at"]), self.start + timedelta(hours=1))
+
+    def test_future_unaligned_queue_start_is_still_rounded_up(self):
+        now = self.start - timedelta(minutes=30)
+        requested = self.start + timedelta(minutes=1)
+
+        with mock.patch("bk.scheduler.utc_now", return_value=now):
+            result = add_booking(
+                self.store,
+                self.config,
+                self.request(1001, MODE_SHARED, start=requested, allow_queue=True),
+            )
+
+        self.assertEqual(parse_iso(result.reservation["start_at"]), self.start + timedelta(minutes=5))
 
     def test_explicit_start_and_duration_must_match_five_minute_grid(self):
         with self.assertRaisesRegex(BookingError, "5-minute boundary"):

@@ -14,7 +14,7 @@ bk l --json
 bk j --json
 ```
 
-Omitting `--start` permits earliest-slot queueing. Providing `--start` means exact placement.
+Omitting `--start` uses the active 5-minute interval when possible, then permits earliest-slot queueing. Providing `--start` means exact placement. Human CLI users may use `--at`; Agents should keep using explicit ISO 8601 and structured fields.
 The ledger binds its scheduling and storage policy on first write. Agents must surface policy-mismatch errors instead of retrying with altered local limits.
 
 Recommendation fields:

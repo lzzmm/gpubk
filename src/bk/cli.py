@@ -4,8 +4,10 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import sys
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from itertools import combinations, islice
 from pathlib import Path
 from typing import List, Optional
 
@@ -20,6 +22,7 @@ from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, EditReques
 from .scheduler import (
     cancel_booking,
     edit_booking,
+    find_earliest_slot,
     find_policy_violations,
     list_active,
     shared_memory_headroom_for_reservation,
@@ -38,6 +41,7 @@ from .timeparse import (
     format_local,
     format_local_range,
     parse_duration_seconds,
+    parse_friendly_start,
     parse_iso,
     parse_memory_mb,
     parse_start,
@@ -51,6 +55,12 @@ try:
     import readline  # noqa: F401
 except ImportError:
     pass
+
+
+TIMELINE_CELL_WIDTH = 3
+TIMELINE_DEFAULT_WINDOW_SECONDS = 2 * 60 * 60
+TIMELINE_MAX_SLOTS = 240
+TIMELINE_AUTO_STEPS = (300, 600, 900, 1800, 3600, 7200, 14400, 28800, 43200, 86400)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -88,9 +98,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _job_log_command(argv[1:], config, store)
         if head in {"job-retry", "jr"}:
             return _job_retry_command(argv[1:], store)
-        if head in {"status", "timeline", "st"}:
-            _print_status(config, store)
-            return 0
+        if head in {"status", "st"}:
+            return _status_command(argv[1:], config, store)
+        if head in {"timeline", "tl"}:
+            return _status_command(argv[1:], config, store, timeline_only=True)
+        if head in {"slots", "slot", "free", "sl"}:
+            return _slots_command(argv[1:], config, store)
         if head in {"agent", "ai"}:
             return _agent_command(argv[1:], config, store)
         if head == "mcp":
@@ -194,8 +207,14 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
     if head in {"h", "help", "?"}:
         _print_shell_help()
         return True
-    if head in {"status", "refresh", "r", "timeline", "st"}:
-        _print_status(config, store)
+    if head in {"status", "refresh", "r", "st"}:
+        _status_command(args[1:], config, store)
+        return True
+    if head in {"timeline", "tl"}:
+        _status_command(args[1:], config, store, timeline_only=True)
+        return True
+    if head in {"slots", "slot", "free", "sl"}:
+        _slots_command(args[1:], config, store)
         return True
     if head in {"list", "ls", "l"}:
         _list_command(args[1:], store)
@@ -261,18 +280,32 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
     parser = argparse.ArgumentParser(prog=f"bk {'exclusive' if mode == MODE_EXCLUSIVE else ''}".strip())
     parser.add_argument("count", type=int)
     parser.add_argument("duration")
-    parser.add_argument("--start", help="ISO time; omitted means now with automatic queueing")
+    start_group = parser.add_mutually_exclusive_group()
+    start_group.add_argument(
+        "--start",
+        help="exact ISO time, e.g. 2030-01-01T20:00:00+08:00; omitted means now with queueing",
+    )
+    start_group.add_argument(
+        "--at",
+        help="exact local-friendly time: +30m, 20:00, 'tomorrow 09:00', or 07-13 20:00",
+    )
     parser.add_argument("--gpu", help="comma separated GPU indexes, for example 0,1")
     parser.add_argument("--mem", help="expected memory on each GPU, for example 12g or 4096m")
     parser.add_argument("--op-id", help="idempotency key for agents and retry-safe scripts")
     parser.add_argument("--json", action="store_true", help="emit a stable machine-readable result")
+    parser.add_argument("-v", "--verbose", action="store_true", help="show placement scores and load history")
+    parser.add_argument("-q", "--quiet", action="store_true", help="print only the booking result line")
     args = parser.parse_args(booking_argv)
 
-    start_raw = args.start or "now"
     preferred = _parse_gpu_list(args.gpu) if args.gpu else None
     expected_memory_mb = parse_memory_mb(args.mem) if args.mem else None
     duration_seconds = parse_duration_seconds(args.duration)
-    start_at = parse_start(start_raw)
+    if args.at is not None:
+        start_at = parse_friendly_start(args.at)
+    elif args.start is not None:
+        start_at = parse_start(args.start)
+    else:
+        start_at = utc_now()
     actor = _current_actor()
     submission = submit_booking(
         config,
@@ -283,7 +316,7 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
         start_at=start_at,
         mode=mode,
         preferred_gpus=preferred,
-        allow_queue=args.start is None,
+        allow_queue=args.start is None and args.at is None,
         operation_id=args.op_id,
         command_argv=command_argv,
         working_directory=os.getcwd() if command_argv is not None else None,
@@ -313,17 +346,154 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
         f"{status}: {_short_id(reservation)} mode={reservation['mode']} "
         f"gpu={gpus} {format_local_range(reservation['start_at'], reservation['end_at'])}"
     )
-    _print_booking_advice(config, store, reservation, advice, expected_memory_mb)
-    if allocator.source == "external":
-        print(f"allocator: external{f' ({allocator.reason})' if allocator.reason else ''}")
-    elif allocator.warning:
-        print(f"warning: {allocator.warning}", file=sys.stderr)
-    if isinstance(reservation.get("job"), dict):
-        print(
-            f"job: {reservation['job'].get('status')} "
-            f"command={reservation['job'].get('summary', 'private command')}"
+    if not args.quiet:
+        _print_booking_advice(
+            config,
+            store,
+            reservation,
+            advice,
+            expected_memory_mb,
+            verbose=args.verbose,
         )
-        print("worker: keep `bk w` running before the scheduled start")
+    if not args.quiet:
+        if allocator.source == "external":
+            print(f"allocator: external{f' ({allocator.reason})' if allocator.reason else ''}")
+        elif allocator.warning:
+            print(f"warning: {allocator.warning}", file=sys.stderr)
+        if isinstance(reservation.get("job"), dict):
+            print(
+                f"job: {reservation['job'].get('status')} "
+                f"command={reservation['job'].get('summary', 'private command')}"
+            )
+            print("worker: keep `bk w` running before the scheduled start")
+    return 0
+
+
+def _slots_command(argv: List[str], config: Config, store: LedgerStore) -> int:
+    positional_mode = None
+    if argv and argv[0] in {"s", "shared", "x", "exclusive"}:
+        positional_mode = argv.pop(0)
+    parser = argparse.ArgumentParser(prog="bk slots")
+    parser.add_argument("count", type=int)
+    parser.add_argument("duration")
+    parser.add_argument("--mode", choices=["s", "shared", "x", "exclusive"])
+    parser.add_argument(
+        "--from",
+        dest="start",
+        default="now",
+        help="earliest start: now, +30m, 20:00, 'tomorrow 09:00', or ISO",
+    )
+    parser.add_argument("--gpu", help="restrict the search to one exact GPU set, e.g. 0,1")
+    parser.add_argument("--mem", help="expected VRAM on each GPU, e.g. 12g")
+    parser.add_argument("--limit", type=int, default=5, help="number of alternatives to show (default: 5)")
+    args = parser.parse_args(argv)
+
+    if args.count < 1 or args.count > config.gpu_count:
+        raise ValueError(f"GPU count must be between 1 and {config.gpu_count}")
+    if args.limit < 1 or args.limit > 20:
+        raise ValueError("--limit must be between 1 and 20")
+    duration_seconds = parse_duration_seconds(args.duration)
+    if duration_seconds % (5 * 60):
+        raise ValueError("duration must be a multiple of 5 minutes")
+    mode_value = args.mode or positional_mode or "shared"
+    mode = MODE_EXCLUSIVE if mode_value in {"x", "exclusive"} else MODE_SHARED
+    start = parse_friendly_start(args.start)
+    expected_memory_mb = parse_memory_mb(args.mem) if args.mem else None
+    preferred = _parse_gpu_list(args.gpu) if args.gpu else None
+    if preferred is not None:
+        if len(preferred) != args.count:
+            raise ValueError("--gpu count must match requested GPU count")
+        invalid = [gpu for gpu in preferred if gpu < 0 or gpu >= config.gpu_count]
+        if invalid:
+            raise ValueError(f"GPU IDs must be between 0 and {config.gpu_count - 1}")
+
+    advice = build_gpu_advice(config)
+    ledger = store.load()
+    duration = timedelta(seconds=duration_seconds)
+    actor = _current_actor()
+    evaluated_limit = 2048
+    if preferred is not None:
+        gpu_sets = [tuple(preferred)]
+        truncated = False
+    else:
+        all_sets = combinations(advice.order, args.count)
+        gpu_sets = list(islice(all_sets, evaluated_limit + 1))
+        truncated = len(gpu_sets) > evaluated_limit
+        gpu_sets = gpu_sets[:evaluated_limit]
+
+    snapshots = {item.index: item for item in advice.snapshots}
+    options = []
+    for gpu_set in gpu_sets:
+        slot = find_earliest_slot(
+            ledger,
+            config,
+            args.count,
+            start,
+            duration,
+            mode,
+            actor.uid,
+            preferred_gpus=gpu_set,
+            allow_queue=True,
+            gpu_order=advice.order,
+            gpu_scores=advice.scores,
+            expected_memory_mb=expected_memory_mb,
+            gpu_memory_capacity_mb=advice.memory_capacities_mb,
+        )
+        if slot is None:
+            continue
+        scheduled_start, gpus = slot
+        score = sum(advice.scores[gpu] for gpu in gpus)
+        options.append((scheduled_start, score, tuple(gpus)))
+
+    options.sort(key=lambda item: (item[0], item[1], item[2]))
+    options = options[: args.limit]
+    if not options:
+        print(f"No legal {mode} slot found in the next {config.queue_search_hours}h.")
+        return 3
+
+    print(
+        f"Earliest {mode} options | {args.count} GPU | {_duration_compact(duration_seconds)} "
+        f"| local time | read-only"
+    )
+    wide_slots = shutil.get_terminal_size(fallback=(100, 24)).columns >= 88
+    if wide_slots:
+        print(f"{'#':>2} {'GPUs':<12} {'Start':<22} {'End':<22} {'Live':<9} {'Free now':>10}")
+    else:
+        print(f"{'#':>2} {'GPUs':<8} {'Start':<11} {'End':<11} {'Live':<7} {'Free':>8}")
+    for index, (scheduled_start, _score, gpus) in enumerate(options, 1):
+        scheduled_end = scheduled_start + duration
+        states = [advice.live_states[gpu].status for gpu in gpus]
+        live = "idle" if all(state == "idle" for state in states) else ("busy" if "busy" in states else "unknown")
+        free_values = [
+            max(0, snapshots[gpu].memory_total_mb - snapshots[gpu].memory_used_mb)
+            for gpu in gpus
+            if gpu in snapshots and snapshots[gpu].memory_total_mb
+        ]
+        free_text = _format_memory_mb(min(free_values)) if free_values else "unknown"
+        gpu_text = ",".join(map(str, gpus))
+        if wide_slots:
+            print(
+                f"{index:>2} {gpu_text:<12} "
+                f"{format_local(scheduled_start):<22} {format_local(scheduled_end):<22} "
+                f"{live:<9} {free_text:>10}"
+            )
+        else:
+            print(
+                f"{index:>2} {_clip_text(gpu_text, 8):<8} "
+                f"{scheduled_start.astimezone():%m-%d %H:%M} {scheduled_end.astimezone():%m-%d %H:%M} "
+                f"{live:<7} {_clip_text(free_text, 8):>8}"
+            )
+    if truncated:
+        print(f"note: evaluated the best {evaluated_limit} GPU combinations")
+    first_start, _first_score, first_gpus = options[0]
+    mode_prefix = "x " if mode == MODE_EXCLUSIVE else ""
+    first_gpu_text = ",".join(map(str, first_gpus))
+    first_at = first_start.astimezone().strftime("%m-%d %H:%M")
+    memory_arg = f" --mem {args.mem}" if args.mem else ""
+    print(
+        f"Book option 1: bk {mode_prefix}{args.count} {_duration_compact(duration_seconds)} "
+        f"--gpu {first_gpu_text} --at \"{first_at}\"{memory_arg}"
+    )
     return 0
 
 
@@ -474,7 +644,10 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     recommend_parser.add_argument("count", type=int)
     recommend_parser.add_argument("duration")
     recommend_parser.add_argument("--mode", default="s", choices=["s", "shared", "x", "exclusive"])
-    recommend_parser.add_argument("--start", help="exact ISO start; omitted means earliest queueable slot")
+    recommend_parser.add_argument(
+        "--start",
+        help="exact ISO start, e.g. 2030-01-01T20:00:00+08:00; omitted means earliest slot",
+    )
     recommend_parser.add_argument("--gpu", help="fixed comma-separated GPU indexes")
     recommend_parser.add_argument("--mem", help="expected memory per GPU, e.g. 12g")
     recommend_parser.add_argument("--compact", action="store_true")
@@ -482,7 +655,10 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     edit_parser.add_argument("reservation_id", help="reservation number or unique ID prefix")
     edit_parser.add_argument("--op-id", help="stable retry-safe operation ID (required)")
     edit_parser.add_argument("--duration")
-    edit_parser.add_argument("--start", help="exact ISO start unless --queue is provided")
+    edit_parser.add_argument(
+        "--start",
+        help="exact ISO start, e.g. 2030-01-01T20:00:00+08:00, unless --queue is used",
+    )
     edit_parser.add_argument("--gpu", help="fixed comma-separated GPU indexes")
     edit_parser.add_argument("--count", type=int, help="new GPU count with automatic selection")
     edit_parser.add_argument("--mode", choices=["s", "shared", "x", "exclusive"])
@@ -627,23 +803,42 @@ def _service_command(argv: List[str]) -> int:
 
 
 def _add_interactive(config: Config, store: LedgerStore) -> int:
+    print("Guided booking. Enter accepts a default; type back or cancel at any field.")
     actor = _current_actor()
-    mode_raw = input("mode [s/x] (shared): ").strip() or MODE_SHARED
-    if mode_raw in {"s", "x"}:
-        mode_raw = MODE_SHARED if mode_raw == "s" else MODE_EXCLUSIVE
-    if mode_raw not in {MODE_SHARED, MODE_EXCLUSIVE}:
-        raise ValueError("mode must be shared or exclusive")
-    count = int(input("gpu count: ").strip())
-    duration = parse_duration_seconds(input("duration (30m/1h30m/1d): ").strip())
-    start_raw = input("start ISO or now (now): ").strip()
-    allow_queue = start_raw in {"", "now"}
-    start = parse_start(start_raw or "now")
-    gpu_raw = input("gpu indexes optional, for example 0,1: ").strip()
-    preferred = _parse_gpu_list(gpu_raw) if gpu_raw else None
-    memory_raw = input("expected memory per GPU optional, for example 12g: ").strip()
-    expected_memory_mb = parse_memory_mb(memory_raw) if memory_raw else None
-    command_raw = input("command optional, for example python train.py: ").strip()
-    command_argv = shlex.split(command_raw) if command_raw else None
+    try:
+        values = _guided_booking_fields(config)
+    except (EOFError, KeyboardInterrupt):
+        print("\ncancelled")
+        return 0
+    if values is None:
+        print("cancelled")
+        return 0
+    mode_raw = values["mode"]
+    count = values["count"]
+    duration = values["duration"]
+    start, allow_queue = values["start"]
+    preferred = values["gpus"]
+    expected_memory_mb = values["memory"]
+    command_argv = values["command"]
+
+    start_text = "current 5-minute interval, then earliest queueable slot" if allow_queue else format_local(start)
+    gpu_text = "automatic" if preferred is None else ",".join(map(str, preferred))
+    memory_text = "equal-share estimate" if expected_memory_mb is None else _format_memory_mb(expected_memory_mb)
+    print("Review")
+    print(f"  mode={mode_raw} GPUs={count} ({gpu_text}) duration={_duration_compact(duration)}")
+    print(f"  start={start_text}")
+    print(f"  expected VRAM/GPU={memory_text}")
+    if command_argv:
+        print(f"  command={shlex.join(command_argv)}")
+    try:
+        confirmed = _guided_value("create this reservation? [Y/n]: ", _guided_confirmation)
+    except (EOFError, KeyboardInterrupt):
+        print("\ncancelled")
+        return 0
+    if not confirmed:
+        print("cancelled")
+        return 0
+
     submission = submit_booking(
         config,
         store,
@@ -669,6 +864,246 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
     return 0
 
 
+def _guided_booking_fields(config: Config) -> Optional[dict]:
+    fields = [
+        (
+            "mode",
+            lambda _values: "mode [s shared / x exclusive] (s): ",
+            lambda raw, _values: _guided_mode(raw),
+        ),
+        (
+            "count",
+            lambda _values: f"GPU count [1-{config.gpu_count}]: ",
+            lambda raw, _values: _guided_gpu_count(raw, config.gpu_count),
+        ),
+        (
+            "duration",
+            lambda _values: "duration [30m, 1h30m, 1d]: ",
+            lambda raw, _values: _guided_duration(raw),
+        ),
+        (
+            "start",
+            lambda _values: "start [now, +30m, 20:00, tomorrow 09:00, 07-13 20:00] (now): ",
+            lambda raw, _values: _guided_start(raw),
+        ),
+        (
+            "gpus",
+            lambda values: f"GPU IDs [auto or {','.join(map(str, range(min(values['count'], config.gpu_count))))}] (auto): ",
+            lambda raw, values: _guided_gpus(raw, values["count"], config.gpu_count),
+        ),
+        (
+            "memory",
+            lambda _values: "expected VRAM per GPU [auto or 12g] (auto): ",
+            lambda raw, _values: _guided_memory(raw),
+        ),
+        (
+            "command",
+            lambda _values: "command to run at start [optional]: ",
+            lambda raw, _values: _guided_command(raw),
+        ),
+    ]
+    return _guided_fields(fields)
+
+
+def _guided_edit_fields(config: Config, reservation: dict) -> Optional[dict]:
+    current_gpus = ",".join(map(str, reservation.get("gpus", [])))
+    current_memory = reservation.get("expected_memory_mb")
+    memory_text = _format_memory_mb(int(current_memory)) if current_memory is not None else "automatic"
+    fields = [
+        (
+            "mode",
+            lambda _values: f"mode [keep {reservation['mode']} | s shared | x exclusive] (keep): ",
+            lambda raw, _values: None if not raw else _guided_mode(raw),
+        ),
+        (
+            "duration",
+            lambda _values: "duration [keep | 30m | 1h30m] (keep): ",
+            lambda raw, _values: None if not raw else _guided_duration(raw),
+        ),
+        (
+            "start",
+            lambda _values: "start [keep | +30m | 20:00 | tomorrow 09:00] (keep): ",
+            lambda raw, _values: None if not raw else parse_friendly_start(raw),
+        ),
+        (
+            "gpus",
+            lambda _values: f"GPU IDs [keep {current_gpus} | e.g. 0,1] (keep): ",
+            lambda raw, _values: _guided_optional_gpus(raw, config.gpu_count),
+        ),
+        (
+            "count",
+            lambda _values: f"GPU count for auto-pick [keep | 1-{config.gpu_count}] (keep): ",
+            lambda raw, values: _guided_optional_count(raw, config.gpu_count, values.get("gpus")),
+        ),
+        (
+            "memory",
+            lambda _values: f"expected VRAM/GPU [keep {memory_text} | 12g | - automatic] (keep): ",
+            lambda raw, _values: _guided_edit_memory(raw),
+        ),
+        (
+            "queue",
+            lambda _values: "move to the next slot if this edit conflicts? [y/N]: ",
+            lambda raw, _values: _guided_yes_no(raw),
+        ),
+    ]
+    return _guided_fields(fields)
+
+
+def _guided_fields(fields) -> Optional[dict]:
+    values = {}
+    index = 0
+    while index < len(fields):
+        name, prompt, parser = fields[index]
+        raw = input(prompt(values)).strip()
+        control = raw.lower()
+        if control == "cancel":
+            return None
+        if control == "back":
+            if index == 0:
+                print("  Already at the first field.")
+            else:
+                index -= 1
+                values.pop(fields[index][0], None)
+            continue
+        try:
+            values[name] = parser(raw, values)
+        except (BookingError, ValueError) as exc:
+            print(f"  Invalid input: {exc}. Please try again.")
+            continue
+        index += 1
+    return values
+
+
+def _guided_value(prompt: str, parser):
+    while True:
+        raw = input(prompt).strip()
+        try:
+            return parser(raw)
+        except (BookingError, ValueError) as exc:
+            print(f"  Invalid input: {exc}. Please try again.")
+
+
+def _guided_mode(raw: str) -> str:
+    value = (raw or "s").lower()
+    if value in {"s", MODE_SHARED}:
+        return MODE_SHARED
+    if value in {"x", MODE_EXCLUSIVE}:
+        return MODE_EXCLUSIVE
+    raise ValueError("use s/shared or x/exclusive")
+
+
+def _guided_gpu_count(raw: str, gpu_count: int) -> int:
+    if not raw:
+        raise ValueError("GPU count is required, for example 1")
+    try:
+        count = int(raw)
+    except ValueError as exc:
+        raise ValueError("GPU count must be a whole number") from exc
+    if count < 1 or count > gpu_count:
+        raise ValueError(f"GPU count must be between 1 and {gpu_count}")
+    return count
+
+
+def _guided_duration(raw: str) -> int:
+    duration = parse_duration_seconds(raw)
+    if duration % (5 * 60):
+        raise ValueError("duration must be a multiple of 5 minutes")
+    return duration
+
+
+def _guided_start(raw: str) -> tuple[datetime, bool]:
+    value = raw or "now"
+    return parse_friendly_start(value), value.lower() == "now"
+
+
+def _guided_gpus(raw: str, count: int, gpu_count: int) -> Optional[List[int]]:
+    if not raw or raw.lower() == "auto":
+        return None
+    gpus = _parse_gpu_list(raw)
+    if len(gpus) != count:
+        raise ValueError(f"enter exactly {count} GPU ID(s), or auto")
+    invalid = [gpu for gpu in gpus if gpu < 0 or gpu >= gpu_count]
+    if invalid:
+        raise ValueError(f"GPU IDs must be between 0 and {gpu_count - 1}")
+    return gpus
+
+
+def _guided_optional_gpus(raw: str, gpu_count: int) -> Optional[List[int]]:
+    if not raw:
+        return None
+    gpus = _parse_gpu_list(raw)
+    if len(set(gpus)) != len(gpus):
+        raise ValueError("GPU IDs must not be repeated")
+    invalid = [gpu for gpu in gpus if gpu < 0 or gpu >= gpu_count]
+    if invalid:
+        raise ValueError(f"GPU IDs must be between 0 and {gpu_count - 1}")
+    return gpus
+
+
+def _guided_optional_count(raw: str, gpu_count: int, gpus: Optional[List[int]]) -> Optional[int]:
+    if not raw:
+        return None
+    count = _guided_gpu_count(raw, gpu_count)
+    if gpus is not None and len(gpus) != count:
+        raise ValueError(f"GPU count must match the {len(gpus)} selected GPU ID(s)")
+    return count
+
+
+def _guided_memory(raw: str) -> Optional[int]:
+    if not raw or raw.lower() == "auto":
+        return None
+    return parse_memory_mb(raw)
+
+
+def _guided_edit_memory(raw: str) -> tuple[Optional[int], bool]:
+    if not raw:
+        return None, False
+    if raw in {"-", "auto"}:
+        return None, True
+    return parse_memory_mb(raw), True
+
+
+def _guided_yes_no(raw: str) -> bool:
+    value = (raw or "n").lower()
+    if value in {"y", "yes"}:
+        return True
+    if value in {"n", "no"}:
+        return False
+    raise ValueError("answer y or n")
+
+
+def _guided_command(raw: str) -> Optional[List[str]]:
+    if not raw:
+        return None
+    try:
+        return shlex.split(raw)
+    except ValueError as exc:
+        raise ValueError(f"command quoting is invalid: {exc}") from exc
+
+
+def _guided_confirmation(raw: str) -> bool:
+    value = (raw or "y").lower()
+    if value in {"y", "yes"}:
+        return True
+    if value in {"n", "no"}:
+        return False
+    raise ValueError("answer y or n")
+
+
+def _duration_compact(seconds: int) -> str:
+    minutes = seconds // 60
+    days, minutes = divmod(minutes, 24 * 60)
+    hours, minutes = divmod(minutes, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    return "".join(parts) or "0m"
+
+
 def _delete_command(argv: List[str], store: LedgerStore) -> int:
     parser = argparse.ArgumentParser(prog="bk del")
     parser.add_argument("reservation_id", nargs="?")
@@ -685,7 +1120,15 @@ def _edit_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     parser = argparse.ArgumentParser(prog="bk edit")
     parser.add_argument("reservation_id", nargs="?")
     parser.add_argument("--duration")
-    parser.add_argument("--start")
+    start_group = parser.add_mutually_exclusive_group()
+    start_group.add_argument(
+        "--start",
+        help="exact ISO time, e.g. 2030-01-01T20:00:00+08:00",
+    )
+    start_group.add_argument(
+        "--at",
+        help="local-friendly time: +30m, 20:00, 'tomorrow 09:00', or 07-13 20:00",
+    )
     parser.add_argument("--gpu", help="comma separated GPU indexes; use with --count to change GPU count")
     parser.add_argument("--count", type=int)
     parser.add_argument("--mode", choices=["s", MODE_SHARED, "x", MODE_EXCLUSIVE])
@@ -696,20 +1139,21 @@ def _edit_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     actor = _current_actor()
     token = args.reservation_id or _prompt_reservation_token(store, actor, "edit")
     reservation_id = _resolve_own_reservation_id(store, token, actor)
-    if not any([args.duration, args.start, args.gpu, args.count, args.mode, args.mem, args.queue]):
+    if not any([args.duration, args.start, args.at, args.gpu, args.count, args.mode, args.mem, args.queue]):
         return _edit_interactive(config, store, reservation_id, actor)
 
     preferred = _parse_gpu_list(args.gpu) if args.gpu else None
     advice = build_gpu_advice(config)
     expected_memory_mb = None if args.mem == "-" else (parse_memory_mb(args.mem) if args.mem else None)
     edit_mode = MODE_EXCLUSIVE if args.mode == "x" else (MODE_SHARED if args.mode == "s" else args.mode)
+    start_at = parse_friendly_start(args.at) if args.at else (parse_start(args.start) if args.start else None)
     result = edit_booking(
         store,
         config,
         EditRequest(
             actor=actor,
             reservation_id=reservation_id,
-            start_at=parse_start(args.start) if args.start else None,
+            start_at=start_at,
             duration_seconds=parse_duration_seconds(args.duration) if args.duration else None,
             mode=edit_mode,
             preferred_gpus=preferred,
@@ -728,40 +1172,76 @@ def _edit_command(argv: List[str], config: Config, store: LedgerStore) -> int:
 
 def _edit_interactive(config: Config, store: LedgerStore, reservation_id: str, actor: Actor) -> int:
     reservation = _get_reservation(store, reservation_id)
-    print(f"editing {_short_id(reservation)}")
-    print(f"current: mode={reservation['mode']} gpu={','.join(map(str, reservation.get('gpus', [])))} {format_local_range(reservation['start_at'], reservation['end_at'])}")
-    mode = input(f"mode [{reservation['mode']}]: ").strip() or None
-    if mode in {"s", "x"}:
-        mode = MODE_SHARED if mode == "s" else MODE_EXCLUSIVE
-    if mode and mode not in {MODE_SHARED, MODE_EXCLUSIVE}:
-        raise ValueError("mode must be s/shared or x/exclusive")
-    duration = input("duration (blank keep, e.g. 30m/4h): ").strip()
-    start = input("start ISO/now (blank keep): ").strip()
-    gpu_raw = input("gpu list (blank keep, e.g. 0,1): ").strip()
-    count_raw = input("gpu count for auto-pick (blank keep): ").strip()
-    current_memory = reservation.get("expected_memory_mb")
-    memory_default = _format_memory_mb(int(current_memory)) if current_memory is not None else "auto"
-    memory_raw = input(f"expected memory per GPU [{memory_default}] (- clears, blank keep): ").strip()
-    queue_raw = input("queue if conflict? [y/N]: ").strip().lower()
-    preferred = _parse_gpu_list(gpu_raw) if gpu_raw else None
+    print(f"Guided edit {_short_id(reservation)}. Enter keeps a value; type back or cancel at any field.")
+    print(
+        f"Current: mode={reservation['mode']} gpu={','.join(map(str, reservation.get('gpus', [])))} "
+        f"{format_local_range(reservation['start_at'], reservation['end_at'])}"
+    )
+    try:
+        values = _guided_edit_fields(config, reservation)
+    except (EOFError, KeyboardInterrupt):
+        print("\ncancelled")
+        return 0
+    if values is None:
+        print("cancelled")
+        return 0
+
+    mode = values["mode"]
+    duration = values["duration"]
+    start = values["start"]
+    preferred = values["gpus"]
+    count = values["count"]
+    expected_memory_mb, update_expected_memory = values["memory"]
+    allow_queue = values["queue"]
+    changes = []
+    if mode is not None:
+        changes.append(f"mode={mode}")
+    if duration is not None:
+        changes.append(f"duration={_duration_compact(duration)}")
+    if start is not None:
+        changes.append(f"start={format_local(start)}")
+    if preferred is not None:
+        changes.append(f"GPU={','.join(map(str, preferred))}")
+    if count is not None:
+        changes.append(f"GPU count={count} (auto-pick)")
+    if update_expected_memory:
+        memory_text = "automatic estimate" if expected_memory_mb is None else _format_memory_mb(expected_memory_mb)
+        changes.append(f"expected VRAM/GPU={memory_text}")
+    if allow_queue:
+        changes.append("queue on conflict=yes")
+    if not changes:
+        print("no changes")
+        return 0
+
+    print("Review")
+    for change in changes:
+        print(f"  {change}")
+    try:
+        confirmed = _guided_value("apply these changes? [Y/n]: ", _guided_confirmation)
+    except (EOFError, KeyboardInterrupt):
+        print("\ncancelled")
+        return 0
+    if not confirmed:
+        print("cancelled")
+        return 0
+
     advice = build_gpu_advice(config)
-    expected_memory_mb = None if memory_raw == "-" else (parse_memory_mb(memory_raw) if memory_raw else None)
     result = edit_booking(
         store,
         config,
         EditRequest(
             actor=actor,
             reservation_id=reservation_id,
-            start_at=parse_start(start) if start else None,
-            duration_seconds=parse_duration_seconds(duration) if duration else None,
+            start_at=start,
+            duration_seconds=duration,
             mode=mode,
             preferred_gpus=preferred,
             gpu_order=advice.order,
             gpu_scores=advice.scores,
-            count=int(count_raw) if count_raw else None,
-            allow_queue=queue_raw in {"y", "yes"},
+            count=count,
+            allow_queue=allow_queue,
             expected_memory_mb=expected_memory_mb,
-            update_expected_memory=bool(memory_raw),
+            update_expected_memory=update_expected_memory,
             gpu_memory_capacity_mb=advice.memory_capacities_mb,
         ),
     )
@@ -941,11 +1421,13 @@ def _print_booking_advice(
     reservation: dict,
     advice: GpuAdvice,
     expected_memory_mb: Optional[int],
+    *,
+    verbose: bool = False,
 ) -> None:
     selected = [int(gpu) for gpu in reservation.get("gpus", [])]
     has_telemetry = any(item.source != "none" for item in advice.snapshots)
     has_history = any(item.sample_count for item in advice.historical_loads.values())
-    if has_telemetry or has_history:
+    if verbose and (has_telemetry or has_history):
         parts = []
         for gpu in selected:
             state = advice.live_states[gpu]
@@ -988,10 +1470,12 @@ def _print_booking_advice(
             continue
         now_free = max(0, item.memory_total_mb - item.memory_used_mb)
         projected = headroom.get(gpu)
-        projected_text = f", projected-headroom={_format_memory_mb(projected)}" if projected is not None else ""
-        memory_parts.append(f"GPU {gpu} now-free={_format_memory_mb(now_free)}{projected_text}")
+        projected_text = (
+            f", reservation-budget-after={_format_memory_mb(projected)}" if projected is not None else ""
+        )
+        memory_parts.append(f"GPU {gpu} physical-free-now={_format_memory_mb(now_free)}{projected_text}")
     if memory_parts:
-        print("memory: " + "; ".join(memory_parts))
+        print("VRAM: " + "; ".join(memory_parts))
     if reservation.get("mode") == MODE_SHARED and expected_memory_mb is None:
         assumptions = [
             max(1, (capacities[gpu] - config.shared_memory_reserve_mb) // config.max_shared_users)
@@ -1000,8 +1484,9 @@ def _print_booking_advice(
         ]
         if assumptions:
             print(
-                f"note: --mem omitted; assumed {_format_memory_mb(min(assumptions))} per GPU "
-                f"from shared limit {config.max_shared_users}"
+                f"assumption: --mem omitted; budgeted this reservation at "
+                f"{_format_memory_mb(min(assumptions))}/GPU "
+                f"(1/{config.max_shared_users} of usable VRAM)"
             )
 
 
@@ -1106,42 +1591,51 @@ def _get_reservation(store: LedgerStore, reservation_id: str) -> dict:
 def _print_help(file=None) -> None:
     file = file or sys.stdout
     print(
-        """usage:
-  bk
-  bk <count> <duration> [--gpu 0,1] [--start ISO]
-  bk <count> <duration> -- <command> [args...]
-  bk s <count> <duration>       shared (shared/auto also accepted)
-  bk x <count> <duration>       exclusive
-  bk t                          TUI
-  bk m [--once]                 monitor
-  bk u [--rollups]              usage records
-  bk w                          run this UID's scheduled jobs
-  bk j                          list this UID's jobs
-  bk jl <number_or_short_id>    show a job log
-  bk jr <number_or_short_id>    retry a failed job
-  bk agent context              machine-readable resource context
-  bk agent recommend 2 1h30m   read-only placement recommendation
-  bk agent edit ID --duration 2h --op-id KEY
-  bk agent cancel ID            structured cancellation
-  bk mcp                        run optional local stdio MCP server
-  bk skill install              install bundled Codex skill
-  bk service install worker     install, but do not enable, a user unit
-  bk a                          guided add
-  bk e [number_or_short_id]     edit
-  bk d <number_or_short_id>     delete
-  bk l                          list
-  bk reset --yes
-  bk list
-  bk log
-  bk doctor
+        """GPUbk - shared GPU booking from the terminal
 
-duration examples: 30m, 1h30m, 1d
-shared memory: --mem 12g (expected memory per GPU)
-agent writes: create/edit require a stable --op-id
-default mode: shared
-omitted --start: queue to the earliest available slot
-explicit --start: exact time, no automatic move
-default interaction: plain prompt, no fullscreen terminal takeover
+BOOK
+  bk 2 1h30m                     earliest shared slot
+  bk x 1 30m                     earliest exclusive slot
+  bk 1 1h --gpu 3 --mem 12g      choose GPU and expected VRAM
+  bk 1 1h --at +30m              exact friendly local time
+  bk 1 1h -- command args...     book and schedule a command
+  bk a                            guided booking with input recovery
+
+VIEW
+  bk st                           compact live status
+  bk tl [2h] [--step 5m]         fine-grained aligned timeline
+  bk slots 2 1h                  read-only earliest alternatives
+  bk l                            active reservations
+  bk t                            full-screen TUI
+
+MANAGE
+  bk e [number|short_id]         guided edit
+  bk e ID --duration 2h          direct edit
+  bk e ID --at 20:00             move using local time
+  bk d <number|short_id>         cancel
+  bk lg                           personal operation log
+
+JOBS AND USAGE
+  bk w                            run this UID's due jobs
+  bk j / bk jl ID / bk jr ID     list, inspect, or retry jobs
+  bk m [--once] / bk u           monitor or inspect GPU usage
+
+AGENTS AND ADMIN
+  bk agent context               stable machine-readable context
+  bk agent recommend 2 1h30m    read-only legal placement
+  bk mcp / bk skill install      MCP server or bundled Codex skill
+  bk doctor / bk reset --yes     diagnose or explicitly clear data
+
+TIME AND POLICY
+  Durations: 30m, 1h30m, 1d. All reservations use 5-minute slices.
+  Friendly time: --at +30m, --at 20:00, --at "tomorrow 09:00".
+  Machine time: --start 2030-01-01T20:00:00+08:00.
+  No time option: use the active slice, then queue to the earliest slot.
+  Explicit --at/--start is exact. For edits, --queue allows a move.
+  Shared is the default; s/shared and x/exclusive are accepted aliases.
+
+Run `bk COMMAND --help` for more options.
+Plain `bk` opens the prompt; `bk t` opens the full-screen TUI.
 """,
         file=file,
     )
@@ -1150,7 +1644,9 @@ default interaction: plain prompt, no fullscreen terminal takeover
 def _print_shell_help() -> None:
     print(
         """Commands:
-  st | status               show GPU summary and active reservations
+  st | status               compact GPU status; add --timeline or -v
+  tl | timeline [2h]        aligned timeline; --from/--window/--step/--gpu
+  slots 2 1h               show read-only earliest booking alternatives
   1 4h [--gpu 0]            shared booking, default mode
   s 1 4h [--gpu 0]          shared booking
   x 1 4h [--gpu 0]          exclusive booking
@@ -1177,83 +1673,322 @@ def _print_shell_help() -> None:
     )
 
 
-def _print_status(config: Config, store: LedgerStore) -> None:
+def _status_command(
+    argv: List[str],
+    config: Config,
+    store: LedgerStore,
+    *,
+    timeline_only: bool = False,
+) -> int:
+    parser = argparse.ArgumentParser(prog="bk timeline" if timeline_only else "bk status")
+    if timeline_only:
+        parser.add_argument("window_arg", nargs="?", help="display span shorthand, e.g. 8h")
+    parser.add_argument(
+        "--from",
+        dest="start",
+        default="now",
+        help="window start: now, +30m, 20:00, tomorrow 09:00, or ISO",
+    )
+    parser.add_argument("--window", help="display span, e.g. 2h, 8h, or 1d")
+    parser.add_argument("--step", default="5m", help="cell size: 5m, 15m, 1h, or auto")
+    parser.add_argument("--gpu", help="show only comma-separated GPU IDs on the timeline")
+    if not timeline_only:
+        parser.add_argument("--timeline", action="store_true", help="append the configurable timeline")
+        parser.add_argument("-v", "--verbose", action="store_true", help="show processes and all reservations")
+    args = parser.parse_args(argv)
+
+    start = _floor_timeline_start(parse_friendly_start(args.start))
+    window_raw = args.window or (getattr(args, "window_arg", None) if timeline_only else None) or "2h"
+    window_seconds = parse_duration_seconds(window_raw)
+    step_seconds = _resolve_timeline_step(args.step, window_seconds)
+    if window_seconds % step_seconds:
+        raise ValueError("--window must be an exact multiple of --step")
+    slots = window_seconds // step_seconds
+    if slots > TIMELINE_MAX_SLOTS:
+        raise ValueError(
+            f"timeline would contain {slots} cells; increase --step or use --step auto "
+            f"(maximum {TIMELINE_MAX_SLOTS})"
+        )
+
+    gpus = _parse_gpu_list(args.gpu) if args.gpu else None
+    if gpus is not None:
+        invalid = [gpu for gpu in gpus if gpu < 0 or gpu >= config.gpu_count]
+        if invalid:
+            raise ValueError(f"GPU IDs must be between 0 and {config.gpu_count - 1}")
+
+    if timeline_only:
+        _print_timeline(config, store, start, window_seconds, step_seconds, gpus)
+    else:
+        _print_status(
+            config,
+            store,
+            start,
+            window_seconds,
+            step_seconds,
+            show_timeline=args.timeline,
+            verbose=args.verbose,
+            timeline_gpus=gpus,
+        )
+    return 0
+
+
+def _resolve_timeline_step(raw: str, window_seconds: int) -> int:
+    if raw.lower() != "auto":
+        step = parse_duration_seconds(raw)
+        if step % (5 * 60):
+            raise ValueError("--step must be a multiple of 5 minutes")
+        return step
+
+    terminal_columns = shutil.get_terminal_size(fallback=(100, 24)).columns
+    target_slots = max(12, (terminal_columns - 6) // TIMELINE_CELL_WIDTH)
+    for step in TIMELINE_AUTO_STEPS:
+        if window_seconds % step == 0 and window_seconds // step <= min(target_slots, TIMELINE_MAX_SLOTS):
+            return step
+    raise ValueError("--window is too large for automatic timeline scaling")
+
+
+def _floor_timeline_start(value: datetime) -> datetime:
+    normalized = value.astimezone(timezone.utc).replace(microsecond=0)
+    timestamp = int(normalized.timestamp())
+    return datetime.fromtimestamp(timestamp - (timestamp % (5 * 60)), timezone.utc)
+
+
+def _print_status(
+    config: Config,
+    store: LedgerStore,
+    timeline_start: Optional[datetime] = None,
+    window_seconds: int = TIMELINE_DEFAULT_WINDOW_SECONDS,
+    step_seconds: int = 5 * 60,
+    *,
+    show_timeline: bool = False,
+    verbose: bool = False,
+    timeline_gpus: Optional[List[int]] = None,
+) -> None:
     now = utc_now()
     active = list_active(store.load(), now)
     gpu_snapshots = snapshot(config)
+    if timeline_gpus is not None:
+        selected_gpu_ids = set(timeline_gpus)
+        gpu_snapshots = [gpu for gpu in gpu_snapshots if gpu.index in selected_gpu_ids]
     usage_by_gpu = classify_process_usage(gpu_snapshots, active, now)
-    print("GPU summary")
+    print("GPU status")
+    wide_status = shutil.get_terminal_size(fallback=(100, 24)).columns >= 88
+    if wide_status:
+        print(
+            f"{'GPU':<4} {'Model':<14} {'Util':>5} {'VRAM free/total':>16} "
+            f"{'Proc':>4} {'State':<10} {'Share':>6} {'X-free':<11}"
+        )
+    else:
+        print(f"{'GPU':<4} {'Util':>5} {'VRAM free/total':>16} {'Proc':>4} {'State':<10} {'Share':>6} {'X-free':<11}")
     for gpu in gpu_snapshots:
         if gpu.memory_total_mb:
-            mem = f"{gpu.memory_used_mb}/{gpu.memory_total_mb} MiB"
+            free = max(0, gpu.memory_total_mb - gpu.memory_used_mb) / 1024
+            total = gpu.memory_total_mb / 1024
+            mem = f"{free:.1f}/{total:.1f}G"
         else:
-            mem = "unknown"
-        util = f"{gpu.utilization_percent}%" if gpu.utilization_percent is not None else "unknown"
+            mem = "-"
+        util = f"{gpu.utilization_percent}%" if gpu.utilization_percent is not None else "-"
         rows = usage_by_gpu.get(gpu.index, [])
         violations = sum(1 for item in rows if item.violation)
-        print(
-            f"  GPU {gpu.index}: {gpu.name} util={util} mem={mem} "
-            f"processes={len(rows)} violations={violations} source={gpu.source}"
-        )
-        for item in rows:
-            process = item.process
-            sm = f"{process.sm_utilization_percent}%" if process.sm_utilization_percent is not None else "-"
+        state = "unreserved" if violations else ("busy" if rows else ("idle" if gpu.source != "none" else "unknown"))
+        overlapping_now = [
+            item
+            for item in active
+            if gpu.index in item.get("gpus", [])
+            and parse_iso(item["start_at"]) <= now < parse_iso(item["end_at"])
+        ]
+        if any(item.get("mode") == MODE_EXCLUSIVE for item in overlapping_now):
+            share = "X"
+        else:
+            share = f"{sum(1 for item in overlapping_now if item.get('mode') == MODE_SHARED)}/{config.max_shared_users}"
+        x_free = _compact_local_time(_next_exclusive_free(active, gpu.index, now), now)
+        if wide_status:
             print(
-                f"    pid={process.pid} uid={process.uid if process.uid is not None else '?'} "
-                f"user={process.username} sm={sm} mem={process.gpu_memory_mb}MiB "
-                f"state={item.status} cmd={summarize_process_command(process.command)}"
+                f"{gpu.index:<4} {_clip_text(gpu.name, 14):<14} {util:>5} {mem:>16} "
+                f"{len(rows):>4} {state:<10} {share:>6} {x_free:<11}"
             )
-
-    print()
-    _print_timeline(config, store)
-    print("Active reservations")
-    if not active:
-        print("  none")
-    else:
-        actor = _current_actor()
-        mine = _own_active_reservations(store, actor)
-        mine_index = {reservation["id"]: index + 1 for index, reservation in enumerate(mine)}
-        for reservation in active:
-            gpus = ",".join(str(item) for item in reservation.get("gpus", []))
-            index = mine_index.get(reservation["id"], "-")
+        else:
             print(
-                f"  {index:>2} {_short_id(reservation)} {reservation['mode']:<9} "
-                f"GPU={gpus:<7} {reservation['username']} "
-                f"job={reservation.get('job', {}).get('status', '-'):<10} "
-                f"{format_local_range(reservation['start_at'], reservation['end_at'])}"
+                f"{gpu.index:<4} {util:>5} {mem:>16} {len(rows):>4} "
+                f"{state:<10} {share:>6} {x_free:<11}"
             )
-    print()
+        if verbose:
+            for item in rows:
+                process = item.process
+                sm = f"{process.sm_utilization_percent}%" if process.sm_utilization_percent is not None else "-"
+                print(
+                    f"     pid={process.pid} uid={process.uid if process.uid is not None else '?'} "
+                    f"user={process.username} sm={sm} mem={process.gpu_memory_mb}MiB "
+                    f"state={item.status} cmd={summarize_process_command(process.command)}"
+                )
 
-
-def _print_timeline(config: Config, store: LedgerStore) -> None:
-    now = utc_now()
-    hours = min(config.timeline_hours, 24)
-    active = list_active(store.load(), now)
     actor = _current_actor()
-    print(f"Timeline (next {hours}h, local)")
-    label = "      " + " ".join((now + timedelta(hours=i)).astimezone().strftime("%H") for i in range(hours))
-    print(label)
-    for gpu in range(config.gpu_count):
-        cells = []
-        for offset in range(hours):
-            slot_start = now + timedelta(hours=offset)
-            slot_end = slot_start + timedelta(hours=1)
-            overlapping = [
-                item
-                for item in active
-                if gpu in item.get("gpus", [])
-                and parse_iso(item["start_at"]) < slot_end
-                and slot_start < parse_iso(item["end_at"])
-            ]
-            if not overlapping:
-                cells.append(".")
-            elif any(int(item.get("uid")) == actor.uid for item in overlapping):
-                cells.append("M")
-            elif any(item.get("mode") == MODE_EXCLUSIVE for item in overlapping):
-                cells.append("X")
+    mine = _own_active_reservations(store, actor)
+    print(f"Reservations: {len(active)} active, {len(mine)} yours | `bk l` details | `bk tl` timeline")
+    if mine:
+        for index, reservation in enumerate(mine, 1):
+            gpus = ",".join(str(item) for item in reservation.get("gpus", []))
+            if wide_status:
+                print(
+                    f"  {index:>2} {_short_id(reservation)} {reservation['mode']:<9} "
+                    f"GPU={gpus:<7} {reservation['username']} "
+                    f"job={reservation.get('job', {}).get('status', '-'):<10} "
+                    f"{format_local_range(reservation['start_at'], reservation['end_at'])}"
+                )
             else:
-                records = [item for item in overlapping if item.get("mode") == MODE_SHARED]
-                cells.append(str(min(len(records), 9)))
-        print(f"GPU{gpu:<2} " + " ".join(cells))
-    print("Legend: . free, M mine, X exclusive, 1-9 shared record count")
+                print(
+                    f"  {index:>2} {_short_id(reservation)} {reservation['mode']:<9} "
+                    f"G={_clip_text(gpus, 8):<8} {_compact_local_range(reservation['start_at'], reservation['end_at'])}"
+                )
+    if verbose and active:
+        others = [item for item in active if int(item.get("uid", -1)) != actor.uid]
+        if others:
+            print("Other reservations")
+            for reservation in others:
+                print(
+                    f"  {_short_id(reservation)} {reservation['mode']:<9} "
+                    f"GPU={','.join(map(str, reservation.get('gpus', []))):<7} "
+                    f"{reservation.get('username', '?')} "
+                    f"{format_local_range(reservation['start_at'], reservation['end_at'])}"
+                )
+    if show_timeline:
+        print()
+        _print_timeline(
+            config,
+            store,
+            timeline_start or _floor_timeline_start(now),
+            window_seconds,
+            step_seconds,
+            timeline_gpus,
+        )
     print()
+
+
+def _print_timeline(
+    config: Config,
+    store: LedgerStore,
+    start: Optional[datetime] = None,
+    window_seconds: int = TIMELINE_DEFAULT_WINDOW_SECONDS,
+    step_seconds: int = 5 * 60,
+    gpus: Optional[List[int]] = None,
+) -> None:
+    start = _floor_timeline_start(start or utc_now())
+    end = start + timedelta(seconds=window_seconds)
+    slots = window_seconds // step_seconds
+    active = list_active(store.load(), start)
+    actor = _current_actor()
+    local_start = start.astimezone()
+    local_end = end.astimezone()
+    if local_start.date() == local_end.date():
+        range_text = f"{_weekday_short(local_start)} {local_start:%m-%d %H:%M}->{local_end:%H:%M}"
+    else:
+        range_text = f"{_weekday_short(local_start)} {local_start:%m-%d %H:%M}->{local_end:%m-%d %H:%M}"
+    print(f"Timeline | {range_text} | {_duration_compact(step_seconds)}/cell | {slots} cells")
+    slot_starts = [start + timedelta(seconds=step_seconds * offset) for offset in range(slots)]
+    block_size = _timeline_block_size(len(slot_starts))
+    visible_gpus = gpus if gpus is not None else list(range(config.gpu_count))
+    for block_index in range(0, len(slot_starts), block_size):
+        block = slot_starts[block_index : block_index + block_size]
+        if block_index:
+            print()
+        _print_timeline_axis(block)
+        for gpu in visible_gpus:
+            cells = []
+            for slot_start in block:
+                slot_end = slot_start + timedelta(seconds=step_seconds)
+                overlapping = [
+                    item
+                    for item in active
+                    if gpu in item.get("gpus", [])
+                    and parse_iso(item["start_at"]) < slot_end
+                    and slot_start < parse_iso(item["end_at"])
+                ]
+                if not overlapping:
+                    cells.append("··")
+                elif any(int(item.get("uid")) == actor.uid for item in overlapping):
+                    cells.append("MM")
+                elif any(item.get("mode") == MODE_EXCLUSIVE for item in overlapping):
+                    cells.append("XX")
+                else:
+                    records = [item for item in overlapping if item.get("mode") == MODE_SHARED]
+                    cells.append(f"S{min(len(records), 9)}")
+            print(_timeline_cells(f"G{gpu}", cells))
+    print("Legend: ·· free, MM mine, XX exclusive, S1-S9 shared reservation count")
+    print("Control: --from 20:00 --window 8h --step 15m | --step auto")
+    print()
+
+
+def _print_timeline_axis(slot_starts: List[datetime]) -> None:
+    local = [item.astimezone() for item in slot_starts]
+    days = []
+    hours = []
+    minutes = []
+    for index, item in enumerate(local):
+        previous = local[index - 1] if index else None
+        days.append(f"{item.day:02d}" if previous is None or item.date() != previous.date() else "")
+        hours.append(f"{item.hour:02d}" if previous is None or item.hour != previous.hour else "")
+        minutes.append(f"{item.minute:02d}")
+    print(_timeline_cells("Day", days))
+    print(_timeline_cells("Hour", hours))
+    print(_timeline_cells("Min", minutes))
+
+
+def _timeline_cells(label: str, cells: List[str]) -> str:
+    return f"{label:<6}" + "".join(f"{cell:<{TIMELINE_CELL_WIDTH}}" for cell in cells).rstrip()
+
+
+def _timeline_block_size(slot_count: int) -> int:
+    terminal_columns = shutil.get_terminal_size(fallback=(100, 24)).columns
+    fitting = max(1, (terminal_columns - 6) // TIMELINE_CELL_WIDTH)
+    if fitting >= 12:
+        fitting = max(12, (fitting // 12) * 12)
+    return max(1, min(slot_count, fitting))
+
+
+def _weekday_short(value: datetime) -> str:
+    return ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")[value.weekday()]
+
+
+def _next_exclusive_free(active: List[dict], gpu: int, start: datetime) -> datetime:
+    intervals = sorted(
+        (
+            parse_iso(item["start_at"]),
+            parse_iso(item["end_at"]),
+        )
+        for item in active
+        if gpu in item.get("gpus", []) and parse_iso(item["end_at"]) > start
+    )
+    cursor = start
+    for interval_start, interval_end in intervals:
+        if interval_end <= cursor:
+            continue
+        if interval_start > cursor:
+            break
+        cursor = max(cursor, interval_end)
+    return cursor
+
+
+def _compact_local_time(value: datetime, now: datetime) -> str:
+    if value <= now:
+        return "now"
+    local = value.astimezone()
+    if local.date() == now.astimezone().date():
+        return f"{local:%H:%M}"
+    return f"{local:%m-%d %H:%M}"
+
+
+def _compact_local_range(start: str, end: str) -> str:
+    local_start = parse_iso(start).astimezone()
+    local_end = parse_iso(end).astimezone()
+    if local_start.date() == local_end.date():
+        return f"{local_start:%m-%d %H:%M}->{local_end:%H:%M}"
+    return f"{local_start:%m-%d %H:%M}->{local_end:%m-%d %H:%M}"
+
+
+def _clip_text(value: object, width: int) -> str:
+    text = str(value)
+    if len(text) <= width:
+        return text
+    if width <= 1:
+        return text[:width]
+    return text[: width - 1] + "+"

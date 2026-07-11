@@ -35,6 +35,7 @@ from bk.tui import (
     _editor_banner_text,
     _footer_label,
     _gpu_label,
+    _gpu_row_label,
     _header_lines,
     _handle_add_key,
     _handle_key,
@@ -49,10 +50,14 @@ from bk.tui import (
     _process_table_line,
     _reservation_palette,
     _reservation_color_map,
+    _reservation_gpu_text,
     _resolve_tui_theme,
     _selected_share_detail,
     _shared_weave_pair,
+    _start_add_select,
     _start_edit_select,
+    _table_header,
+    _timeline_label_width,
     _timeline_now_col,
     _timeline_selected_id,
     _time_axis_lines,
@@ -130,8 +135,8 @@ class TuiAddPreviewTests(unittest.TestCase):
         variants = [
             (_footer_label(TuiState(), None, width), "n NOW", "q quit"),
             (_footer_label(TuiState(focus=FOCUS_GPUS), None, width), "n NOW", "q quit"),
-            (_footer_label(TuiState(add_mode=True), preview, width), "f any", "? help"),
-            (_footer_label(TuiState(edit_mode=True), preview, width), "g selected", "? help"),
+            (_footer_label(TuiState(add_mode=True), preview, width), "f/g", "? help"),
+            (_footer_label(TuiState(edit_mode=True), preview, width), "f/g", "? help"),
         ]
         for footer, control, ending in variants:
             self.assertLessEqual(len(footer), width - 1)
@@ -185,6 +190,31 @@ class TuiAddPreviewTests(unittest.TestCase):
 
         self.assertEqual(start, datetime(2030, 1, 1, 16, 45, tzinfo=timezone.utc))
         self.assertEqual(_timeline_now_col(now, start, start + timedelta(hours=1), 12), 6)
+
+    def test_add_defaults_to_the_current_five_minute_slot(self):
+        now = datetime(2030, 1, 1, 17, 41, 23, tzinfo=timezone.utc)
+        state = TuiState()
+
+        with mock.patch("bk.tui.utc_now", return_value=now):
+            _start_add_select(self.config, state)
+            preview = _build_add_preview({}, self.config, state, state.editor_view_start)
+
+        self.assertEqual(preview.start, datetime(2030, 1, 1, 17, 40, tzinfo=timezone.utc))
+        self.assertTrue(preview.valid, preview.reason)
+
+    def test_edit_still_rejects_the_already_started_current_slot(self):
+        now = datetime(2030, 1, 1, 17, 41, 23, tzinfo=timezone.utc)
+        state = self.state()
+        state.add_mode = False
+        state.edit_mode = True
+        state.editor_view_start = datetime(2030, 1, 1, 17, 40, tzinfo=timezone.utc)
+
+        with mock.patch("bk.tui.utc_now", return_value=now):
+            preview = _build_add_preview({}, self.config, state, state.editor_view_start)
+
+        self.assertFalse(preview.valid)
+        expected = datetime(2030, 1, 1, 17, 45, tzinfo=timezone.utc).astimezone().strftime("%m-%d %H:%M")
+        self.assertIn(expected, preview.reason)
 
     def test_now_marker_and_history_cells_have_distinct_rendering(self):
         start = self.start
@@ -259,15 +289,20 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertTrue(preview.blink)
         self.assertIn("shared capacity full", preview.reason)
 
-    def test_preview_rejects_a_start_before_the_next_five_minute_boundary(self):
+    def test_preview_rejects_a_start_before_the_current_five_minute_interval(self):
         now = datetime(2030, 1, 1, 17, 2, tzinfo=timezone.utc)
         state = self.state()
 
         with mock.patch("bk.tui.utc_now", return_value=now):
-            preview = _build_add_preview(self.ledger([]), self.config, state, now.replace(minute=0))
+            preview = _build_add_preview(
+                self.ledger([]),
+                self.config,
+                state,
+                now.replace(minute=0) - timedelta(minutes=5),
+            )
 
         self.assertFalse(preview.valid)
-        expected = (now + timedelta(minutes=3)).astimezone().strftime("%m-%d %H:%M")
+        expected = now.replace(minute=0, second=0).astimezone().strftime("%m-%d %H:%M")
         self.assertIn(f"at or after {expected}", preview.reason)
 
     def test_preview_rejects_shared_memory_oversubscription(self):
@@ -318,7 +353,8 @@ class TuiAddPreviewTests(unittest.TestCase):
     def test_editor_modes_suppress_existing_reservation_selection(self):
         active = [reservation("mine", os.getuid(), MODE_SHARED, [0], self.start, self.end)]
 
-        self.assertEqual(_timeline_selected_id(active, TuiState()), "mine")
+        self.assertIsNone(_timeline_selected_id(active, TuiState()))
+        self.assertEqual(_timeline_selected_id(active, TuiState(selected=0)), "mine")
         self.assertIsNone(_timeline_selected_id(active, TuiState(add_mode=True)))
         self.assertIsNone(_timeline_selected_id(active, TuiState(edit_mode=True)))
         self.assertIsNone(_timeline_selected_id(active, TuiState(focus=FOCUS_GPUS)))
@@ -363,7 +399,11 @@ class TuiAddPreviewTests(unittest.TestCase):
 
             self.assertEqual(state.add_selected_gpus, {1})
             self.assertEqual(state.add_cursor_gpu, 1)
-            self.assertEqual(state.add_start_steps, 0)
+            preview = _build_add_preview(store.load(), config, state, state.editor_view_start)
+            view_end = state.editor_view_start + timedelta(minutes=state.timeline_columns * state.slot_minutes)
+            self.assertEqual(preview.start, self.start)
+            self.assertLessEqual(state.editor_view_start, utc_now())
+            self.assertLess(preview.end, view_end)
             self.assertFalse(state.error)
             self.assertIn("auto found 1 GPU [1]", state.message)
             self.assertEqual(len(store.load()["reservations"]), 1)
@@ -384,7 +424,9 @@ class TuiAddPreviewTests(unittest.TestCase):
             _handle_add_key(ord("f"), config, store, state)
 
             self.assertEqual(state.add_selected_gpus, {1, 2})
-            self.assertEqual(state.add_start_steps, 0)
+            preview = _build_add_preview(store.load(), config, state, state.editor_view_start)
+            self.assertEqual(preview.start, self.start)
+            self.assertGreaterEqual(state.slot_minutes, 30)
             self.assertIn("auto found 2 GPU [1,2]", state.message)
             self.assertEqual(len(store.load()["reservations"]), 1)
 
@@ -404,11 +446,12 @@ class TuiAddPreviewTests(unittest.TestCase):
             _handle_add_key(ord("g"), config, store, state)
 
             self.assertEqual(state.add_selected_gpus, {0})
-            self.assertEqual(state.editor_view_start, self.start + timedelta(minutes=15))
-            self.assertEqual(state.add_start_steps, 6)
             preview = _build_add_preview(store.load(), config, state, state.editor_view_start)
+            view_end = state.editor_view_start + timedelta(minutes=state.timeline_columns * state.slot_minutes)
             self.assertEqual(preview.start, self.start + timedelta(minutes=45))
             self.assertTrue(preview.valid, preview.reason)
+            self.assertLessEqual(state.editor_view_start, utc_now())
+            self.assertLess(preview.end, view_end)
             self.assertIn("fixed found 1 GPU [0]", state.message)
             self.assertEqual(len(store.load()["reservations"]), 1)
 
@@ -454,23 +497,43 @@ class TuiAddPreviewTests(unittest.TestCase):
             _handle_add_key(ord("2"), config, store, state)
 
             self.assertEqual(state.add_selected_gpus, {1, 2})
-            self.assertEqual(state.add_start_steps, 0)
+            preview = _build_add_preview(store.load(), config, state, state.editor_view_start)
+            self.assertEqual(preview.start, self.start)
             self.assertIn("auto found 2 GPU [1,2]", state.message)
 
-    def test_plus_and_minus_adjust_duration_in_five_minute_steps(self):
+    def test_editor_has_fine_quick_and_zoom_adjustments(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Config(data_dir=Path(tmp), gpu_count=1)
             store = LedgerStore(config.data_dir)
             state = self.state(duration_steps=6)
 
-            _handle_add_key(ord("+"), config, store, state)
-            self.assertEqual(state.add_duration_steps, 7)
-            _handle_add_key(ord("-"), config, store, state)
-            self.assertEqual(state.add_duration_steps, 6)
-            _handle_add_key(ord("["), config, store, state)
-            self.assertEqual(state.add_duration_steps, 5)
             _handle_add_key(ord("]"), config, store, state)
+            self.assertEqual(state.add_duration_steps, 7)
+            _handle_add_key(ord("["), config, store, state)
             self.assertEqual(state.add_duration_steps, 6)
+            _handle_add_key(ord("."), config, store, state)
+            self.assertEqual(state.add_duration_steps, 12)
+            _handle_add_key(ord(","), config, store, state)
+            self.assertEqual(state.add_duration_steps, 6)
+            _handle_add_key(ord("-"), config, store, state)
+            self.assertEqual(state.slot_minutes, 10)
+            self.assertEqual(state.add_duration_steps, 6)
+            _handle_add_key(ord("="), config, store, state)
+            self.assertEqual(state.slot_minutes, 5)
+
+    def test_speed_key_accelerates_time_and_duration_without_shift_support(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp), gpu_count=8)
+            store = LedgerStore(config.data_dir)
+            state = self.state(duration_steps=6)
+
+            _handle_add_key(ord("v"), config, store, state)
+            _handle_add_key(curses.KEY_RIGHT, config, store, state)
+            _handle_add_key(ord("]"), config, store, state)
+
+            self.assertEqual(state.speed_multiplier, 6)
+            self.assertEqual(state.add_start_steps, 6)
+            self.assertEqual(state.add_duration_steps, 12)
 
     def test_memory_key_without_live_screen_explains_how_to_enter_value(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -490,11 +553,15 @@ class TuiAddPreviewTests(unittest.TestCase):
             state = TuiState(focus=FOCUS_RESERVATIONS, selected=0)
 
             _move_focus_up(config, store, state)
+            self.assertEqual(state.focus, FOCUS_RESERVATIONS)
+            self.assertEqual(state.selected, -1)
+            _move_focus_up(config, store, state)
             self.assertEqual(state.focus, FOCUS_GPUS)
             self.assertEqual(state.selected_gpu, 3)
 
             _move_focus_down(config, store, state)
             self.assertEqual(state.focus, FOCUS_RESERVATIONS)
+            self.assertEqual(state.selected, -1)
 
     def test_gpu_focus_detail_lists_only_visible_shared_reservations(self):
         visible = reservation("visible", os.getuid(), MODE_SHARED, [0], self.start, self.end)
@@ -611,7 +678,7 @@ class TuiAddPreviewTests(unittest.TestCase):
             state = TuiState(selected=_own_reservation_index(store, created.reservation["id"]))
             _start_edit_select(config, store, state)
             _handle_add_key(curses.KEY_RIGHT, config, store, state)
-            _handle_add_key(ord("+"), config, store, state)
+            _handle_add_key(ord("]"), config, store, state)
             _handle_add_key(ord("x"), config, store, state)
 
             _handle_add_key(ord("r"), config, store, state)
@@ -917,10 +984,9 @@ class TuiAddPreviewTests(unittest.TestCase):
         label = _gpu_label(GpuSnapshot(index=0, name="unknown"), 30, peak_shared=4, shared_limit=4)
         narrow = _gpu_label(GpuSnapshot(index=0, name="unknown"), 20, peak_shared=4, shared_limit=4)
 
-        self.assertIn("GPU0", label)
-        self.assertIn("no telemetry", label)
-        self.assertIn("S4/4", label)
-        self.assertIn("S4/4", narrow)
+        self.assertIn("G0", label)
+        self.assertIn("4/4", label)
+        self.assertIn("4/4", narrow)
         self.assertNotIn("unknown", label)
 
     def test_gpu_metric_columns_do_not_move_when_shared_capacity_changes(self):
@@ -936,11 +1002,11 @@ class TuiAddPreviewTests(unittest.TestCase):
         idle = _gpu_label(gpu, 32, peak_shared=0, shared_limit=2)
         shared = _gpu_label(gpu, 32, peak_shared=2, shared_limit=2)
 
-        self.assertIn("S0/2", idle)
-        self.assertIn("S2/2", shared)
-        self.assertEqual(idle.index("S"), shared.index("S"))
-        self.assertEqual(idle.index("U"), shared.index("U"))
-        self.assertEqual(idle.index("F92.0G"), shared.index("F92.0G"))
+        self.assertIn("0/2", idle)
+        self.assertIn("2/2", shared)
+        self.assertEqual(idle.index("0/2"), shared.index("2/2"))
+        self.assertEqual(idle.index("72%"), shared.index("72%"))
+        self.assertEqual(idle.index("92.0G"), shared.index("92.0G"))
 
     def test_gpu_label_shows_live_utilization_processes_and_violations(self):
         process = GpuProcessSnapshot(123, 1001, "alice", "python train.py")
@@ -958,11 +1024,11 @@ class TuiAddPreviewTests(unittest.TestCase):
         label = _gpu_label(gpu, 32, peak_shared=2, shared_limit=4, violations=1)
 
         self.assertIn("!1", label)
-        self.assertIn("S2/4", label)
-        self.assertIn("U72%", label)
-        self.assertIn("F92.0G", label)
+        self.assertIn("2/4", label)
+        self.assertIn("72%", label)
+        self.assertIn("92.0G", label)
         self.assertIn("61C", label)
-        self.assertNotIn("P1", label)
+        self.assertIn("P1", label)
 
     def test_gpu_label_never_renders_a_partial_trailing_metric(self):
         gpu = GpuSnapshot(
@@ -976,12 +1042,38 @@ class TuiAddPreviewTests(unittest.TestCase):
         )
 
         label = _gpu_label(gpu, 30, peak_shared=0, shared_limit=2)
-        narrower = _gpu_label(gpu, 28, peak_shared=0, shared_limit=2)
+        narrower = _gpu_label(gpu, 24, peak_shared=0, shared_limit=2)
 
-        self.assertIn("F31.3G", label)
+        self.assertIn("31.3G", label)
         self.assertIn("26C", label)
         self.assertNotIn("26C", narrower)
         self.assertFalse(narrower.rstrip().endswith("2"), narrower)
+
+    def test_gpu_focus_marker_uses_a_reserved_column_without_shifting_metrics(self):
+        gpu = GpuSnapshot(
+            index=7,
+            name="sim",
+            memory_used_mb=1024,
+            memory_total_mb=32768,
+            utilization_percent=8,
+        )
+        width = _timeline_label_width(120)
+
+        plain = _gpu_row_label(gpu, width, peak_shared=1, shared_limit=2, focused=False)
+        focused = _gpu_row_label(gpu, width, peak_shared=1, shared_limit=2, focused=True)
+
+        self.assertEqual(len(plain), width)
+        self.assertEqual(len(focused), width)
+        self.assertEqual(plain[1:], focused[1:])
+        self.assertEqual(plain[0], " ")
+        self.assertEqual(focused[0], ">")
+
+    def test_reservation_gpu_column_is_an_eight_cell_map(self):
+        header = _table_header(120, gpu_count=8)
+        gpu_map = _reservation_gpu_text([0, 3, 7], gpu_count=8, width=8)
+
+        self.assertIn("01234567", header)
+        self.assertEqual(gpu_map, "●··●···●")
 
     def test_process_table_line_contains_user_utilization_state_and_command(self):
         process = GpuProcessSnapshot(4321, 1001, "alice", "python train.py", 3072, 68, "C")

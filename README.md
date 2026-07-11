@@ -49,7 +49,9 @@ bk 1 30m                         # one GPU for 30 minutes
 bk 2 1h30m --mem 12g            # 12 GiB expected VRAM per GPU
 bk s 1 2h --gpu 3               # explicit shared mode on GPU 3
 bk x 2 4h                        # exclusive mode
-bk 1 1h --start 2026-07-12T20:00:00+08:00
+bk 1 1h --at +30m                # human-friendly relative time
+bk 1 1h --at "tomorrow 09:00"   # local wall-clock time
+bk 1 1h --start 2030-01-01T20:00:00+08:00  # exact machine time
 ```
 
 Manage your reservations with a list number or short ID:
@@ -57,6 +59,7 @@ Manage your reservations with a list number or short ID:
 ```bash
 bk l
 bk e 1 --duration 2h
+bk e 1 --at "tomorrow 09:00"
 bk d 1
 bk doctor                         # read-only ledger checks
 ```
@@ -64,10 +67,11 @@ bk doctor                         # read-only ledger checks
 Scheduling rules are intentionally small:
 
 - Start times and durations use 5-minute boundaries.
-- Without `--start`, GPUbk picks the earliest valid slot and prints `queued:`
-  when the reservation starts later.
-- With `--start`, the time is exact. A conflict returns an error instead of
-  silently moving the reservation.
+- Without `--at` or `--start`, GPUbk starts in the active 5-minute interval when possible
+  (`12:41` starts at `12:40`) and prints `queued:` when it must start later.
+- `--at` accepts `+30m`, `20:00`, `tomorrow 09:00`, or `07-13 20:00`.
+  `--start` keeps exact ISO 8601 input for scripts and Agents. Either is exact;
+  a conflict returns an error instead of silently moving the reservation.
 - Shared capacity is counted per overlapping reservation. Exclusive
   reservations cannot overlap anything.
 - `--mem` is expected VRAM **per GPU**. Administrators can require it for all
@@ -77,6 +81,31 @@ Scheduling rules are intentionally small:
 Automatic placement considers reservations, physical free VRAM, current GPU
 processes, recent load, and near-future booking pressure. A process without a
 reservation is reported and avoided when another suitable GPU is free.
+
+## Inspect and Find Capacity
+
+The plain CLI is designed for the common path:
+
+```bash
+bk st                              # compact live status
+bk st -v                           # include processes and all reservations
+bk st --timeline                   # append the default timeline
+bk tl                              # current 5-minute interval, next 2 hours
+bk tl 8h --step 15m --gpu 0,1
+bk tl --from 20:00 --window 1d --step auto
+bk slots 2 1h --mem 12g            # read-only placement alternatives
+bk slots x 1 30m --limit 3
+```
+
+Timeline cells have fixed width: `··` is free, `MM` is yours, `XX` is
+exclusive, and `S1`-`S9` is the shared reservation count. Narrow terminals
+wrap the timeline at whole-hour boundaries without reducing the requested
+resolution.
+
+`bk add` and a flag-free `bk edit ID` are recoverable guided flows. They accept
+the same natural time forms, re-prompt an invalid field, support `back` and
+`cancel`, and show a local-time change summary before writing. `bk slots` is
+read-only and prints a copyable command for its first option.
 
 ## Terminal Interfaces
 
@@ -96,7 +125,11 @@ Useful TUI keys:
 | `Tab`, `↑`, `↓` | Move between reservations and GPU details |
 | `←`, `→` | Browse the timeline; move time in Add/Edit |
 | `Space` | Toggle the current GPU in Add/Edit |
-| `+`, `-` | Change timeline zoom or reservation duration |
+| `-`, `=` | Change timeline zoom |
+| `[`, `]` | Shorten or extend duration; normally 5 minutes |
+| `,`, `.` | Quickly shorten or extend duration; step follows zoom |
+| `v` | Cycle adjustment speed through 1x, 6x, and 24x |
+| `Shift` + adjustment | Use a larger step when the terminal reports it |
 | `1`-`9` | Pick a GPU count and jump to the nearest valid slot |
 | `s`, `x` | Switch between shared and exclusive in Add/Edit |
 | `f`, `g` | Find any suitable GPUs, or keep the selected GPUs fixed |
@@ -107,7 +140,9 @@ Useful TUI keys:
 
 The timeline can show past reservations, but history is read-only. Add and Edit
 always validate the selected interval again inside the locked scheduler
-transaction.
+transaction. Reservation focus starts on the header, so no booking blinks until
+you press Down. For servers with up to eight GPUs, reservation rows use an
+eight-cell GPU map instead of a variable-width number list.
 
 ## Run a Command at Reservation Time
 

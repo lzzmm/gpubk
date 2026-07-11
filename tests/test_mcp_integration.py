@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bk.config import Config
@@ -26,6 +27,12 @@ class McpProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 job_log_dir=Path(tmp) / "jobs",
             )
             app = create_mcp_server(BkMcpBackend(config, LedgerStore(data_dir)))
+            future = datetime.now(timezone.utc) + timedelta(days=1)
+            timestamp = int(future.timestamp())
+            remainder = timestamp % 300
+            if remainder:
+                timestamp += 300 - remainder
+            start = datetime.fromtimestamp(timestamp, timezone.utc).isoformat().replace("+00:00", "Z")
 
             async with create_connected_server_and_client_session(app, raise_exceptions=True) as session:
                 tools = await session.list_tools()
@@ -48,6 +55,7 @@ class McpProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         "count": 1,
                         "duration": "30m",
                         "mode": "shared",
+                        "start": start,
                         "expected_memory": "8g",
                         "operation_id": "mcp-protocol-test-1",
                     },
@@ -58,6 +66,7 @@ class McpProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         "count": 1,
                         "duration": "30m",
                         "mode": "shared",
+                        "start": start,
                         "expected_memory": "8g",
                         "operation_id": "mcp-protocol-test-1",
                     },

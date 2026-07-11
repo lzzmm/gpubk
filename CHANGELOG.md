@@ -5,6 +5,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 ## Unreleased
 
 - Document the draft-first workflow required by GitHub immutable releases.
+- Start implicit `now` reservations in the active 5-minute interval instead of delaying them to the next boundary.
+- Promote the plain CLI with natural `--at` times, recoverable guided Add/Edit, compact status, fixed-cell timelines, and copyable read-only `slots` alternatives.
+- Compact TUI GPU labels, neutral header focus, auto-framed Add/Edit zoom, quick duration controls, and reliable speed levels.
 
 ## 0.1.0 - 2026-07-12
 

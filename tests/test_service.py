@@ -1,14 +1,15 @@
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from bk.advisor import build_gpu_advice
 from bk.config import Config
 from bk.gpu import GpuProcessSnapshot, GpuSnapshot
 from bk.models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingRequest
 from bk.scheduler import add_booking
-from bk.service import AGENT_SCHEMA_VERSION, build_agent_context, recommend_booking, submit_edit
+from bk.service import AGENT_SCHEMA_VERSION, build_agent_context, recommend_booking, submit_booking, submit_edit
 from bk.storage import LedgerStore
 
 
@@ -83,6 +84,50 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(recommendation["recommendation"]["confidence"], "medium")
         self.assertGreater(recommendation["recommendation"]["gpu_details"][0]["memory_free_now_mb"], 20000)
         self.assertEqual(self.store.load()["reservations"], [])
+
+    def test_implicit_recommendation_uses_the_current_five_minute_slot(self):
+        now = self.start + timedelta(minutes=41, seconds=23)
+
+        with (
+            mock.patch("bk.service.utc_now", return_value=now),
+            mock.patch("bk.scheduler.utc_now", return_value=now),
+        ):
+            recommendation = recommend_booking(
+                self.config,
+                self.store,
+                self.actor,
+                count=1,
+                duration_seconds=30 * 60,
+                start_at=now,
+                mode=MODE_SHARED,
+                allow_queue=True,
+                advice=self.advice,
+            )
+
+        self.assertEqual(recommendation["recommendation"]["start_at"], "2030-01-01T12:40:00Z")
+        self.assertFalse(recommendation["recommendation"]["queued"])
+
+    def test_implicit_submission_uses_the_current_five_minute_slot(self):
+        now = self.start + timedelta(minutes=41, seconds=23)
+
+        with (
+            mock.patch("bk.service.utc_now", return_value=now),
+            mock.patch("bk.scheduler.utc_now", return_value=now),
+        ):
+            submission = submit_booking(
+                self.config,
+                self.store,
+                self.actor,
+                count=1,
+                duration_seconds=30 * 60,
+                start_at=now,
+                mode=MODE_SHARED,
+                allow_queue=True,
+                advice=self.advice,
+            )
+
+        self.assertEqual(submission.result.reservation["start_at"], "2030-01-01T12:40:00Z")
+        self.assertFalse(submission.result.queued)
 
     def test_exact_conflict_returns_nearest_without_writing(self):
         add_booking(

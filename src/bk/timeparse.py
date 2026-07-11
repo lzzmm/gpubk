@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Union
 
 
@@ -33,6 +33,112 @@ def parse_start(value: str) -> datetime:
     if value == "now":
         return utc_now()
     return parse_iso(value)
+
+
+def parse_friendly_start(value: str, now: datetime | None = None) -> datetime:
+    raw = value.strip()
+    current = (now or utc_now()).astimezone(timezone.utc).replace(microsecond=0)
+    if not raw or raw.lower() == "now":
+        return _floor_five_minutes(current)
+    if raw.startswith("+"):
+        try:
+            seconds = parse_duration_seconds(raw[1:])
+        except ValueError as exc:
+            raise ValueError("relative start must look like +30m or +1h30m") from exc
+        return _ceil_five_minutes(current + timedelta(seconds=seconds))
+
+    local_now = current.astimezone()
+    local_zone = local_now.tzinfo
+    lowered = raw.lower()
+    day_offset = None
+    clock_text = raw
+    if lowered.startswith("today "):
+        day_offset = 0
+        clock_text = raw[6:].strip()
+    elif lowered.startswith("tomorrow "):
+        day_offset = 1
+        clock_text = raw[9:].strip()
+
+    if day_offset is not None or re.fullmatch(r"\d{1,2}:\d{2}", clock_text):
+        hour, minute = _friendly_clock(clock_text)
+        candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if day_offset is not None:
+            candidate += timedelta(days=day_offset)
+            if candidate.astimezone(timezone.utc) < _floor_five_minutes(current):
+                raise ValueError("start time is before the current 5-minute interval")
+        elif candidate.astimezone(timezone.utc) < _floor_five_minutes(current):
+            candidate += timedelta(days=1)
+        return _validate_friendly_boundary(candidate)
+
+    month_day = re.fullmatch(r"(?P<month>\d{1,2})-(?P<day>\d{1,2})[ T](?P<time>\d{1,2}:\d{2})", raw)
+    if month_day:
+        hour, minute = _friendly_clock(month_day.group("time"))
+        try:
+            candidate = datetime(
+                local_now.year,
+                int(month_day.group("month")),
+                int(month_day.group("day")),
+                hour,
+                minute,
+                tzinfo=local_zone,
+            )
+            if candidate.astimezone(timezone.utc) < _floor_five_minutes(current):
+                candidate = candidate.replace(year=local_now.year + 1)
+        except ValueError as exc:
+            raise ValueError("invalid calendar date") from exc
+        return _validate_friendly_boundary(candidate)
+
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            "start must be now, +30m, 20:00, tomorrow 09:00, 07-13 20:00, or ISO 8601"
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=local_zone)
+    parsed = _validate_friendly_boundary(parsed)
+    if parsed.astimezone(timezone.utc) < _floor_five_minutes(current):
+        raise ValueError("start time is before the current 5-minute interval")
+    return parsed
+
+
+def normalize_queue_start(value: datetime, now: datetime | None = None) -> datetime:
+    start = value.astimezone(timezone.utc).replace(microsecond=0)
+    current = (now or utc_now()).astimezone(timezone.utc).replace(microsecond=0)
+    if start <= current:
+        return _floor_five_minutes(current)
+    return _ceil_five_minutes(start)
+
+
+def _friendly_clock(value: str) -> tuple[int, int]:
+    match = re.fullmatch(r"(?P<hour>\d{1,2}):(?P<minute>\d{2})", value)
+    if not match:
+        raise ValueError("clock time must look like 20:00")
+    hour = int(match.group("hour"))
+    minute = int(match.group("minute"))
+    if hour > 23 or minute > 59:
+        raise ValueError("clock time is out of range")
+    return hour, minute
+
+
+def _validate_friendly_boundary(value: datetime) -> datetime:
+    normalized = value.astimezone(timezone.utc).replace(microsecond=0)
+    if normalized.second or int(normalized.timestamp()) % 300:
+        raise ValueError("start minute must be 00, 05, 10, ..., or 55")
+    return normalized
+
+
+def _floor_five_minutes(value: datetime) -> datetime:
+    timestamp = int(value.timestamp())
+    return datetime.fromtimestamp(timestamp - (timestamp % 300), timezone.utc)
+
+
+def _ceil_five_minutes(value: datetime) -> datetime:
+    timestamp = int(value.timestamp())
+    remainder = timestamp % 300
+    if remainder:
+        timestamp += 300 - remainder
+    return datetime.fromtimestamp(timestamp, timezone.utc)
 
 
 def format_local(value: Union[datetime, str]) -> str:

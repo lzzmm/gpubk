@@ -21,7 +21,7 @@ from .scheduler import (
     shared_memory_headroom_for_reservation,
 )
 from .storage import LedgerStore
-from .timeparse import parse_iso, to_iso, utc_now
+from .timeparse import normalize_queue_start, parse_iso, to_iso, utc_now
 from .worker import delete_job_spec, prepare_job_spec
 
 
@@ -52,7 +52,17 @@ def submit_booking(
     working_directory: Optional[str] = None,
     advice: Optional[GpuAdvice] = None,
 ) -> BookingSubmission:
-    _validate_recommendation_request(config, count, duration_seconds, start_at, mode, expected_memory_mb, allow_queue)
+    generated_at = utc_now()
+    effective_start = normalize_queue_start(start_at, generated_at) if allow_queue else start_at
+    _validate_recommendation_request(
+        config,
+        count,
+        duration_seconds,
+        effective_start,
+        mode,
+        expected_memory_mb,
+        allow_queue,
+    )
     validate_ledger_policy(store.load(), config)
     gpu_advice = advice or build_gpu_advice(config)
     allocator = _allocation_decision(
@@ -62,7 +72,7 @@ def submit_booking(
         gpu_advice,
         count,
         duration_seconds,
-        start_at,
+        effective_start,
         mode,
         preferred_gpus,
         expected_memory_mb,
@@ -82,7 +92,7 @@ def submit_booking(
                 actor=actor,
                 count=count,
                 duration_seconds=duration_seconds,
-                start_at=start_at,
+                start_at=effective_start,
                 mode=mode,
                 preferred_gpus=list(preferred_gpus) if preferred_gpus is not None else None,
                 gpu_order=allocator.order,
@@ -257,10 +267,19 @@ def recommend_booking(
     allow_queue: bool = True,
     advice: Optional[GpuAdvice] = None,
 ) -> dict:
-    _validate_recommendation_request(config, count, duration_seconds, start_at, mode, expected_memory_mb, allow_queue)
+    generated_at = utc_now()
+    effective_start = normalize_queue_start(start_at, generated_at) if allow_queue else start_at
+    _validate_recommendation_request(
+        config,
+        count,
+        duration_seconds,
+        effective_start,
+        mode,
+        expected_memory_mb,
+        allow_queue,
+    )
     ledger = store.load()
     validate_ledger_policy(ledger, config)
-    generated_at = utc_now()
     gpu_advice = advice or build_gpu_advice(config, at=generated_at)
     allocator = _allocation_decision(
         config,
@@ -269,7 +288,7 @@ def recommend_booking(
         gpu_advice,
         count,
         duration_seconds,
-        start_at,
+        effective_start,
         mode,
         preferred_gpus,
         expected_memory_mb,
@@ -279,7 +298,7 @@ def recommend_booking(
         ledger,
         config,
         count,
-        start_at,
+        effective_start,
         duration,
         mode,
         actor.uid,
@@ -296,7 +315,7 @@ def recommend_booking(
             ledger,
             config,
             count,
-            start_at,
+            effective_start,
             duration,
             mode,
             actor.uid,
@@ -315,7 +334,7 @@ def recommend_booking(
         "request": {
             "count": count,
             "duration_seconds": duration_seconds,
-            "start_at": to_iso(start_at),
+            "start_at": to_iso(effective_start),
             "mode": mode,
             "preferred_gpus": list(preferred_gpus) if preferred_gpus is not None else None,
             "expected_memory_mb_per_gpu": expected_memory_mb,
@@ -372,7 +391,7 @@ def recommend_booking(
         "gpus": list(gpus),
         "start_at": to_iso(scheduled_start),
         "end_at": to_iso(scheduled_end),
-        "queued": scheduled_start > start_at,
+        "queued": scheduled_start > effective_start,
         "confidence": confidence,
         "gpu_details": gpu_details,
     }

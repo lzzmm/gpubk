@@ -56,10 +56,23 @@ WEAVE_CHARS = ("▚", "▞")
 FREE_CHAR = "."
 NOW_CHAR = "│"
 NOW_CONTEXT_COLUMNS = 6
-ZOOM_LEVELS = [5, 10, 15, 30, 60]
+ZOOM_LEVELS = [5, 10, 15, 30, 60, 120, 240, 480, 720, 1440]
 DEFAULT_ZOOM_INDEX = 0
 FOCUS_RESERVATIONS = "reservations"
 FOCUS_GPUS = "gpus"
+DEFAULT_TIMELINE_COLUMNS = 48
+EDITOR_CONTEXT_COLUMNS = 3
+EDITOR_MIN_QUICK_STEPS = 6
+ACCELERATED_MULTIPLIER = 6
+ACCELERATED_ZOOM_LEVELS = 3
+ACCELERATED_GPU_ROWS = 4
+GPU_MAP_SIZE = 8
+SPEED_LEVELS = (1, 6, 24)
+SPEED_ZOOM_STEPS = (1, 2, 4)
+KEY_SHIFT_LEFT = getattr(curses, "KEY_SLEFT", -1001)
+KEY_SHIFT_RIGHT = getattr(curses, "KEY_SRIGHT", -1002)
+KEY_SHIFT_UP = getattr(curses, "KEY_SR", -1003)
+KEY_SHIFT_DOWN = getattr(curses, "KEY_SF", -1004)
 WEEKDAY_LABELS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 RESERVATION_COLORS = [
     curses.COLOR_CYAN,
@@ -83,7 +96,8 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
             ("", "TIMELINE"),
             ("Left / Right", "Pan one hour into history or the future"),
             ("n", "Jump back to the live NOW window"),
-            ("+ / -", "Zoom the timeline from 5 to 60 minutes per column"),
+            ("+ / -", "Zoom the timeline from 5 minutes to 1 day per column"),
+            ("v", "Cycle the reliable adjustment speed: 1x, 6x, or 24x"),
             ("r", "Refresh now; auto-refresh already runs every second"),
             ("c", "Toggle the dark or light color theme"),
             ("", "FOCUS AND ACTIONS"),
@@ -103,7 +117,11 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
             ("Left / Right", "Move start time by 5 minutes"),
             ("Up / Down", "Move the GPU cursor"),
             ("Space", "Select or clear the current GPU"),
-            ("+ / -  [ / ]", "Shorten or extend duration by 5 minutes"),
+            ("[ / ]", "Shorten or extend duration by 5 minutes"),
+            (", / .", "Quick duration down or up; step follows zoom"),
+            ("+ / -", "Zoom while keeping the selected interval in view"),
+            ("Shift", "Larger step for movement, duration, and zoom"),
+            ("v", "Cycle 1x, 6x, or 24x when Shift is not reported"),
             ("s / x", "Choose shared or exclusive mode"),
             ("m", "Set expected VRAM per GPU, such as 12g"),
             ("r", "Reset Add defaults or restore original Edit values"),
@@ -149,7 +167,7 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
 class TuiState:
     offset_slots: int = 0
     zoom_index: int = DEFAULT_ZOOM_INDEX
-    selected: int = 0
+    selected: int = -1
     focus: str = FOCUS_RESERVATIONS
     selected_gpu: int = 0
     message: str = ""
@@ -166,6 +184,8 @@ class TuiState:
     add_expected_memory_mb: Optional[int] = None
     gpu_memory_capacity_mb: dict[int, int] = field(default_factory=dict)
     gpu_memory_free_mb: dict[int, int] = field(default_factory=dict)
+    timeline_columns: int = DEFAULT_TIMELINE_COLUMNS
+    speed_index: int = 0
 
     @property
     def slot_minutes(self) -> int:
@@ -174,6 +194,10 @@ class TuiState:
     @property
     def editor_active(self) -> bool:
         return self.add_mode or self.edit_mode
+
+    @property
+    def speed_multiplier(self) -> int:
+        return SPEED_LEVELS[self.speed_index]
 
 
 @dataclass(frozen=True)
@@ -301,35 +325,60 @@ def _handle_key(stdscr, key: int, config: Config, store: LedgerStore, state: Tui
         state.message = f"theme: {ACTIVE_TUI_THEME} (set BK_TUI_THEME to make it persistent)"
         state.error = False
         return
-    if key in (curses.KEY_RIGHT, ord("l"), ord("L")):
-        _pan_timeline(config, state, 1)
+    if key in (ord("v"), ord("V")):
+        _cycle_speed(state)
         return
-    if key in (curses.KEY_LEFT, ord("h"), ord("H")):
-        _pan_timeline(config, state, -1)
+    if key in (KEY_SHIFT_RIGHT, ord("L")):
+        _pan_timeline(config, state, 1, state.speed_multiplier * ACCELERATED_MULTIPLIER)
+        return
+    if key in (KEY_SHIFT_LEFT, ord("H")):
+        _pan_timeline(config, state, -1, state.speed_multiplier * ACCELERATED_MULTIPLIER)
+        return
+    if key in (curses.KEY_RIGHT, ord("l")):
+        _pan_timeline(config, state, 1, state.speed_multiplier)
+        return
+    if key in (curses.KEY_LEFT, ord("h")):
+        _pan_timeline(config, state, -1, state.speed_multiplier)
         return
     if key in (ord("n"), ord("N"), curses.KEY_HOME):
         state.offset_slots = 0
         state.message = "live NOW window"
         state.error = False
         return
-    if key in (ord("+"), ord("=")):
-        _change_zoom(state, -1)
+    if key == ord("+"):
+        _change_zoom(state, -_speed_zoom_step(state) * ACCELERATED_ZOOM_LEVELS)
+        state.message = f"fast zoom {state.slot_minutes}m/col"
+        state.error = False
+        return
+    if key == ord("="):
+        _change_zoom(state, -_speed_zoom_step(state))
         state.message = f"zoom {state.slot_minutes}m/col"
         state.error = False
         return
-    if key in (ord("-"), ord("_")):
-        _change_zoom(state, 1)
+    if key == ord("_"):
+        _change_zoom(state, _speed_zoom_step(state) * ACCELERATED_ZOOM_LEVELS)
+        state.message = f"fast zoom {state.slot_minutes}m/col"
+        state.error = False
+        return
+    if key == ord("-"):
+        _change_zoom(state, _speed_zoom_step(state))
         state.message = f"zoom {state.slot_minutes}m/col"
         state.error = False
         return
     if key == 9:
         _toggle_focus(config, store, state)
         return
-    if key in (curses.KEY_DOWN, ord("j"), ord("J")):
-        _move_focus_down(config, store, state)
+    if key in (KEY_SHIFT_DOWN, ord("J")):
+        _move_focus_down(config, store, state, state.speed_multiplier * ACCELERATED_GPU_ROWS)
         return
-    if key in (curses.KEY_UP, ord("k"), ord("K")):
-        _move_focus_up(config, store, state)
+    if key in (KEY_SHIFT_UP, ord("K")):
+        _move_focus_up(config, store, state, state.speed_multiplier * ACCELERATED_GPU_ROWS)
+        return
+    if key in (curses.KEY_DOWN, ord("j")):
+        _move_focus_down(config, store, state, state.speed_multiplier)
+        return
+    if key in (curses.KEY_UP, ord("k")):
+        _move_focus_up(config, store, state, state.speed_multiplier)
         return
     if key in (ord("a"), ord("A")):
         if state.focus == FOCUS_GPUS:
@@ -358,12 +407,13 @@ def _handle_key(stdscr, key: int, config: Config, store: LedgerStore, state: Tui
             _help_dialog(stdscr)
 
 
-def _pan_timeline(config: Config, state: TuiState, direction: int) -> None:
+def _pan_timeline(config: Config, state: TuiState, direction: int, multiplier: int = 1) -> None:
     step_slots = max(1, 60 // state.slot_minutes)
     retention_slots = max(0, config.ledger_retention_days * 24 * 60 // state.slot_minutes)
     earliest_offset = -max(0, retention_slots - NOW_CONTEXT_COLUMNS)
     latest_offset = max(0, config.queue_search_hours * 60 // state.slot_minutes)
-    requested = state.offset_slots + (step_slots if direction > 0 else -step_slots)
+    distance = step_slots * max(1, multiplier)
+    requested = state.offset_slots + (distance if direction > 0 else -distance)
     state.offset_slots = min(latest_offset, max(earliest_offset, requested))
     if state.offset_slots == earliest_offset and requested < earliest_offset:
         state.message = f"history limit: {config.ledger_retention_days}d"
@@ -381,14 +431,32 @@ def _change_zoom(state: TuiState, direction: int) -> None:
     state.offset_slots = int(round(offset_minutes / state.slot_minutes))
 
 
+def _cycle_speed(state: TuiState) -> None:
+    state.speed_index = (state.speed_index + 1) % len(SPEED_LEVELS)
+    state.message = f"adjustment speed {state.speed_multiplier}x"
+    state.error = False
+
+
+def _speed_zoom_step(state: TuiState) -> int:
+    return SPEED_ZOOM_STEPS[state.speed_index]
+
+
+def _change_editor_zoom(state: TuiState, direction: int) -> None:
+    view_start = _editor_view_start(state)
+    selection_start = view_start + timedelta(minutes=state.add_start_steps * ADD_STEP_MINUTES)
+    selection_end = selection_start + timedelta(minutes=max(1, state.add_duration_steps) * ADD_STEP_MINUTES)
+    _change_zoom(state, direction)
+    _frame_editor_window(state, selection_start, selection_end, utc_now(), auto_zoom=False)
+
+
 def _toggle_focus(config: Config, store: LedgerStore, state: TuiState) -> None:
     if state.focus == FOCUS_GPUS:
         state.focus = FOCUS_RESERVATIONS
-        state.message = "reservation focus"
+        state.selected = -1
+        state.message = "reservation header; Down selects a reservation"
     else:
         mine = _own_reservations(store)
-        if mine:
-            state.selected = min(max(0, state.selected), len(mine) - 1)
+        if mine and 0 <= state.selected < len(mine):
             gpus = [int(gpu) for gpu in mine[state.selected].get("gpus", [])]
             if gpus:
                 state.selected_gpu = min(max(gpus[0], 0), config.gpu_count - 1)
@@ -398,14 +466,15 @@ def _toggle_focus(config: Config, store: LedgerStore, state: TuiState) -> None:
     state.error = False
 
 
-def _move_focus_up(config: Config, store: LedgerStore, state: TuiState) -> None:
+def _move_focus_up(config: Config, store: LedgerStore, state: TuiState, steps: int = 1) -> None:
     if state.focus == FOCUS_GPUS:
-        state.selected_gpu = max(0, state.selected_gpu - 1)
+        state.selected_gpu = max(0, state.selected_gpu - max(1, steps))
         state.message = f"GPU {state.selected_gpu} focus"
         state.error = False
         return
-    if state.selected > 0:
-        state.selected -= 1
+    if state.selected >= 0:
+        state.selected = max(-1, state.selected - max(1, steps))
+        state.message = "reservation header" if state.selected < 0 else ""
         return
     state.focus = FOCUS_GPUS
     state.selected_gpu = max(0, config.gpu_count - 1)
@@ -413,18 +482,21 @@ def _move_focus_up(config: Config, store: LedgerStore, state: TuiState) -> None:
     state.error = False
 
 
-def _move_focus_down(config: Config, store: LedgerStore, state: TuiState) -> None:
+def _move_focus_down(config: Config, store: LedgerStore, state: TuiState, steps: int = 1) -> None:
     if state.focus == FOCUS_GPUS:
         if state.selected_gpu < config.gpu_count - 1:
-            state.selected_gpu += 1
+            state.selected_gpu = min(config.gpu_count - 1, state.selected_gpu + max(1, steps))
             state.message = f"GPU {state.selected_gpu} focus"
         else:
             state.focus = FOCUS_RESERVATIONS
-            state.message = "reservation focus"
+            state.selected = -1
+            state.message = "reservation header; Down selects a reservation"
         state.error = False
         return
     mine = _own_reservations(store)
-    state.selected = min(max(0, len(mine) - 1), state.selected + 1)
+    if mine:
+        state.selected = min(len(mine) - 1, state.selected + max(1, steps))
+        state.message = ""
 
 
 def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
@@ -455,8 +527,9 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
     gpu_by_index = {gpu.index: gpu for gpu in gpu_snapshots}
 
     timeline_top = 3
-    label_width = min(40, max(30, width // 3))
+    label_width = _timeline_label_width(width)
     timeline_width = max(24, width - label_width - 2)
+    state.timeline_columns = timeline_width
     default_view_start = _timeline_view_start(now, state)
     view_start = state.editor_view_start if state.editor_active and state.editor_view_start else default_view_start
     view_end = view_start + timedelta(minutes=timeline_width * state.slot_minutes)
@@ -532,6 +605,7 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
             selected_id,
             config.max_shared_users,
             color_map,
+            config.gpu_count,
         )
     _draw_footer(stdscr, height, width, state, preview)
     stdscr.refresh()
@@ -607,7 +681,7 @@ def _draw_time_axis(
     _addstr(stdscr, row, 0, f"Date {_date_label(local_start)}".ljust(label_width), width, COLOR_MUTED)
     _addstr(stdscr, row + 1, 0, "Hour".ljust(label_width), width, COLOR_MUTED)
     _addstr(stdscr, row + 2, 0, "Minute".ljust(label_width), width, COLOR_MUTED)
-    _addstr(stdscr, row + 3, 0, "".ljust(label_width), width, COLOR_MUTED)
+    _addstr(stdscr, row + 3, 0, " GPU Share Util Free".ljust(label_width), width, COLOR_MUTED)
     _addstr(stdscr, row, label_width, dates, width, COLOR_MUTED)
     _addstr(stdscr, row + 1, label_width, hours, width, COLOR_MUTED)
     _addstr(stdscr, row + 2, label_width, minutes, width, COLOR_MUTED)
@@ -645,7 +719,7 @@ def _editor_banner_text(state: TuiState, preview: AddPreview) -> str:
     return (
         f" {operation} {mode} | {len(preview.selected_gpus)} GPU [{gpu_text}] | "
         f"{_weekday_label(local_start)} {local_start:%m-%d %H:%M}->{local_end:%H:%M} | "
-        f"{_duration_text(local_end - local_start)} | {memory} | {status} "
+        f"{_duration_text(local_end - local_start)} | {state.speed_multiplier}x | {memory} | {status} "
     )
 
 
@@ -672,7 +746,7 @@ def _draw_gpu_row(
     view_end = start + timedelta(minutes=slot_minutes * timeline_width)
     peak_shared = _peak_shared_count_for_gpu(active, gpu.index, start, view_end, reservation_index)
     violations = sum(1 for item in process_usage if item.violation)
-    label = _gpu_label(gpu, label_width, peak_shared, shared_limit, violations)
+    label = _gpu_row_label(gpu, label_width, peak_shared, shared_limit, violations, focused)
     cursor_active = preview is not None and gpu.index == preview.cursor_gpu
     if cursor_active:
         label_color = _preview_color(preview.mode)
@@ -683,8 +757,6 @@ def _draw_gpu_row(
     label_attr = curses.A_BOLD if cursor_active or focused else 0
     for lane in range(max(1, band_rows)):
         row_label = label if lane == 0 else ""
-        if focused and lane == 0:
-            row_label = ">" + row_label[: max(0, label_width - 1)]
         _addstr(stdscr, row + lane, 0, row_label[:label_width].ljust(label_width), width, label_color, label_attr)
         for col in range(timeline_width):
             left = start + timedelta(minutes=slot_minutes * col)
@@ -944,15 +1016,20 @@ def _draw_reservation_panel(
     selected_id: Optional[str],
     shared_limit: int,
     color_map: dict[str, int],
+    gpu_count: int,
 ) -> None:
     actor = _current_actor()
     mine = [item for item in active if int(item.get("uid")) == actor.uid]
-    if state.selected >= len(mine):
-        state.selected = max(0, len(mine) - 1)
+    if not mine:
+        state.selected = -1
+    elif state.selected >= len(mine):
+        state.selected = len(mine) - 1
 
     mine_index = {reservation["id"]: index + 1 for index, reservation in enumerate(mine)}
-    _addstr(stdscr, top, 0, "Reservations".ljust(width), width, COLOR_HEADER)
-    header = _table_header(width)
+    header_focused = state.focus == FOCUS_RESERVATIONS and state.selected < 0 and not state.editor_active
+    title = "> Reservations" if header_focused else "  Reservations"
+    _addstr(stdscr, top, 0, title.ljust(width), width, COLOR_HEADER, curses.A_BOLD if header_focused else 0)
+    header = _table_header(width, gpu_count)
     _addstr(stdscr, top + 1, 0, header, width, COLOR_MUTED)
     if not active:
         _addstr(stdscr, top + 2, 0, "  none", width, COLOR_MUTED)
@@ -963,7 +1040,7 @@ def _draw_reservation_panel(
         row = top + 2 + offset
         own_number = mine_index.get(reservation["id"])
         prefix = f">{own_number}" if reservation.get("id") == selected_id else (str(own_number) if own_number else "-")
-        line = _reservation_table_line(reservation, prefix, width, active, shared_limit)
+        line = _reservation_table_line(reservation, prefix, width, active, shared_limit, gpu_count)
         selected = reservation.get("id") == selected_id
         color = _reservation_color(reservation, color_map)
         _addstr(stdscr, row, 0, line, width, color, curses.A_BOLD if selected else 0)
@@ -978,7 +1055,7 @@ def _draw_footer(stdscr, height: int, width: int, state: TuiState, preview: Opti
         message = state.message or f"GPU {state.selected_gpu} focus"
         message_color = COLOR_ERROR if state.error else COLOR_SELECTED
     else:
-        message = state.message
+        message = state.message or ("reservation header; Down selects a reservation" if state.selected < 0 else "")
         message_color = COLOR_ERROR if state.error else COLOR_MUTED
     footer = _footer_label(state, preview, width)
     _addstr(stdscr, height - 2, 0, message[: width - 1], width, message_color)
@@ -988,23 +1065,28 @@ def _draw_footer(stdscr, height: int, width: int, state: TuiState, preview: Opti
 def _footer_label(state: TuiState, preview: Optional[AddPreview], width: int) -> str:
     if state.editor_active and preview is not None:
         operation = "ADD" if state.add_mode else "EDIT"
-        short = f" {operation} | 1-9 auto | f any | g selected | r reset | Enter/Esc | ? help "
+        short = (
+            f" {operation} {state.speed_multiplier}x | [] time | ,. fast | -/= zoom "
+            "| v | f/g | Enter/Esc | ? help "
+        )
         long = (
-            f" {operation} | arrows move | Space GPU | +/- duration | m memory | s/x mode "
-            "| 1-9 auto | f any GPUs | g selected GPUs | r reset | Enter/Esc | ? help "
+            f" {operation} {state.speed_multiplier}x | arrows move | Space GPU | [] duration | ,. quick "
+            "| -/= zoom | Shift faster | v speed | m memory | s/x | 1-9/f/g find "
+            "| r reset | Enter/Esc | ? help "
         )
     elif state.focus == FOCUS_GPUS:
-        short = " GPU | up/down | Tab RSV | a add | <-/-> pan | n NOW | ? help | q quit "
+        short = " GPU | arrows | Tab RSV | a add | v speed | n NOW | ? help | q quit "
         long = (
             " GPU FOCUS | up/down select GPU | Tab reservations | a add here "
-            "| +/- zoom | <-/-> history/future | n NOW | r refresh | ? help | q quit "
+            "| -/= zoom | <-/-> history/future | Shift faster | v speed | n NOW "
+            "| r refresh | ? help | q quit "
         )
     else:
-        short = " RSV | up/down | Tab GPU | a/e/d | <-/-> pan | n NOW | ? help | q quit "
+        short = " RSV | arrows | Tab GPU | a/e/d | v speed | n NOW | ? help | q quit "
         long = (
             " RESERVATIONS | up/down select | Tab GPUs | a add | e edit | d delete "
-            f"| +/- zoom {state.slot_minutes}m/col | <-/-> history/future | n NOW "
-            "| r refresh | ? help | q quit "
+            f"| -/= zoom {state.slot_minutes}m/col | <-/-> history/future | Shift faster "
+            "| v speed | n NOW | r refresh | ? help | q quit "
         )
     footer = long if len(long) < width else short
     return footer[: max(0, width - 1)]
@@ -1013,7 +1095,7 @@ def _footer_label(state: TuiState, preview: Optional[AddPreview], width: int) ->
 def _start_add_select(config: Config, state: TuiState) -> None:
     now = utc_now()
     view_start = _default_timeline_view_start(now, state.slot_minutes)
-    booking_start = _ceil_to_add_step(now)
+    booking_start = _floor_to_add_step(now)
     state.add_mode = True
     state.edit_mode = False
     state.edit_reservation_id = None
@@ -1037,7 +1119,11 @@ def _start_edit_select(config: Config, store: LedgerStore, state: TuiState) -> N
         state.message = "no reservation to edit"
         state.error = True
         return
-    state.selected = min(max(0, state.selected), len(mine) - 1)
+    if state.selected < 0:
+        state.message = "select a reservation before editing"
+        state.error = True
+        return
+    state.selected = min(state.selected, len(mine) - 1)
     reservation = mine[state.selected]
     if parse_iso(reservation["start_at"]) <= utc_now():
         state.message = "cannot edit a reservation after it has started"
@@ -1090,23 +1176,40 @@ def _handle_add_key(
         state.message = f"{operation} cancelled"
         state.error = False
         return
-    if key in (curses.KEY_RIGHT, ord("l"), ord("L")):
-        state.add_start_steps += 1
+    if key in (ord("v"), ord("V")):
+        _cycle_speed(state)
+        return
+    if key in (KEY_SHIFT_RIGHT, ord("L")):
+        _move_editor_start(state, state.speed_multiplier * _quick_duration_steps(state))
         _clear_editor_feedback(state)
         return
-    if key in (curses.KEY_LEFT, ord("h"), ord("H")):
-        if state.add_start_steps > 0:
-            state.add_start_steps -= 1
-        elif state.edit_mode and state.editor_view_start is not None:
-            state.editor_view_start -= timedelta(minutes=ADD_STEP_MINUTES)
+    if key in (KEY_SHIFT_LEFT, ord("H")):
+        _move_editor_start(state, -state.speed_multiplier * _quick_duration_steps(state))
         _clear_editor_feedback(state)
         return
-    if key in (curses.KEY_DOWN, ord("j"), ord("J")):
-        state.add_cursor_gpu = min(max(0, config.gpu_count - 1), state.add_cursor_gpu + 1)
+    if key in (curses.KEY_RIGHT, ord("l")):
+        _move_editor_start(state, state.speed_multiplier)
         _clear_editor_feedback(state)
         return
-    if key in (curses.KEY_UP, ord("k"), ord("K")):
-        state.add_cursor_gpu = max(0, state.add_cursor_gpu - 1)
+    if key in (curses.KEY_LEFT, ord("h")):
+        _move_editor_start(state, -state.speed_multiplier)
+        _clear_editor_feedback(state)
+        return
+    if key in (KEY_SHIFT_DOWN, ord("J")):
+        distance = state.speed_multiplier * ACCELERATED_GPU_ROWS
+        state.add_cursor_gpu = min(max(0, config.gpu_count - 1), state.add_cursor_gpu + distance)
+        _clear_editor_feedback(state)
+        return
+    if key in (KEY_SHIFT_UP, ord("K")):
+        state.add_cursor_gpu = max(0, state.add_cursor_gpu - state.speed_multiplier * ACCELERATED_GPU_ROWS)
+        _clear_editor_feedback(state)
+        return
+    if key in (curses.KEY_DOWN, ord("j")):
+        state.add_cursor_gpu = min(max(0, config.gpu_count - 1), state.add_cursor_gpu + state.speed_multiplier)
+        _clear_editor_feedback(state)
+        return
+    if key in (curses.KEY_UP, ord("k")):
+        state.add_cursor_gpu = max(0, state.add_cursor_gpu - state.speed_multiplier)
         _clear_editor_feedback(state)
         return
     if key == ord(" "):
@@ -1116,13 +1219,68 @@ def _handle_add_key(
             state.add_selected_gpus.add(state.add_cursor_gpu)
         _clear_editor_feedback(state)
         return
-    if key in (ord("["), ord("-"), ord("_")):
-        state.add_duration_steps = max(1, state.add_duration_steps - 1)
+    if key == ord("["):
+        state.add_duration_steps = max(1, state.add_duration_steps - state.speed_multiplier)
         _clear_editor_feedback(state)
         return
-    if key in (ord("]"), ord("+"), ord("=")):
-        state.add_duration_steps += 1
+    if key == ord("]"):
+        state.add_duration_steps += state.speed_multiplier
         _clear_editor_feedback(state)
+        return
+    if key == ord("{"):
+        state.add_duration_steps = max(
+            1,
+            state.add_duration_steps - state.speed_multiplier * _quick_duration_steps(state),
+        )
+        _clear_editor_feedback(state)
+        return
+    if key == ord("}"):
+        state.add_duration_steps += state.speed_multiplier * _quick_duration_steps(state)
+        _clear_editor_feedback(state)
+        return
+    if key == ord(","):
+        step = state.speed_multiplier * _quick_duration_steps(state)
+        state.add_duration_steps = max(1, state.add_duration_steps - step)
+        state.message = f"duration {_duration_text(timedelta(minutes=state.add_duration_steps * ADD_STEP_MINUTES))}"
+        state.error = False
+        return
+    if key == ord("."):
+        step = state.speed_multiplier * _quick_duration_steps(state)
+        state.add_duration_steps += step
+        state.message = f"duration {_duration_text(timedelta(minutes=state.add_duration_steps * ADD_STEP_MINUTES))}"
+        state.error = False
+        return
+    if key == ord("<"):
+        step = state.speed_multiplier * _quick_duration_steps(state) * ACCELERATED_MULTIPLIER
+        state.add_duration_steps = max(1, state.add_duration_steps - step)
+        state.message = f"fast duration {_duration_text(timedelta(minutes=state.add_duration_steps * ADD_STEP_MINUTES))}"
+        state.error = False
+        return
+    if key == ord(">"):
+        step = state.speed_multiplier * _quick_duration_steps(state) * ACCELERATED_MULTIPLIER
+        state.add_duration_steps += step
+        state.message = f"fast duration {_duration_text(timedelta(minutes=state.add_duration_steps * ADD_STEP_MINUTES))}"
+        state.error = False
+        return
+    if key == ord("+"):
+        _change_editor_zoom(state, -_speed_zoom_step(state) * ACCELERATED_ZOOM_LEVELS)
+        state.message = f"fast zoom {state.slot_minutes}m/col; quick step {_quick_duration_text(state)}"
+        state.error = False
+        return
+    if key == ord("="):
+        _change_editor_zoom(state, -_speed_zoom_step(state))
+        state.message = f"zoom {state.slot_minutes}m/col; quick step {_quick_duration_text(state)}"
+        state.error = False
+        return
+    if key == ord("_"):
+        _change_editor_zoom(state, _speed_zoom_step(state) * ACCELERATED_ZOOM_LEVELS)
+        state.message = f"fast zoom {state.slot_minutes}m/col; quick step {_quick_duration_text(state)}"
+        state.error = False
+        return
+    if key == ord("-"):
+        _change_editor_zoom(state, _speed_zoom_step(state))
+        state.message = f"zoom {state.slot_minutes}m/col; quick step {_quick_duration_text(state)}"
+        state.error = False
         return
     if key in (ord("s"), ord("S")):
         state.add_booking_mode = MODE_SHARED
@@ -1239,7 +1397,9 @@ def _find_add_slot(
         return
     view_start = _editor_view_start(state)
     selected_start = view_start + timedelta(minutes=state.add_start_steps * ADD_STEP_MINUTES)
-    earliest_start = max(selected_start, _ceil_to_add_step(utc_now()))
+    now = utc_now()
+    minimum_start = _ceil_to_add_step(now) if state.edit_mode else _floor_to_add_step(now)
+    earliest_start = max(selected_start, minimum_start)
     duration = timedelta(minutes=max(1, state.add_duration_steps) * ADD_STEP_MINUTES)
     mode = state.add_booking_mode if state.add_booking_mode in {MODE_SHARED, MODE_EXCLUSIVE} else MODE_SHARED
     ledger = _availability_ledger(store.load(), state)
@@ -1285,19 +1445,20 @@ def _find_add_slot(
     scheduled_start, gpus = slot
     state.add_selected_gpus = set(gpus)
     state.add_cursor_gpu = min(gpus)
-    distance_steps = int((scheduled_start - view_start).total_seconds() // (ADD_STEP_MINUTES * 60))
-    if distance_steps <= 6:
-        state.add_start_steps = max(0, distance_steps)
-    else:
-        state.editor_view_start = scheduled_start - timedelta(minutes=30)
-        state.add_start_steps = 6
+    _frame_editor_window(
+        state,
+        scheduled_start,
+        scheduled_start + duration,
+        now,
+        auto_zoom=True,
+    )
     local_start = scheduled_start.astimezone()
     gpu_text = ",".join(map(str, gpus))
     search_kind = "fixed" if fixed_gpus else "auto"
     state.message = (
         f"{search_kind} found {count} GPU [{gpu_text}] at "
         f"{_weekday_label(local_start)} {local_start:%m-%d %H:%M}; "
-        f"{allocator.source}; Enter confirms"
+        f"{state.slot_minutes}m/col; {allocator.source}; Enter confirms"
     )
     if allocator.warning:
         state.message = f"{state.message} ({allocator.warning})"
@@ -1320,6 +1481,64 @@ def _reset_editor(config: Config, store: LedgerStore, state: TuiState) -> None:
     state.add_cursor_gpu = min(max(cursor_gpu, 0), max(0, config.gpu_count - 1))
     state.add_selected_gpus = {state.add_cursor_gpu} if config.gpu_count else set()
     state.message = "add reset to 1 GPU / 30m / shared"
+
+
+def _move_editor_start(state: TuiState, delta_steps: int) -> None:
+    requested = state.add_start_steps + delta_steps
+    if requested >= 0:
+        state.add_start_steps = requested
+        return
+    if state.edit_mode and state.editor_view_start is not None:
+        state.editor_view_start += timedelta(minutes=requested * ADD_STEP_MINUTES)
+    state.add_start_steps = 0
+
+
+def _quick_duration_steps(state: TuiState) -> int:
+    return max(EDITOR_MIN_QUICK_STEPS, state.slot_minutes // ADD_STEP_MINUTES)
+
+
+def _quick_duration_text(state: TuiState) -> str:
+    return _duration_text(timedelta(minutes=_quick_duration_steps(state) * ADD_STEP_MINUTES))
+
+
+def _frame_editor_window(
+    state: TuiState,
+    selection_start: datetime,
+    selection_end: datetime,
+    now: datetime,
+    *,
+    auto_zoom: bool,
+) -> None:
+    columns = max(24, state.timeline_columns)
+    context_columns = min(EDITOR_CONTEXT_COLUMNS, max(1, columns // 8))
+    now_anchor = _floor_to_add_step(now)
+
+    if auto_zoom:
+        chosen = len(ZOOM_LEVELS) - 1
+        for index in range(state.zoom_index, len(ZOOM_LEVELS)):
+            slot_minutes = ZOOM_LEVELS[index]
+            candidate_start = now_anchor - timedelta(minutes=context_columns * slot_minutes)
+            candidate_end = candidate_start + timedelta(minutes=columns * slot_minutes)
+            margin = timedelta(minutes=context_columns * slot_minutes)
+            if candidate_start <= selection_start and selection_end + margin <= candidate_end:
+                chosen = index
+                break
+        state.zoom_index = chosen
+
+    slot_minutes = state.slot_minutes
+    live_start = now_anchor - timedelta(minutes=context_columns * slot_minutes)
+    live_end = live_start + timedelta(minutes=columns * slot_minutes)
+    margin = timedelta(minutes=context_columns * slot_minutes)
+    if live_start <= selection_start and selection_end + margin <= live_end:
+        view_start = live_start
+    else:
+        view_start = selection_start - margin
+
+    state.editor_view_start = view_start
+    state.add_start_steps = max(
+        0,
+        int((selection_start - view_start).total_seconds() // (ADD_STEP_MINUTES * 60)),
+    )
 
 
 def _availability_ledger(ledger: dict, state: TuiState) -> dict:
@@ -1357,13 +1576,17 @@ def _own_reservation_index(store: LedgerStore, reservation_id: str) -> int:
     for index, reservation in enumerate(_own_reservations(store)):
         if reservation.get("id") == reservation_id:
             return index
-    return 0
+    return -1
 
 
 def _delete_selected(stdscr, store: LedgerStore, state: TuiState) -> None:
     mine = _own_reservations(store)
     if not mine:
         state.message = "no reservation to delete"
+        state.error = True
+        return
+    if state.selected < 0:
+        state.message = "select a reservation before deleting"
         state.error = True
         return
     reservation = mine[state.selected]
@@ -1498,7 +1721,8 @@ def _build_add_preview(ledger: dict, config: Config, state: TuiState, view_start
     start = view_start + timedelta(minutes=state.add_start_steps * ADD_STEP_MINUTES)
     end = start + timedelta(minutes=max(1, state.add_duration_steps) * ADD_STEP_MINUTES)
     mode = state.add_booking_mode if state.add_booking_mode in {MODE_SHARED, MODE_EXCLUSIVE} else MODE_SHARED
-    earliest = _ceil_to_add_step(utc_now())
+    now = utc_now()
+    earliest = _ceil_to_add_step(now) if state.edit_mode else _floor_to_add_step(now)
     if start < earliest:
         local_earliest = earliest.astimezone()
         return AddPreview(
@@ -1584,28 +1808,44 @@ def _preview_color(mode: str) -> int:
     return COLOR_PREVIEW_EXCLUSIVE if mode == MODE_EXCLUSIVE else COLOR_PREVIEW_SHARED
 
 
-def _table_header(width: int) -> str:
+def _table_header(width: int, gpu_count: int = GPU_MAP_SIZE) -> str:
+    gpu_width = GPU_MAP_SIZE if gpu_count <= GPU_MAP_SIZE else (8 if width < 100 else 12)
+    gpu_header = "".join(str(gpu) for gpu in range(gpu_count)) if gpu_count <= GPU_MAP_SIZE else "GPU"
     if width < 100:
-        return f"{'#':>3} {'ID':<8} {'User':<10} {'M':<1} {'GPU':<8} {'Cap':<5} {'Start':<11} {'End':<11} {'Dur':<7}"
-    return f"{'#':>3} {'ID':<8} {'User':<16} {'Mode':<4} {'GPU':<12} {'Cap':<5} {'Start':<11} {'End':<11} {'Dur':<7}"
+        return f"{'#':>3} {'ID':<8} {'User':<10} {'M':<1} {gpu_header:<{gpu_width}} {'Cap':<5} {'Start':<11} {'End':<11} {'Dur':<7}"
+    return f"{'#':>3} {'ID':<8} {'User':<16} {'Mode':<4} {gpu_header:<{gpu_width}} {'Cap':<5} {'Start':<11} {'End':<11} {'Dur':<7}"
 
 
-def _reservation_table_line(reservation: dict, prefix: str, width: int, active: Sequence[dict], shared_limit: int) -> str:
+def _reservation_table_line(
+    reservation: dict,
+    prefix: str,
+    width: int,
+    active: Sequence[dict],
+    shared_limit: int,
+    gpu_count: int = GPU_MAP_SIZE,
+) -> str:
     start = parse_iso(reservation["start_at"]).astimezone()
     end = parse_iso(reservation["end_at"]).astimezone()
     duration = _duration_text(end - start)
     user_width = 10 if width < 100 else 16
-    gpu_width = 8 if width < 100 else 12
+    gpu_width = GPU_MAP_SIZE if gpu_count <= GPU_MAP_SIZE else (8 if width < 100 else 12)
     mode_label = _mode_mark(reservation) if width < 100 else reservation.get("mode", "")[:4]
     cap = _capacity_text(reservation, active, shared_limit)
     return (
         f"{prefix:>3} {reservation['id'][:8]:<8} "
         f"{_truncate(str(reservation.get('username', '')), user_width):<{user_width}} "
         f"{mode_label:<{1 if width < 100 else 4}} "
-        f"{_compact_gpus(reservation.get('gpus', []), gpu_width):<{gpu_width}} "
+        f"{_reservation_gpu_text(reservation.get('gpus', []), gpu_count, gpu_width):<{gpu_width}} "
         f"{cap:<5} "
         f"{start:%m-%d %H:%M} {end:%m-%d %H:%M} {duration:<7}"
     )
+
+
+def _reservation_gpu_text(gpus: Sequence[int], gpu_count: int, width: int) -> str:
+    if gpu_count <= GPU_MAP_SIZE:
+        selected = {int(gpu) for gpu in gpus if isinstance(gpu, int)}
+        return "".join("●" if gpu in selected else "·" for gpu in range(gpu_count))
+    return _compact_gpus(gpus, width)
 
 
 def _capacity_text(reservation: dict, active: Sequence[dict], shared_limit: int) -> str:
@@ -1863,24 +2103,40 @@ def _gpu_label(
     shared_limit: int = 1,
     violations: int = 0,
 ) -> str:
-    gpu_field = _truncate(f"GPU{gpu.index}", 5).ljust(5)
-    capacity_field = _truncate(f"S{peak_shared}/{shared_limit}", 6).ljust(6)
+    gpu_field = _truncate(f"G{gpu.index}", 4)
+    capacity_field = _truncate(f"{peak_shared}/{shared_limit}", 5)
     extras = [f"!{violations}"] if violations else []
-    if not gpu.memory_total_mb and gpu.utilization_percent is None:
-        core = f"{gpu_field} {capacity_field} no telemetry"
-        return _append_complete_metrics(core, extras, width)
-
-    util = f"U{gpu.utilization_percent}%" if gpu.utilization_percent is not None else "U-"
+    util = f"{gpu.utilization_percent}%" if gpu.utilization_percent is not None else "-"
     memory = "-"
     if gpu.memory_total_mb:
         free_gib = max(0, gpu.memory_total_mb - gpu.memory_used_mb) / 1024
-        memory = f"F{free_gib:.1f}G"
-    core = f"{gpu_field} {capacity_field} {util:<5} {_truncate(memory, 9):<9}"
+        memory = f"{free_gib:.1f}G"
+    core = f"{gpu_field:<4} {capacity_field:<5} {util:>4}"
+    memory_field = f" {memory:>6}"
+    if len(core) + len(memory_field) <= width:
+        core += memory_field
     if gpu.temperature_c is not None:
         extras.append(f"{gpu.temperature_c}C")
     if gpu.processes:
         extras.append(f"P{len(gpu.processes)}")
     return _append_complete_metrics(core, extras, width)
+
+
+def _gpu_row_label(
+    gpu: GpuSnapshot,
+    width: int,
+    peak_shared: int = 0,
+    shared_limit: int = 1,
+    violations: int = 0,
+    focused: bool = False,
+) -> str:
+    marker = ">" if focused else " "
+    content = _gpu_label(gpu, max(0, width - 1), peak_shared, shared_limit, violations)
+    return (marker + content)[:width].ljust(width)
+
+
+def _timeline_label_width(terminal_width: int) -> int:
+    return min(28, max(23, terminal_width // 6))
 
 
 def _append_complete_metrics(core: str, extras: Sequence[str], width: int) -> str:
@@ -2034,7 +2290,15 @@ def _axis_tick_minutes(slot_minutes: int) -> Tuple[int, int]:
         return 30, 60
     if slot_minutes <= 30:
         return 60, 120
-    return 180, 360
+    if slot_minutes <= 60:
+        return 180, 360
+    if slot_minutes <= 120:
+        return 360, 720
+    if slot_minutes <= 240:
+        return 720, 1440
+    if slot_minutes <= 720:
+        return 1440, 2880
+    return 1440, 10080
 
 
 def _floor_to_tick(value: datetime, tick_minutes: int) -> datetime:
@@ -2139,10 +2403,10 @@ def _own_reservations(store: LedgerStore) -> List[dict]:
 def _selected_reservation_id(active: Sequence[dict], state: TuiState) -> Optional[str]:
     actor = _current_actor()
     mine = [item for item in active if int(item.get("uid")) == actor.uid]
-    if state.selected >= len(mine):
-        state.selected = max(0, len(mine) - 1)
-    if not mine:
+    if not mine or state.selected < 0:
         return None
+    if state.selected >= len(mine):
+        state.selected = len(mine) - 1
     return str(mine[state.selected].get("id"))
 
 

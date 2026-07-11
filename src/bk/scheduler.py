@@ -29,7 +29,7 @@ from .models import (
 from .policy import BOOKING_GRANULARITY_SECONDS, bind_ledger_policy, validate_ledger_policy
 from .schedule_index import ReservationIndex, ReservationSpan
 from .storage import LedgerStore
-from .timeparse import parse_iso, to_iso, utc_now
+from .timeparse import normalize_queue_start, parse_iso, to_iso, utc_now
 
 
 MAX_EDIT_OPERATIONS_PER_RESERVATION = 256
@@ -54,7 +54,7 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
         now = utc_now()
         changed = bind_ledger_policy(ledger, config)
         changed = _maintain_ledger(ledger, now, config.ledger_retention_days) or changed
-        start = _normalize_start(request.start_at, request.allow_queue)
+        start = _normalize_start(request.start_at, request.allow_queue, now)
         duration = timedelta(seconds=request.duration_seconds)
         end = start + duration
         preferred = _normalize_preferred_gpus(request.preferred_gpus)
@@ -253,7 +253,7 @@ def edit_booking(store: LedgerStore, config: Config, request: EditRequest) -> Bo
         if duration_seconds <= 0:
             raise BookingError("duration must be positive")
         _validate_duration_granularity(duration_seconds)
-        start = _normalize_start(start, request.allow_queue)
+        start = _normalize_start(start, request.allow_queue, now)
         earliest_start = _ceil_to_granularity(now)
         if start < earliest_start:
             if request.allow_queue:
@@ -472,10 +472,11 @@ def find_earliest_slot(
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None,
 ) -> Optional[Tuple[datetime, List[int]]]:
     validate_ledger_policy(ledger, config)
-    search_until = earliest_start + timedelta(hours=config.queue_search_hours)
     now = utc_now()
-    index = ReservationIndex.from_ledger(ledger, min(earliest_start, now))
-    candidate_starts = _candidate_starts_from_index(index, earliest_start, search_until, now)
+    search_start = _normalize_start(earliest_start, True, now) if allow_queue else earliest_start
+    search_until = search_start + timedelta(hours=config.queue_search_hours)
+    index = ReservationIndex.from_ledger(ledger, min(search_start, now))
+    candidate_starts = _candidate_starts_from_index(index, search_start, search_until, now)
     if not allow_queue:
         candidate_starts = [earliest_start]
 
@@ -1178,10 +1179,10 @@ def _candidate_starts_from_index(
     return sorted(candidates)
 
 
-def _normalize_start(value: datetime, allow_queue: bool) -> datetime:
+def _normalize_start(value: datetime, allow_queue: bool, now: datetime) -> datetime:
     start = value.astimezone(timezone.utc).replace(microsecond=0)
     if allow_queue:
-        return _ceil_to_granularity(start)
+        return normalize_queue_start(start, now)
     if not _is_granularity_aligned(start):
         raise BookingError("start time must align to a 5-minute boundary")
     return start
