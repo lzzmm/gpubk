@@ -1068,12 +1068,17 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertEqual(plain[0], " ")
         self.assertEqual(focused[0], ">")
 
-    def test_reservation_gpu_column_is_an_eight_cell_map(self):
+    def test_reservation_gpu_column_uses_positioned_gpu_numbers(self):
         header = _table_header(120, gpu_count=8)
         gpu_map = _reservation_gpu_text([0, 3, 7], gpu_count=8, width=8)
 
-        self.assertIn("01234567", header)
-        self.assertEqual(gpu_map, "●··●···●")
+        self.assertIn(" GPU      ", header)
+        self.assertNotIn("01234567", header)
+        self.assertEqual(gpu_map, "0  3   7")
+
+    def test_positioned_gpu_numbers_support_ten_gpus_then_fall_back_to_a_list(self):
+        self.assertEqual(_reservation_gpu_text([0, 9], gpu_count=10, width=10), "0        9")
+        self.assertEqual(_reservation_gpu_text([0, 10], gpu_count=11, width=12), "0,10")
 
     def test_process_table_line_contains_user_utilization_state_and_command(self):
         process = GpuProcessSnapshot(4321, 1001, "alice", "python train.py", 3072, 68, "C")

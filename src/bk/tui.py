@@ -67,6 +67,7 @@ ACCELERATED_MULTIPLIER = 6
 ACCELERATED_ZOOM_LEVELS = 3
 ACCELERATED_GPU_ROWS = 4
 GPU_MAP_SIZE = 8
+GPU_POSITION_MAP_MAX = 10
 SPEED_LEVELS = (1, 6, 24)
 SPEED_ZOOM_STEPS = (1, 2, 4)
 KEY_SHIFT_LEFT = getattr(curses, "KEY_SLEFT", -1001)
@@ -1809,8 +1810,8 @@ def _preview_color(mode: str) -> int:
 
 
 def _table_header(width: int, gpu_count: int = GPU_MAP_SIZE) -> str:
-    gpu_width = GPU_MAP_SIZE if gpu_count <= GPU_MAP_SIZE else (8 if width < 100 else 12)
-    gpu_header = "".join(str(gpu) for gpu in range(gpu_count)) if gpu_count <= GPU_MAP_SIZE else "GPU"
+    gpu_width = _reservation_gpu_width(width, gpu_count)
+    gpu_header = "GPU"
     if width < 100:
         return f"{'#':>3} {'ID':<8} {'User':<10} {'M':<1} {gpu_header:<{gpu_width}} {'Cap':<5} {'Start':<11} {'End':<11} {'Dur':<7}"
     return f"{'#':>3} {'ID':<8} {'User':<16} {'Mode':<4} {gpu_header:<{gpu_width}} {'Cap':<5} {'Start':<11} {'End':<11} {'Dur':<7}"
@@ -1828,7 +1829,7 @@ def _reservation_table_line(
     end = parse_iso(reservation["end_at"]).astimezone()
     duration = _duration_text(end - start)
     user_width = 10 if width < 100 else 16
-    gpu_width = GPU_MAP_SIZE if gpu_count <= GPU_MAP_SIZE else (8 if width < 100 else 12)
+    gpu_width = _reservation_gpu_width(width, gpu_count)
     mode_label = _mode_mark(reservation) if width < 100 else reservation.get("mode", "")[:4]
     cap = _capacity_text(reservation, active, shared_limit)
     return (
@@ -1842,10 +1843,16 @@ def _reservation_table_line(
 
 
 def _reservation_gpu_text(gpus: Sequence[int], gpu_count: int, width: int) -> str:
-    if gpu_count <= GPU_MAP_SIZE:
+    if gpu_count <= GPU_POSITION_MAP_MAX:
         selected = {int(gpu) for gpu in gpus if isinstance(gpu, int)}
-        return "".join("●" if gpu in selected else "·" for gpu in range(gpu_count))
+        return "".join(str(gpu) if gpu in selected else " " for gpu in range(gpu_count))
     return _compact_gpus(gpus, width)
+
+
+def _reservation_gpu_width(width: int, gpu_count: int) -> int:
+    if gpu_count <= GPU_POSITION_MAP_MAX:
+        return max(3, gpu_count)
+    return 8 if width < 100 else 12
 
 
 def _capacity_text(reservation: dict, active: Sequence[dict], shared_limit: int) -> str:

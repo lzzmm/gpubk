@@ -141,8 +141,9 @@ Useful TUI keys:
 The timeline can show past reservations, but history is read-only. Add and Edit
 always validate the selected interval again inside the locked scheduler
 transaction. Reservation focus starts on the header, so no booking blinks until
-you press Down. For servers with up to eight GPUs, reservation rows use an
-eight-cell GPU map instead of a variable-width number list.
+you press Down. For servers with up to ten GPUs, the `GPU` column keeps one
+fixed position per device and shows only the numbers used by that reservation;
+empty positions stay blank.
 
 ## Run a Command at Reservation Time
 
