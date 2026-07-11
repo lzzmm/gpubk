@@ -27,6 +27,9 @@ Recommendation fields:
 - `gpu_details`: live status, predicted recent load, reservation pressure, physical free VRAM, and projected reservation headroom.
 - `nearest_available`: suggestion only when an exact request is unavailable.
 - `warnings`: incomplete history, live-busy device, memory assumption, or allocator fallback.
+- Scheduled job objects may include `launch_guard_state=waiting`, `waiting_since`, and a
+  privacy-safe `message`; exit status `3` from `bk worker --once` means due work is waiting for
+  a safe live GPU state, not that the command ran.
 
 Create and edit return the same `kind=booking_result` shape through JSON CLI and MCP: `status`, a privacy-safe `reservation`, per-GPU `allocation.selected` explanations, allocator source/reason, and warnings. Status is `created`, `updated`, `queued`, or retry-safe `exists`.
 

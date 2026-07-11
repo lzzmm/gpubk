@@ -154,6 +154,12 @@ worker 会设置 `CUDA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER`、
 bk 1 30m -- sh -lc 'python train.py > train.log 2>&1'
 ```
 
+任务启动前，worker 会再次采样所有分配到的 GPU。exclusive 任务会等待所有非系统
+进程退出；shared 任务允许已有的合法共享者，但遇到未预约/身份未知进程或物理显存
+不足时会等待。实时探测不可用时也默认拒绝启动。任务保持 `pending` 并显示原因，常驻
+worker 会在预约窗口内持续重试；`bk worker --once` 有等待任务时返回状态码 `3`。
+只有明确接受兼容性风险时才应设置 `worker_live_guard=false`。
+
 需要无人值守运行时，每位用户可以安装内置的 systemd user unit：
 
 ```bash
@@ -260,6 +266,7 @@ export BK_DATA_DIR=/data2/shared/bk
   "usage_event_retention_days": 365,
   "require_shared_memory": true,
   "shared_memory_reserve_mb": 512,
+  "worker_live_guard": true,
   "file_mode": "0660",
   "dir_mode": "2770"
 }

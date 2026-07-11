@@ -833,7 +833,10 @@ class CliTests(unittest.TestCase):
             data_dir = Path(tmp) / "data"
             log_dir = Path(tmp) / "job-logs"
             start = iso(ceil_5m(datetime.now(timezone.utc)) - timedelta(minutes=5))
-            env = {"BK_JOB_LOG_DIR": str(log_dir)}
+            env = {
+                "BK_JOB_LOG_DIR": str(log_dir),
+                "BK_WORKER_LIVE_GUARD": "0",
+            }
             create = self.run_bk(
                 [
                     "1",
@@ -858,6 +861,74 @@ class CliTests(unittest.TestCase):
             self.assertEqual(jobs.returncode, 0, jobs.stderr)
             self.assertIn("succeeded", jobs.stdout)
             self.assertIn("CUDA=0", log.stdout)
+
+    def test_worker_once_returns_waiting_status_when_live_guard_blocks_launch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            log_dir = root / "job-logs"
+            marker = root / "must-not-launch"
+            simulation = root / "gpu-sim.json"
+            simulation.write_text(
+                json.dumps(
+                    {
+                        "gpus": [
+                            {
+                                "index": 0,
+                                "name": "busy",
+                                "memory_used_mb": 4096,
+                                "memory_total_mb": 24000,
+                                "utilization_percent": 80,
+                                "processes": [
+                                    {
+                                        "pid": 9911,
+                                        "uid": os.getuid() + 1,
+                                        "username": "other",
+                                        "command": "python rogue.py",
+                                        "gpu_memory_mb": 4096,
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            start = iso(floor_5m(datetime.now(timezone.utc)))
+            env = {
+                "BK_JOB_LOG_DIR": str(log_dir),
+                "BK_GPU_SIM_FILE": str(simulation),
+            }
+            create = self.run_bk(
+                [
+                    "1",
+                    "10m",
+                    "--gpu",
+                    "0",
+                    "--start",
+                    start,
+                    "--mem",
+                    "1g",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    f"open({str(marker)!r}, 'w').write('bad')",
+                ],
+                data_dir,
+                env,
+            )
+            worker = self.run_bk(
+                ["worker", "--once", "--quiet", "--poll", "0.1"],
+                data_dir,
+                env,
+            )
+            jobs = self.run_bk(["jobs"], data_dir, env)
+
+            self.assertEqual(create.returncode, 0, create.stderr)
+            self.assertEqual(worker.returncode, 3, worker.stderr)
+            self.assertFalse(marker.exists())
+            self.assertIn("pending", jobs.stdout)
+            self.assertIn("note: GPU 0 has unreserved process", jobs.stdout)
 
     def test_operation_id_is_idempotent_for_agent_retries(self):
         with tempfile.TemporaryDirectory() as tmp:

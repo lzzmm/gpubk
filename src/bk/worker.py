@@ -15,10 +15,12 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from .config import Config
 from .fileio import ensure_directory, open_existing_regular, open_or_create_regular
+from .gpu import GpuSnapshot, snapshot
+from .launch_guard import LaunchGuardDecision, assess_job_launch
 from .models import (
     JOB_CANCELLED,
     JOB_CLAIMED,
@@ -37,7 +39,12 @@ from .models import (
     BookingError,
 )
 from .storage import LedgerStore
+from .scheduler import list_active
 from .timeparse import parse_iso, to_iso, utc_now
+
+
+SnapshotProvider = Callable[[Config], Sequence[GpuSnapshot]]
+WORKER_WAITING_EXIT_CODE = 3
 
 
 @dataclass
@@ -57,6 +64,7 @@ class WorkerSummary:
     succeeded: int = 0
     failed: int = 0
     cancelled: int = 0
+    waiting: int = 0
 
 
 @dataclass(frozen=True)
@@ -128,6 +136,7 @@ def run_worker(
     poll_seconds: Optional[float] = None,
     max_parallel: Optional[int] = None,
     quiet: bool = False,
+    snapshot_provider: SnapshotProvider = snapshot,
 ) -> WorkerSummary:
     if actor.uid != os.getuid():
         raise BookingError("worker actor must match the current process UID")
@@ -144,7 +153,14 @@ def run_worker(
     stop_event = threading.Event()
     previous_handlers = _install_signal_handlers(stop_event)
     running: Dict[str, RunningJob] = {}
-    counts = {"claimed": 0, "started": 0, "succeeded": 0, "failed": 0, "cancelled": 0}
+    counts = {
+        "claimed": 0,
+        "started": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "cancelled": 0,
+        "waiting": 0,
+    }
     if not quiet:
         print(f"worker started: uid={actor.uid} poll={poll:g}s logs={log_dir}")
     try:
@@ -159,6 +175,19 @@ def run_worker(
                     break
             else:
                 capacity = max(0, parallel - len(running))
+                eligible_ids = None
+                if config.worker_live_guard:
+                    eligible_ids, waiting, notices = _launch_guard_eligibility(
+                        config,
+                        store,
+                        actor,
+                        now,
+                        snapshot_provider,
+                    )
+                    counts["waiting"] = waiting
+                    if not quiet:
+                        for notice in notices:
+                            print(notice)
                 claimed = claim_due_jobs(
                     store,
                     actor,
@@ -168,6 +197,7 @@ def run_worker(
                     runner_pid=os.getpid(),
                     claim_timeout_seconds=config.worker_claim_timeout_seconds,
                     limit=capacity,
+                    eligible_ids=eligible_ids,
                 )
                 counts["claimed"] += len(claimed)
                 for reservation in claimed:
@@ -202,7 +232,8 @@ def run_worker(
     if not quiet:
         print(
             f"worker stopped: claimed={summary.claimed} started={summary.started} "
-            f"succeeded={summary.succeeded} failed={summary.failed} cancelled={summary.cancelled}"
+            f"succeeded={summary.succeeded} failed={summary.failed} "
+            f"cancelled={summary.cancelled} waiting={summary.waiting}"
         )
     return summary
 
@@ -217,6 +248,7 @@ def claim_due_jobs(
     runner_pid: int,
     claim_timeout_seconds: float,
     limit: int,
+    eligible_ids: Optional[Set[str]] = None,
 ) -> List[dict]:
     if limit <= 0:
         return []
@@ -259,10 +291,19 @@ def claim_due_jobs(
                 reservation["updated_at"] = to_iso(now)
                 job["status"] = JOB_MISSED
                 job["finished_at"] = to_iso(now)
-                logs.append(_job_log(actor, "job-missed", reservation, "reservation window ended"))
+                message = (
+                    "reservation window ended while waiting for live GPU safety"
+                    if job.get("launch_guard_state") == "waiting"
+                    else "reservation window ended"
+                )
+                job["message"] = message
+                logs.append(_job_log(actor, "job-missed", reservation, message))
                 changed = True
                 continue
             if reservation_status != STATUS_ACTIVE or parse_iso(reservation["start_at"]) > now:
+                continue
+            reservation_id = str(reservation.get("id", ""))
+            if eligible_ids is not None and reservation_id not in eligible_ids:
                 continue
             if len(claimed) >= limit:
                 continue
@@ -274,11 +315,109 @@ def claim_due_jobs(
             job["worker_id"] = worker_id
             job["runner_host"] = runner_host
             job["runner_pid"] = runner_pid
+            job["message"] = None
+            job.pop("launch_guard_state", None)
+            job.pop("launch_guard_key", None)
+            job.pop("waiting_since", None)
             reservation["updated_at"] = to_iso(now)
             claimed.append(copy.deepcopy(reservation))
             logs.append(_job_log(actor, "job-claim", reservation, "claimed"))
             changed = True
         return ledger, claimed, logs, changed
+
+    return store.transaction(mutate)
+
+
+def _launch_guard_eligibility(
+    config: Config,
+    store: LedgerStore,
+    actor: Actor,
+    now: datetime,
+    snapshot_provider: SnapshotProvider,
+) -> tuple[Set[str], int, List[str]]:
+    ledger = store.load()
+    due = _due_pending_jobs(ledger, actor, now)
+    if not due:
+        return set(), 0, []
+    devices = list(snapshot_provider(config))
+    active = list_active(ledger, now)
+    decisions = {
+        str(reservation.get("id", "")): assess_job_launch(
+            config,
+            reservation,
+            devices,
+            active,
+            at=now,
+        )
+        for reservation in due
+    }
+    notices = _record_launch_guard_decisions(store, actor, decisions, now)
+    eligible = {
+        reservation_id
+        for reservation_id, decision in decisions.items()
+        if decision.ready
+    }
+    return eligible, len(decisions) - len(eligible), notices
+
+
+def _due_pending_jobs(ledger: dict, actor: Actor, now: datetime) -> List[dict]:
+    return [
+        reservation
+        for reservation in ledger.get("reservations", [])
+        if int(reservation.get("uid", -1)) == actor.uid
+        and reservation.get("status") == STATUS_ACTIVE
+        and isinstance(reservation.get("job"), dict)
+        and reservation["job"].get("status") == JOB_PENDING
+        and parse_iso(reservation["start_at"]) <= now < parse_iso(reservation["end_at"])
+    ]
+
+
+def _record_launch_guard_decisions(
+    store: LedgerStore,
+    actor: Actor,
+    decisions: Dict[str, LaunchGuardDecision],
+    now: datetime,
+) -> List[str]:
+    def mutate(ledger: dict):
+        changed = False
+        logs = []
+        notices = []
+        for reservation in ledger.get("reservations", []):
+            reservation_id = str(reservation.get("id", ""))
+            decision = decisions.get(reservation_id)
+            if decision is None or int(reservation.get("uid", -1)) != actor.uid:
+                continue
+            job = reservation.get("job")
+            if not isinstance(job, dict) or job.get("status") != JOB_PENDING:
+                continue
+            if decision.ready:
+                if job.get("launch_guard_state") != "waiting":
+                    continue
+                job.pop("launch_guard_state", None)
+                job.pop("launch_guard_key", None)
+                job.pop("waiting_since", None)
+                job["message"] = None
+                reservation["updated_at"] = to_iso(now)
+                logs.append(_job_log(actor, "job-ready", reservation, "live GPU guard cleared"))
+                notices.append(f"ready: {reservation_id[:8]} live GPU guard cleared")
+                changed = True
+                continue
+            reason = decision.reason[:1000]
+            if (
+                job.get("launch_guard_state") == "waiting"
+                and job.get("launch_guard_key") == decision.key
+            ):
+                continue
+            job["launch_guard_state"] = "waiting"
+            job["launch_guard_key"] = decision.key
+            if not job.get("waiting_since"):
+                job["waiting_since"] = to_iso(now)
+            job["message"] = reason
+            reservation["updated_at"] = to_iso(now)
+            logs.append(_job_log(actor, "job-waiting", reservation, reason[:200]))
+            notices.append(f"waiting: {reservation_id[:8]} {reason}")
+            changed = True
+        return ledger, notices, logs, changed
 
     return store.transaction(mutate)
 
@@ -337,8 +476,11 @@ def retry_job(
             "worker_id",
             "message",
             "cancel_requested_at",
+            "launch_guard_state",
+            "launch_guard_key",
+            "waiting_since",
         ):
-            job[key] = None
+            job.pop(key, None)
         reservation["updated_at"] = to_iso(now)
         return ledger, reservation, [_job_log(actor, "job-retry", reservation, "pending")], True
 

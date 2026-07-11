@@ -165,6 +165,15 @@ required:
 bk 1 30m -- sh -lc 'python train.py > train.log 2>&1'
 ```
 
+Immediately before launch, the worker samples every assigned GPU again. An
+exclusive job waits for all non-system processes to leave; a shared job allows
+authorized sharers but waits on unreserved/unknown processes or insufficient
+physical VRAM. Missing live telemetry also fails closed. The job remains
+`pending` with a visible reason and is retried by the continuous worker until
+the reservation ends; `bk worker --once` returns `3` when work is waiting.
+`worker_live_guard=false` disables this protection and should only be used for
+an explicitly accepted compatibility case.
+
 For unattended jobs, each user can install the bundled systemd user unit:
 
 ```bash
@@ -278,6 +287,7 @@ Put a root-owned `config.json` in that directory:
   "usage_event_retention_days": 365,
   "require_shared_memory": true,
   "shared_memory_reserve_mb": 512,
+  "worker_live_guard": true,
   "file_mode": "0660",
   "dir_mode": "2770"
 }

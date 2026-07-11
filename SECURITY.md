@@ -10,6 +10,8 @@ Supported security boundaries:
 - Shared-ledger writes use an advisory lock, WAL journal, atomic replacement, and idempotent audit events.
 - Shared data files reject symbolic links, FIFOs, devices, and other non-regular leaf files before reading or writing.
 - Scheduled command arguments live in UID-owned `0600` specs, not the shared ledger.
+- Scheduled jobs re-check live process authorization and physical VRAM immediately before
+  launch; this reduces races but cannot replace kernel device access control.
 - External allocators can advise ordering but cannot bypass deterministic validation.
 - External allocator output is bounded and allocator timeouts terminate the isolated process group.
 - Telemetry stores only sanitized workload labels and keyed identities, not raw arguments,
@@ -29,6 +31,8 @@ Administrator responsibilities:
   unauthenticated network write endpoint or allow users to submit records for arbitrary UIDs.
 - Review generated user units before enabling them. `bk service install` captures absolute data
   and private job-log paths; reinstall the unit after those paths change.
+- Keep `worker_live_guard=true` on shared servers. Disabling it restores direct launch behavior
+  and accepts collisions with activity that appeared after booking.
 - Run `bk doctor --probe --strict` on the target mount before enabling services. Its lock check is
   cross-process on one host; shared NFS/FUSE deployments still require a second-host lock test.
 - Back up the complete `usage/` directory, including `workload.key`; losing only that key

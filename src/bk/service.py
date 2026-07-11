@@ -236,6 +236,7 @@ def build_agent_context(
             "shared_memory_reserve_mb": config.shared_memory_reserve_mb,
             "queue_search_hours": config.queue_search_hours,
             "ledger_retention_days": config.ledger_retention_days,
+            "worker_live_guard": config.worker_live_guard,
             "usage_retention": {
                 "load_minutes": config.usage_load_window_minutes,
                 "minute_days": config.usage_minute_retention_days,
@@ -255,6 +256,7 @@ def build_agent_context(
             "idempotent_edit_history_limit": MAX_EDIT_OPERATIONS_PER_RESERVATION,
             "structured_cancel": True,
             "scheduled_jobs": True,
+            "scheduled_job_live_guard": config.worker_live_guard,
             "private_job_specs": True,
             "versioned_usage_history": True,
             "usage_api_schema": "gpubk.usage.v1",
@@ -540,6 +542,9 @@ def _public_reservation(reservation: dict, actor: Actor) -> dict:
             {
                 "status": job.get("status"),
                 "summary": job.get("summary", "legacy/private command"),
+                "launch_guard_state": job.get("launch_guard_state"),
+                "message": job.get("message"),
+                "waiting_since": job.get("waiting_since"),
             }
             if isinstance(job, dict)
             else None

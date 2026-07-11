@@ -57,12 +57,14 @@ class AgentServiceTests(unittest.TestCase):
 
         self.assertEqual(context["schema_version"], AGENT_SCHEMA_VERSION)
         self.assertEqual(context["policy"]["granularity_minutes"], 5)
+        self.assertTrue(context["policy"]["worker_live_guard"])
         self.assertEqual(context["gpu_advice"]["order"], [1, 0])
         self.assertEqual(context["gpu_advice"]["gpus"][1]["name"], "idle")
         self.assertEqual(context["gpu_advice"]["gpus"][1]["temperature_c"], 47)
         self.assertTrue(context["capabilities"]["idempotent_edit"])
         self.assertEqual(context["capabilities"]["idempotent_edit_history_limit"], 256)
         self.assertTrue(context["capabilities"]["structured_cancel"])
+        self.assertTrue(context["capabilities"]["scheduled_job_live_guard"])
         self.assertNotIn("secret", str(context))
 
     def test_recommendation_is_read_only_and_prefers_live_idle_gpu(self):

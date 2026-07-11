@@ -4,10 +4,12 @@ import stat
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bk.config import Config
+from bk.gpu import GpuProcessSnapshot, GpuSnapshot
 from bk.models import Actor, BookingError, BookingRequest
 from bk.scheduler import add_booking, cancel_booking
 from bk.storage import LedgerStore
@@ -41,6 +43,7 @@ class ScheduledJobTests(unittest.TestCase):
             job_log_dir=self.log_dir,
             worker_poll_seconds=0.1,
             worker_claim_timeout_seconds=1,
+            worker_live_guard=False,
         )
         self.store = LedgerStore(self.data_dir)
         self.actor = Actor(os.getuid(), "current")
@@ -94,6 +97,91 @@ class ScheduledJobTests(unittest.TestCase):
         output = json.loads(log.splitlines()[-1])
         self.assertEqual(output["cuda"], "0")
         self.assertEqual(output["rid"], mine["id"])
+
+    def test_live_guard_waits_without_log_spam_then_launches_when_gpu_is_safe(self):
+        marker = self.work_dir / "guard-launched"
+        reservation = self.booking(
+            command=[sys.executable, "-c", f"open({str(marker)!r}, 'w').write('ok')"]
+        )
+        guarded = replace(self.config, worker_live_guard=True)
+        busy = [
+            GpuSnapshot(
+                0,
+                "gpu0",
+                memory_used_mb=4096,
+                memory_total_mb=24000,
+                utilization_percent=80,
+                processes=(
+                    GpuProcessSnapshot(
+                        4402,
+                        self.actor.uid + 1,
+                        "other",
+                        "python rogue.py",
+                        4096,
+                        75,
+                    ),
+                ),
+                source="simulation",
+            )
+        ]
+        idle = [
+            GpuSnapshot(
+                0,
+                "gpu0",
+                memory_total_mb=24000,
+                utilization_percent=0,
+                source="simulation",
+            )
+        ]
+
+        first = run_worker(
+            guarded,
+            self.store,
+            self.actor,
+            once=True,
+            poll_seconds=0.1,
+            quiet=True,
+            snapshot_provider=lambda _config: busy,
+        )
+        second = run_worker(
+            guarded,
+            self.store,
+            self.actor,
+            once=True,
+            poll_seconds=0.1,
+            quiet=True,
+            snapshot_provider=lambda _config: busy,
+        )
+
+        waiting = next(
+            item for item in self.store.load()["reservations"] if item["id"] == reservation["id"]
+        )
+        self.assertEqual(first.waiting, 1)
+        self.assertEqual(second.waiting, 1)
+        self.assertEqual(waiting["job"]["status"], "pending")
+        self.assertEqual(waiting["job"]["launch_guard_state"], "waiting")
+        self.assertIn("unreserved process", waiting["job"]["message"])
+        self.assertFalse(marker.exists())
+        audit = self.store.log_path.read_text(encoding="utf-8")
+        self.assertEqual(audit.count('"action": "job-waiting"'), 1)
+
+        launched = run_worker(
+            guarded,
+            self.store,
+            self.actor,
+            once=True,
+            poll_seconds=0.1,
+            quiet=True,
+            snapshot_provider=lambda _config: idle,
+        )
+
+        stored = next(
+            item for item in self.store.load()["reservations"] if item["id"] == reservation["id"]
+        )
+        self.assertEqual(launched.succeeded, 1)
+        self.assertEqual(stored["job"]["status"], "succeeded")
+        self.assertNotIn("launch_guard_state", stored["job"])
+        self.assertTrue(marker.exists())
 
     def test_launch_failure_is_persisted_without_shell_fallback(self):
         marker = self.work_dir / "must-not-exist"

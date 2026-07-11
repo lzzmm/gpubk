@@ -66,6 +66,7 @@ GPUbk sets `CUDA_VISIBLE_DEVICES`; do not add physical GPU IDs to the training c
 - JSON exit `2`: invalid request or write conflict. Inspect `error.message`.
 - Recommendation exit `3`: no legal exact slot; present `nearest_available` without booking it.
 - `uncertain` job: it may already be running. Check processes and logs before using duplicate-risk retry.
+- `pending` with `launch_guard_state=waiting`: the reservation is active, but a live process or VRAM check blocked launch. Report `message`; do not bypass the guard unless the user explicitly accepts that collision risk.
 
 For edits, an explicit `start` is exact and does not move unless `allow_queue=true` was explicitly requested. Keep `bk worker` running for scheduled commands. Use `list_gpu_reservations`, `bk j --json`, or the bounded job-log tool to inspect state.
 
@@ -75,4 +76,5 @@ For edits, an explicit `start` is exact and does not move unless `allow_queue=tr
 - Treat live utilization as a soft forecast because running processes have no reliable end time.
 - Do not delete journal or lock files manually.
 - Do not enable a worker, monitor, or service on a shared server without the user's or administrator's approval.
+- Do not disable `worker_live_guard` merely to make a scheduled command start sooner.
 - Before an approved service deployment, run `bk doctor --probe --json --strict`; do not treat a simulation or single-host NFS lock check as proof of the complete production boundary.

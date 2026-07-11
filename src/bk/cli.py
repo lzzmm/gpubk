@@ -51,7 +51,7 @@ from .tui import run_tui
 from .usage import USAGE_SYSTEM, assess_gpu_live_states, classify_process_usage, summarize_process_command
 from .usage_cli import run_usage_cli
 from .usage_store import UsageAuditStore
-from .worker import job_log_path, retry_job, run_worker
+from .worker import WORKER_WAITING_EXIT_CODE, job_log_path, retry_job, run_worker
 
 try:
     import readline  # noqa: F401
@@ -537,7 +537,11 @@ def _worker_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         max_parallel=args.max_parallel,
         quiet=args.quiet,
     )
-    return 0 if summary.failed == 0 else 1
+    if summary.failed:
+        return 1
+    if args.once and summary.waiting:
+        return WORKER_WAITING_EXIT_CODE
+    return 0
 
 
 def _jobs_command(argv: List[str], store: LedgerStore) -> int:
@@ -573,6 +577,8 @@ def _jobs_command(argv: List[str], store: LedgerStore) -> int:
             f"{','.join(map(str, reservation.get('gpus', []))):<9} "
             f"{format_local(reservation['start_at']):<22} {command}"
         )
+        if job.get("message"):
+            print(f"   note: {_clip_text(str(job['message']), 88)}")
     return 0
 
 

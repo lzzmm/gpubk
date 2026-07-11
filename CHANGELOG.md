@@ -18,6 +18,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Make duplicate telemetry monitors fail quickly with a dedicated exit status and prevent systemd restart loops while retaining kernel-released single-writer locking.
 - Release file-lock descriptors immediately when lock metadata persistence fails, avoiding transient false deadlocks during storage errors.
 - Add `bk doctor --probe --json --strict` for cleanup-safe atomic-replace, fsync, process-lock, permission, disk-space, and real GPU telemetry deployment checks.
+- Recheck process authorization and physical VRAM immediately before scheduled commands launch; unsafe jobs remain pending with a stable reason instead of colliding with live work.
 
 ## 0.1.0 - 2026-07-12
 

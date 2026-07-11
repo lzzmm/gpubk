@@ -21,6 +21,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.data_dir, Path(tmp) / "bk")
             self.assertEqual(config.file_mode, 0o600)
             self.assertEqual(config.dir_mode, 0o700)
+            self.assertTrue(config.worker_live_guard)
 
     def test_gpu_count_is_auto_detected_when_not_configured(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -61,6 +62,7 @@ class ConfigTests(unittest.TestCase):
                         "usage_hourly_retention_days": 1500,
                         "usage_daily_retention_days": 0,
                         "usage_event_retention_days": 365,
+                        "worker_live_guard": False,
                     }
                 ),
                 encoding="utf-8",
@@ -79,6 +81,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.usage_hourly_retention_days, 1500)
             self.assertEqual(config.usage_daily_retention_days, 0)
             self.assertEqual(config.usage_event_retention_days, 365)
+            self.assertFalse(config.worker_live_guard)
 
     def test_config_file_must_not_be_group_writable(self):
         with tempfile.TemporaryDirectory() as tmp:
