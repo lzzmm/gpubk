@@ -2,7 +2,7 @@
 
 ## Scope
 
-BK is a cooperative POSIX scheduler. It protects ledger integrity and enforces application-level UID ownership when every writer uses BK. It is not a kernel GPU access-control system and cannot prevent a user with direct device permission from launching CUDA outside BK.
+GPUbk is a cooperative POSIX scheduler. It protects ledger integrity and enforces application-level UID ownership when every writer uses `bk`. It is not a kernel GPU access-control system and cannot prevent a user with direct device permission from launching CUDA outside GPUbk.
 
 Supported security boundaries:
 
@@ -22,4 +22,3 @@ Administrator responsibilities:
 ## Reporting
 
 Do not include credentials, private command lines, production ledger contents, or user data in a public issue. Contact the package maintainers through the private security-reporting channel associated with the source repository or distribution. A public repository should enable private vulnerability reporting before the first release.
-

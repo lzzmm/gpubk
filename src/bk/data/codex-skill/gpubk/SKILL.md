@@ -1,15 +1,15 @@
 ---
-name: bk-gpu-scheduler
-description: Inspect, recommend, create, edit, cancel, and monitor GPU reservations with the BK scheduler. Use when an agent needs to plan a GPU experiment, choose shared versus exclusive access, account for current and recent GPU load or expected VRAM, attach a command for scheduled execution, inspect job status, or safely automate BK through its JSON CLI or MCP tools.
+name: gpubk
+description: Inspect, recommend, create, edit, cancel, and monitor GPU reservations with GPUbk. Use when an agent needs to plan a GPU experiment, choose shared versus exclusive access, account for current and recent GPU load or expected VRAM, attach a command for scheduled execution, inspect job status, or safely automate GPUbk through its JSON CLI or MCP tools.
 ---
 
-# BK GPU Scheduler
+# GPUbk
 
-Use BK's structured interfaces. Do not scrape the TUI or human-readable tables.
+Use GPUbk's structured interfaces. Do not scrape the TUI or human-readable tables.
 
 ## Choose An Interface
 
-Prefer BK MCP tools when available:
+Prefer GPUbk MCP tools when available:
 
 1. Call `get_gpu_context` for policy and live state.
 2. Call `recommend_gpu_booking` before any write.
@@ -28,21 +28,21 @@ Read [references/protocol.md](references/protocol.md) when implementing an integ
 ## Plan A Reservation
 
 1. Determine GPU count, duration, shared/exclusive mode, earliest or exact start, and expected VRAM per GPU.
-2. For shared work, ask for expected VRAM when it materially affects placement. If unknown, state that BK will use its conservative equal-share estimate.
+2. For shared work, ask for expected VRAM when it materially affects placement. If unknown, state that GPUbk will use its conservative equal-share estimate.
 3. Inspect context immediately before recommending. Current processes can change quickly.
 4. Run a read-only recommendation. Explain queued start, selected GPUs, confidence, live-busy warnings, and projected memory headroom.
 5. Treat explicit start as exact. Do not silently convert it to queueing.
-6. Let BK enforce conflicts and memory limits. Never infer that an unsafe placement is acceptable.
+6. Let GPUbk enforce conflicts and memory limits. Never infer that an unsafe placement is acceptable.
 
 Use shared mode for workloads that can coexist within both record and VRAM limits. Use exclusive mode when the experiment needs the whole device, has unpredictable memory behavior, or must avoid interference.
 
 ## Create Safely
 
 - Generate one stable operation ID for the user's intended write and reuse it on retries.
-- Never pass, invent, or override a UID. BK derives identity from the local process.
+- Never pass, invent, or override a UID. GPUbk derives identity from the local process.
 - Do not retry a write with a new operation ID after an ambiguous response; inspect reservations first.
 - Do not cancel or edit another user's reservation.
-- Do not expose secrets in command arguments. BK stores commands privately, but process environments or user scripts are preferable for credentials.
+- Do not expose secrets in command arguments. GPUbk stores commands privately, but process environments or user scripts are preferable for credentials.
 
 To schedule a command:
 
@@ -50,7 +50,7 @@ To schedule a command:
 bk 2 1h30m --mem 12g --op-id <stable-id> -- python train.py --config exp.yaml
 ```
 
-BK sets `CUDA_VISIBLE_DEVICES`; do not add physical GPU IDs to the training command.
+GPUbk sets `CUDA_VISIBLE_DEVICES`; do not add physical GPU IDs to the training command.
 
 ## Handle Results
 

@@ -71,9 +71,9 @@ jobs:
           with ZipFile(wheel) as archive:
               names = set(archive.namelist())
           required = {
-              "bk/data/codex-skill/bk-gpu-scheduler/SKILL.md",
-              "bk/data/codex-skill/bk-gpu-scheduler/agents/openai.yaml",
-              "bk/data/codex-skill/bk-gpu-scheduler/references/protocol.md",
+              "bk/data/codex-skill/gpubk/SKILL.md",
+              "bk/data/codex-skill/gpubk/agents/openai.yaml",
+              "bk/data/codex-skill/gpubk/references/protocol.md",
           }
           missing = required - names
           if missing:

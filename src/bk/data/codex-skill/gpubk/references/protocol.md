@@ -1,4 +1,4 @@
-# BK Agent Protocol
+# GPUbk Agent Protocol
 
 ## JSON CLI
 

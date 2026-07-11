@@ -10,7 +10,7 @@ from typing import Optional
 from .models import BookingError
 
 
-SKILL_NAME = "bk-gpu-scheduler"
+SKILL_NAME = "gpubk"
 
 
 def default_skill_path() -> Path:

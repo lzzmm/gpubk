@@ -9,6 +9,25 @@ COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
 
 
 class ReleaseConfigurationTests(unittest.TestCase):
+    def test_public_distribution_is_gpubk_and_cli_stays_bk(self):
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+        self.assertRegex(pyproject, r'(?m)^name = "gpubk"$')
+        self.assertRegex(pyproject, r'(?m)^bk = "bk\.cli:main"$')
+
+        public_files = [
+            ROOT / "README.md",
+            ROOT / "RELEASING.md",
+            ROOT / "src" / "bk" / "mcp_server.py",
+            ROOT / ".github" / "workflows" / "ci.yml",
+        ]
+        old_distribution = "bk-" + "gpu-booker"
+        old_skill = "bk-" + "gpu-scheduler"
+        for path in public_files:
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn(old_distribution, text, str(path.relative_to(ROOT)))
+            self.assertNotIn(old_skill, text, str(path.relative_to(ROOT)))
+
     def test_external_github_actions_are_pinned_to_commit_shas(self):
         workflows = ROOT / ".github" / "workflows"
         if not workflows.is_dir():

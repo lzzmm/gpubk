@@ -146,7 +146,7 @@ def _looks_like_auto_request(argv: List[str]) -> bool:
 
 
 def _interactive_shell(config: Config, store: LedgerStore) -> int:
-    print("bk GPU booking")
+    print("GPUbk booking")
     print(f"data: {config.data_dir}")
     print(f"shared limit: {config.max_shared_users}")
     print("Type 'help' for commands. Type 'quit' to exit.")

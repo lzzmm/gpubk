@@ -19,7 +19,7 @@
    ```bash
    python -m pip install '.[mcp,gpu]' build twine pyyaml
    python -m unittest tests.test_mcp_server tests.test_mcp_integration
-   python /path/to/skill-creator/scripts/quick_validate.py src/bk/data/codex-skill/bk-gpu-scheduler
+   python /path/to/skill-creator/scripts/quick_validate.py src/bk/data/codex-skill/gpubk
    ```
 
 6. Build and inspect artifacts:

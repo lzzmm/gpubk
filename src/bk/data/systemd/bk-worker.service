@@ -1,5 +1,5 @@
 [Unit]
-Description=BK per-user scheduled job worker
+Description=GPUbk per-user scheduled job worker
 After=default.target
 
 [Service]

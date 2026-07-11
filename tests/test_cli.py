@@ -65,7 +65,7 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.run_bk_with_input([], Path(tmp), "status\nquit\n")
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("bk GPU booking", result.stdout)
+            self.assertIn("GPUbk booking", result.stdout)
             self.assertIn("bk> ", result.stdout)
             self.assertIn("GPU 0: unknown", result.stdout)
             self.assertIn("GPU 1: unknown", result.stdout)

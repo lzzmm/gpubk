@@ -156,11 +156,11 @@ def create_mcp_server(backend: Optional[BkMcpBackend] = None):
     try:
         from mcp.server.fastmcp import FastMCP
     except ImportError as exc:
-        raise RuntimeError("MCP support is optional; install with: pip install 'bk-gpu-booker[mcp]'") from exc
+        raise RuntimeError("MCP support is optional; install with: pip install 'gpubk[mcp]'") from exc
 
     api = backend or BkMcpBackend()
     mcp = FastMCP(
-        "BK GPU Scheduler",
+        "GPUbk",
         json_response=True,
         instructions=(
             "Inspect context or call recommend before booking. "

@@ -1,5 +1,5 @@
 [Unit]
-Description=BK GPU usage monitor
+Description=GPUbk usage monitor
 After=default.target
 
 [Service]

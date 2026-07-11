@@ -3,12 +3,12 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "bk-gpu-booker"
+name = "gpubk"
 dynamic = ["version"]
 description = "Offline, load-aware GPU booking CLI, curses TUI, worker, and agent interface."
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [{ name = "BK maintainers" }]
+authors = [{ name = "GPUbk maintainers" }]
 keywords = ["gpu", "scheduler", "booking", "tui", "nvml", "mcp", "agent"]
 classifiers = [
   "Development Status :: 4 - Beta",

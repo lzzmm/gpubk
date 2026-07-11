@@ -412,7 +412,7 @@ def _header_lines(
     local_start = view_start.astimezone()
     local_end = view_end.astimezone()
     wide_title = (
-        f" bk GPU Booker | now {local_now:%Y-%m-%d %H:%M:%S %z} "
+        f" GPUbk | now {local_now:%Y-%m-%d %H:%M:%S %z} "
         f"| window {local_start:%m-%d %H:%M} -> {local_end:%m-%d %H:%M} "
         f"| {state.slot_minutes}m/col "
     )
@@ -425,7 +425,7 @@ def _header_lines(
         details = wide_details
     else:
         title = (
-            f" bk GPU Booker | {_weekday_label(local_now)} {local_now:%m-%d %H:%M:%S} "
+            f" GPUbk | {_weekday_label(local_now)} {local_now:%m-%d %H:%M:%S} "
             f"| {local_start:%m-%d %H:%M}->{local_end:%m-%d %H:%M} | {state.slot_minutes}m"
         )
         suffix = f" | share={config.max_shared_users} | 1s refresh | q quit | ? help"
@@ -1870,7 +1870,7 @@ def _win_addstr(win, row: int, col: int, text: str) -> None:
 
 def _print_fallback(config: Config, store: LedgerStore) -> None:
     now = utc_now()
-    print("bk GPU Booker TUI fallback")
+    print("GPUbk TUI fallback")
     print(f"data={config.data_dir} shared_limit={config.max_shared_users}")
     print("active reservations:")
     for reservation in list_active(store.load(), now):

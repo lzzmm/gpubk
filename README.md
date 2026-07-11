@@ -1,10 +1,10 @@
-# bk GPU Scheduler
+# GPUbk
 
-`bk` is an offline, zero-core-dependency GPU booking CLI and curses TUI for shared lab servers. It provides 5-minute shared/exclusive scheduling, VRAM admission, live and historical load-aware placement, per-user scheduled jobs, atomic file transactions, stable JSON, optional MCP, and a bundled Codex Skill.
+GPUbk is an offline, zero-core-dependency GPU booking CLI and curses TUI for shared lab servers. Its deliberately short command is `bk`. It provides 5-minute shared/exclusive scheduling, VRAM admission, live and historical load-aware placement, per-user scheduled jobs, atomic file transactions, stable JSON, optional MCP, and a bundled Codex Skill.
 
 ```bash
-python3 -m pip install bk-gpu-booker          # zero runtime dependencies
-python3 -m pip install 'bk-gpu-booker[gpu]'  # low-overhead NVML telemetry
+python3 -m pip install gpubk          # zero runtime dependencies
+python3 -m pip install 'gpubk[gpu]'  # low-overhead NVML telemetry
 bk 2 1h30m --mem 12g
 bk t
 ```
@@ -146,7 +146,7 @@ export BK_ALLOCATOR_WEIGHT=5
 核心包保持零依赖。需要 MCP 时安装可选 extra：
 
 ```bash
-python3 -m pip install 'bk-gpu-booker[mcp]'
+python3 -m pip install 'gpubk[mcp]'
 bk-mcp                 # 或 bk mcp；本地 stdio transport
 ```
 
@@ -168,7 +168,7 @@ bk skill install
 bk skill show
 ```
 
-默认安装到 `${CODEX_HOME:-~/.codex}/skills/bk-gpu-scheduler`；已有目录时拒绝覆盖，更新需显式 `--force`。Skill 会指导 Agent 先读 context、再 recommend、获得写入授权后使用稳定 operation ID 提交，并正确处理 shared VRAM、exact start、queued、uncertain job 和外部 allocator 的安全边界。
+默认安装到 `${CODEX_HOME:-~/.codex}/skills/gpubk`；已有目录时拒绝覆盖，更新需显式 `--force`。Skill 会指导 Agent 先读 context、再 recommend、获得写入授权后使用稳定 operation ID 提交，并正确处理 shared VRAM、exact start、queued、uncertain job 和外部 allocator 的安全边界。
 
 私有默认权限为目录 `0700`、文件 `0600`。共享部署必须同时配置 `file_mode=0660`、`dir_mode=2770`，并让共享目录具有正确组所有权和 setgid 位；程序不会擅自 `chown` 或修改已存在目录的权限。原子替换产生的新台账、journal、备份和日志都会保持配置的文件模式。
 
