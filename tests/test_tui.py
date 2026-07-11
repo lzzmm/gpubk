@@ -940,7 +940,7 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertIn("S2/2", shared)
         self.assertEqual(idle.index("S"), shared.index("S"))
         self.assertEqual(idle.index("U"), shared.index("U"))
-        self.assertEqual(idle.index("4.0/96G"), shared.index("4.0/96G"))
+        self.assertEqual(idle.index("F92.0G"), shared.index("F92.0G"))
 
     def test_gpu_label_shows_live_utilization_processes_and_violations(self):
         process = GpuProcessSnapshot(123, 1001, "alice", "python train.py")
@@ -960,7 +960,28 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertIn("!1", label)
         self.assertIn("S2/4", label)
         self.assertIn("U72%", label)
-        self.assertIn("4.0/96G", label)
+        self.assertIn("F92.0G", label)
+        self.assertIn("61C", label)
+        self.assertNotIn("P1", label)
+
+    def test_gpu_label_never_renders_a_partial_trailing_metric(self):
+        gpu = GpuSnapshot(
+            index=0,
+            name="Sim Pro 6000",
+            memory_used_mb=512,
+            memory_total_mb=32607,
+            utilization_percent=0,
+            temperature_c=26,
+            source="simulation",
+        )
+
+        label = _gpu_label(gpu, 30, peak_shared=0, shared_limit=2)
+        narrower = _gpu_label(gpu, 28, peak_shared=0, shared_limit=2)
+
+        self.assertIn("F31.3G", label)
+        self.assertIn("26C", label)
+        self.assertNotIn("26C", narrower)
+        self.assertFalse(narrower.rstrip().endswith("2"), narrower)
 
     def test_process_table_line_contains_user_utilization_state_and_command(self):
         process = GpuProcessSnapshot(4321, 1001, "alice", "python train.py", 3072, 68, "C")

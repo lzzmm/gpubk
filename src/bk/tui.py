@@ -1868,20 +1868,29 @@ def _gpu_label(
     extras = [f"!{violations}"] if violations else []
     if not gpu.memory_total_mb and gpu.utilization_percent is None:
         core = f"{gpu_field} {capacity_field} no telemetry"
-        return " ".join([core] + extras)[:width].ljust(width)
+        return _append_complete_metrics(core, extras, width)
 
     util = f"U{gpu.utilization_percent}%" if gpu.utilization_percent is not None else "U-"
     memory = "-"
     if gpu.memory_total_mb:
-        used_gib = gpu.memory_used_mb / 1024
-        total_gib = gpu.memory_total_mb / 1024
-        memory = f"{used_gib:.1f}/{total_gib:.0f}G"
+        free_gib = max(0, gpu.memory_total_mb - gpu.memory_used_mb) / 1024
+        memory = f"F{free_gib:.1f}G"
     core = f"{gpu_field} {capacity_field} {util:<5} {_truncate(memory, 9):<9}"
     if gpu.temperature_c is not None:
         extras.append(f"{gpu.temperature_c}C")
     if gpu.processes:
         extras.append(f"P{len(gpu.processes)}")
-    return " ".join([core] + extras)[:width].ljust(width)
+    return _append_complete_metrics(core, extras, width)
+
+
+def _append_complete_metrics(core: str, extras: Sequence[str], width: int) -> str:
+    text = core.rstrip()
+    for metric in extras:
+        candidate = f"{text} {metric}"
+        if len(candidate) > width:
+            break
+        text = candidate
+    return text[:width].ljust(width)
 
 
 def _shared_lane_item(
