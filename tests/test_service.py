@@ -36,6 +36,7 @@ class AgentServiceTests(unittest.TestCase):
                 memory_used_mb=1000,
                 memory_total_mb=24000,
                 utilization_percent=2,
+                temperature_c=47,
                 source="simulation",
             ),
         ]
@@ -56,6 +57,8 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(context["schema_version"], AGENT_SCHEMA_VERSION)
         self.assertEqual(context["policy"]["granularity_minutes"], 5)
         self.assertEqual(context["gpu_advice"]["order"], [1, 0])
+        self.assertEqual(context["gpu_advice"]["gpus"][1]["name"], "idle")
+        self.assertEqual(context["gpu_advice"]["gpus"][1]["temperature_c"], 47)
         self.assertNotIn("secret", str(context))
 
     def test_recommendation_is_read_only_and_prefers_live_idle_gpu(self):

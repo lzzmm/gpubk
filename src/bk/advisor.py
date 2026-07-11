@@ -93,6 +93,8 @@ def _gpu_advice_dict(
     used = snapshot_item.memory_used_mb if snapshot_item is not None else 0
     return {
         "index": index,
+        "name": snapshot_item.name if snapshot_item is not None else "unknown",
+        "temperature_c": snapshot_item.temperature_c if snapshot_item is not None else None,
         "score": score,
         "live": {
             "status": live.status,

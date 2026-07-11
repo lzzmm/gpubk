@@ -18,6 +18,7 @@ Recommendation fields:
 
 - `available`: whether the requested semantics have a legal slot.
 - `recommendation.gpus`, `start_at`, `end_at`, `queued`, `confidence`.
+- Context GPU entries include model name, temperature, live status, physical VRAM, and recent load history.
 - `gpu_details`: live status, predicted recent load, reservation pressure, physical free VRAM, and projected reservation headroom.
 - `nearest_available`: suggestion only when an exact request is unavailable.
 - `warnings`: incomplete history, live-busy device, memory assumption, or allocator fallback.

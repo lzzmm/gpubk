@@ -113,7 +113,7 @@ bk l --json
 bk j --json
 ```
 
-`context` 包含当前 UID、调度策略、每卡实时状态、近期预测负载、显存、预约和能力声明；不包含完整进程参数、私有 job spec 或任意 token。`recommend` 是严格只读的，返回推荐卡组、起止时间、是否排队、置信度、每卡评分、预约压力、显存余量和警告。显式 `--start` 保持 exact 语义，冲突时 `available=false` 并给出 `nearest_available`。
+`context` 包含当前 UID、调度策略、GPU 型号与温度、每卡实时状态、近期预测负载、显存、预约和能力声明；不包含完整进程参数、私有 job spec 或任意 token。`recommend` 是严格只读的，返回推荐卡组、起止时间、是否排队、置信度、每卡评分、预约压力、显存余量和警告。显式 `--start` 保持 exact 语义，冲突时 `available=false` 并给出 `nearest_available`。
 
 实际写入建议总是传唯一 `--op-id`。相同 UID 重试同一个 operation ID 会返回原结果，不会重复预约。`--json` 成功和业务错误都输出单个 JSON 对象；冲突/参数错误退出码为 `2`，只读推荐无合法精确时段退出码为 `3`。
 
