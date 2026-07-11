@@ -12,6 +12,8 @@ bk agent edit RESERVATION --duration 2h --op-id ID --compact
 bk agent cancel RESERVATION --compact
 bk l --json
 bk j --json
+bk usage me --since 24h --json --compact
+bk usage samples --since 2d --resolution 5m --json --compact
 ```
 
 Omitting `--start` uses the active 5-minute interval when possible, then permits earliest-slot queueing. Providing `--start` means exact placement. Human CLI users may use `--at`; Agents should keep using explicit ISO 8601 and structured fields.
@@ -37,8 +39,11 @@ Create and edit return the same `kind=booking_result` shape through JSON CLI and
 - `edit_my_gpu_booking`: idempotent current-UID edit; `operation_id` is required.
 - `cancel_my_gpu_booking`: current UID only.
 - `read_my_job_log`: bounded current-UID private log tail.
+- `get_my_gpu_usage`: versioned current-UID summaries, samples, and optional audit events.
 
 The MCP server runs over local stdio and inherits the launching user's UID. It never accepts UID as a tool argument.
+Historical usage also has a read-only `bk://usage/me/recent` resource. External visualizers should consume
+`gpubk.usage.v1` through `bk.usage_api.UsageQueryService` rather than parse compact storage partitions.
 Tools expose standard MCP annotations: context, recommendation, listing, and log reads are read-only; create and edit are idempotent writes because they require operation IDs; cancel is destructive; all tools are closed-world local operations.
 
 An operation ID identifies one immutable write intent for the current UID. Exact retries return `status=exists`; reusing that ID with another reservation or different fields returns a structured error. Edit start times remain exact unless `allow_queue=true` is explicitly supplied.

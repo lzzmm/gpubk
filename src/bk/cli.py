@@ -17,7 +17,7 @@ from .config import Config, load_config
 from .fileio import open_existing_regular
 from .gpu import snapshot
 from .identity import current_actor
-from .monitor import UsageAuditStore, run_monitor
+from .monitor import run_monitor
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, EditRequest
 from .scheduler import (
     cancel_booking,
@@ -49,6 +49,8 @@ from .timeparse import (
 )
 from .tui import run_tui
 from .usage import USAGE_SYSTEM, assess_gpu_live_states, classify_process_usage, summarize_process_command
+from .usage_cli import run_usage_cli
+from .usage_store import UsageAuditStore
 from .worker import job_log_path, retry_job, run_worker
 
 try:
@@ -89,7 +91,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if head in {"monitor", "m"}:
             return _monitor_command(argv[1:], config, store)
         if head in {"usage", "u"}:
-            return _usage_command(argv[1:], config)
+            return run_usage_cli(argv[1:], config)
         if head in {"worker", "w"}:
             return _worker_command(argv[1:], config, store)
         if head in {"jobs", "j"}:
@@ -244,7 +246,7 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
         _monitor_command(args[1:], config, store)
         return True
     if head in {"usage", "u"}:
-        _usage_command(args[1:], config)
+        run_usage_cli(args[1:], config)
         return True
     if head in {"worker", "w"}:
         _worker_command(args[1:], config, store)
@@ -516,28 +518,6 @@ def _monitor_command(argv: List[str], config: Config, store: LedgerStore) -> int
     )
 
 
-def _usage_command(argv: List[str], config: Config) -> int:
-    parser = argparse.ArgumentParser(prog="bk usage")
-    parser.add_argument("--rollups", action="store_true", help="show utilization rollups instead of events")
-    parser.add_argument("--limit", type=int, default=20)
-    args = parser.parse_args(argv)
-    if args.limit < 1:
-        raise ValueError("--limit must be >= 1")
-    store = UsageAuditStore(
-        config.data_dir,
-        config.lock_timeout_seconds,
-        config.file_mode,
-        config.dir_mode,
-    )
-    records = store.recent_rollups(args.limit) if args.rollups else store.recent_events(args.limit)
-    if not records:
-        print("no usage records")
-        return 0
-    for record in records:
-        print(json.dumps(record, ensure_ascii=False, sort_keys=True))
-    return 0
-
-
 def _worker_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     parser = argparse.ArgumentParser(prog="bk worker")
     parser.add_argument("--once", action="store_true", help="run due jobs, wait for them, then exit")
@@ -799,6 +779,8 @@ def _service_command(argv: List[str]) -> int:
     path = install_user_unit(args.kind, args.target_dir, force=args.force)
     print(f"installed unit: {path}")
     print("not enabled or started; review it, then run systemctl --user daemon-reload")
+    if args.kind == "monitor":
+        print("shared server note: run exactly one trusted monitor writer; do not enable one per user")
     return 0
 
 
@@ -1104,6 +1086,15 @@ def _duration_compact(seconds: int) -> str:
     return "".join(parts) or "0m"
 
 
+def _duration_detail(seconds: int) -> str:
+    minutes = max(0, seconds // 60)
+    hours, mins = divmod(minutes, 60)
+    total = f"{hours}h{mins}m" if mins else f"{hours}h"
+    if hours < 24:
+        return total if hours else f"{mins}m"
+    return f"{total} ({_duration_compact(seconds)})"
+
+
 def _delete_command(argv: List[str], store: LedgerStore) -> int:
     parser = argparse.ArgumentParser(prog="bk del")
     parser.add_argument("reservation_id", nargs="?")
@@ -1306,17 +1297,25 @@ def _list_command(argv: List[str], store: LedgerStore) -> int:
     for reservation in active:
         gpus = ",".join(str(item) for item in reservation.get("gpus", []))
         index = mine_index.get(reservation["id"], "-")
+        duration_seconds = int((parse_iso(reservation["end_at"]) - parse_iso(reservation["start_at"])).total_seconds())
         print(
             f"{index:>2} {_short_id(reservation)} {reservation['mode']} uid={reservation['uid']} "
             f"user={reservation['username']} gpu={gpus} "
             f"job={reservation.get('job', {}).get('status', '-')} "
+            f"dur={_duration_detail(duration_seconds)} "
             f"{format_local_range(reservation['start_at'], reservation['end_at'])}"
         )
     return 0
 
 
 def _doctor_command(config: Config, store: LedgerStore) -> int:
-    storage_issues = store.health_issues()
+    usage_store = UsageAuditStore(
+        config.data_dir,
+        config.lock_timeout_seconds,
+        config.file_mode,
+        config.dir_mode,
+    )
+    storage_issues = [*store.health_issues(), *usage_store.health_issues()]
     ledger = store.load()
     issues = find_policy_violations(ledger, config.max_shared_users)
     privacy_issues = [
@@ -1618,7 +1617,9 @@ MANAGE
 JOBS AND USAGE
   bk w                            run this UID's due jobs
   bk j / bk jl ID / bk jr ID     list, inspect, or retry jobs
-  bk m [--once] / bk u           monitor or inspect GPU usage
+  bk m [--once]                  monitor GPU processes
+  bk u / bk u users --since 30d  own or all-user summaries
+  bk u events / bk u samples     audit events or time series
 
 AGENTS AND ADMIN
   bk agent context               stable machine-readable context
@@ -1657,7 +1658,10 @@ def _print_shell_help() -> None:
   lg | log                  show your operation log
   dr | doctor               report policy violations in the ledger
   m | monitor               continuously audit GPU process usage
-  u [--rollups]             show recent usage events or minute rollups
+  u                          summarize this UID's last 24h usage
+  u users --since 30d       summarize visible users
+  u events | u samples      audit events or versioned time series
+  u storage                 inspect tiers, retention, and migration
   w | worker                execute only this UID's due jobs
   j | jobs                  list scheduled job states
   jl <number|short_id>      show a job log

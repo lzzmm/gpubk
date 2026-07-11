@@ -23,6 +23,13 @@ class Config:
     max_shared_users: int = 2
     queue_search_hours: int = 168
     ledger_retention_days: int = 90
+    usage_load_window_minutes: int = 120
+    usage_minute_retention_days: int = 30
+    usage_five_minute_retention_days: int = 365
+    usage_ten_minute_retention_days: int = 1095
+    usage_hourly_retention_days: int = 1500
+    usage_daily_retention_days: int = 0
+    usage_event_retention_days: int = 365
     lock_timeout_seconds: float = 10.0
     backup_keep: int = 10
     timeline_hours: int = 24
@@ -151,6 +158,13 @@ def load_config() -> Config:
         "max_shared_users": "BK_MAX_SHARED_USERS",
         "queue_search_hours": "BK_QUEUE_SEARCH_HOURS",
         "ledger_retention_days": "BK_LEDGER_RETENTION_DAYS",
+        "usage_load_window_minutes": "BK_USAGE_LOAD_WINDOW_MINUTES",
+        "usage_minute_retention_days": "BK_USAGE_MINUTE_RETENTION_DAYS",
+        "usage_five_minute_retention_days": "BK_USAGE_FIVE_MINUTE_RETENTION_DAYS",
+        "usage_ten_minute_retention_days": "BK_USAGE_TEN_MINUTE_RETENTION_DAYS",
+        "usage_hourly_retention_days": "BK_USAGE_HOURLY_RETENTION_DAYS",
+        "usage_daily_retention_days": "BK_USAGE_DAILY_RETENTION_DAYS",
+        "usage_event_retention_days": "BK_USAGE_EVENT_RETENTION_DAYS",
         "lock_timeout_seconds": "BK_LOCK_TIMEOUT_SECONDS",
         "backup_keep": "BK_BACKUP_KEEP",
         "timeline_hours": "BK_TIMELINE_HOURS",
@@ -181,6 +195,13 @@ def load_config() -> Config:
         max_shared_users=_int_value(raw, "max_shared_users", 2),
         queue_search_hours=_int_value(raw, "queue_search_hours", 168),
         ledger_retention_days=_nonnegative_int_value(raw, "ledger_retention_days", 90),
+        usage_load_window_minutes=_int_value(raw, "usage_load_window_minutes", 120),
+        usage_minute_retention_days=_nonnegative_int_value(raw, "usage_minute_retention_days", 30),
+        usage_five_minute_retention_days=_nonnegative_int_value(raw, "usage_five_minute_retention_days", 365),
+        usage_ten_minute_retention_days=_nonnegative_int_value(raw, "usage_ten_minute_retention_days", 1095),
+        usage_hourly_retention_days=_nonnegative_int_value(raw, "usage_hourly_retention_days", 1500),
+        usage_daily_retention_days=_nonnegative_int_value(raw, "usage_daily_retention_days", 0),
+        usage_event_retention_days=_nonnegative_int_value(raw, "usage_event_retention_days", 365),
         lock_timeout_seconds=_float_value(raw, "lock_timeout_seconds", 10.0),
         backup_keep=_int_value(raw, "backup_keep", 10),
         timeline_hours=_int_value(raw, "timeline_hours", 24),

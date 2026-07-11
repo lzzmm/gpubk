@@ -48,6 +48,16 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("## 安装", chinese)
         self.assertNotIn("The detailed guide below is currently in Chinese.", english)
 
+    def test_telemetry_contract_is_packaged_and_linked(self):
+        telemetry = (ROOT / "TELEMETRY.md").read_text(encoding="utf-8")
+        manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("include TELEMETRY.md", manifest)
+        self.assertIn("gpubk.usage.v1", telemetry)
+        self.assertIn("TelemetrySink", telemetry)
+        self.assertIn("TELEMETRY.md", readme)
+
     def test_external_github_actions_are_pinned_to_commit_shas(self):
         workflows = ROOT / ".github" / "workflows"
         if not workflows.is_dir():

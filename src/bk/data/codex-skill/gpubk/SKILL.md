@@ -15,6 +15,7 @@ Prefer GPUbk MCP tools when available:
 2. Call `recommend_gpu_booking` before any write.
 3. Call `create_gpu_booking` only when the user requested or approved the reservation.
 4. Use `edit_my_gpu_booking` with a new stable operation ID when the user approves a change.
+5. Use `get_my_gpu_usage` for current-UID historical utilization; do not infer it from reservation duration.
 
 Otherwise use the JSON CLI:
 

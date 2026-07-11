@@ -180,17 +180,25 @@ Install the `gpu` extra, then run a single sample or a low-overhead monitor:
 ```bash
 bk m --once
 bk m
-bk u --rollups
+bk u                              # this UID, last 24 hours
+bk u users --since 30d           # visible per-user summaries
+bk u samples --since 2d --resolution 5m --json
+bk u events --user me --since 7d
 ```
 
 NVML is initialized once and device handles are reused. The monitor records
-bounded load summaries plus process start, stop, and authorization changes; it
-does not append a full snapshot every second. Without NVML, GPUbk falls back to
-`nvidia-smi` with less process detail.
+bounded scheduling load plus sparse per-user history and process start, stop,
+authorization, and workload changes. It does not append a full snapshot every
+second. Without NVML, GPUbk falls back to `nvidia-smi` with less process detail.
 
 Process status is based on the process UID and active reservation:
 `ok`, `wrong-gpu`, `unreserved`, `unknown`, or `system`. Command lines are
 reduced to safe labels before shared logging.
+
+History is stored in checksummed daily partitions with 1-minute, 5-minute,
+10-minute, hourly, and daily levels. The public `gpubk.usage.v1` query model is
+available through Python, JSON CLI, and MCP; visualizers should not parse storage
+files. See [Telemetry](https://github.com/lzzmm/gpubk/blob/main/TELEMETRY.md).
 
 The monitor also has a user service:
 
@@ -199,6 +207,10 @@ bk service install monitor
 systemctl --user daemon-reload
 systemctl --user enable --now bk-monitor.service
 ```
+
+Run exactly one trusted monitor writer on a shared server. Per-user workers are
+still separate. The monitor service above is intended for a private server or
+for the one account selected by the administrator.
 
 ## Agents and MCP
 
@@ -250,6 +262,13 @@ Put a root-owned `config.json` in that directory:
   "max_shared_users": 2,
   "queue_search_hours": 168,
   "ledger_retention_days": 90,
+  "usage_load_window_minutes": 120,
+  "usage_minute_retention_days": 30,
+  "usage_five_minute_retention_days": 365,
+  "usage_ten_minute_retention_days": 1095,
+  "usage_hourly_retention_days": 1500,
+  "usage_daily_retention_days": 0,
+  "usage_event_retention_days": 365,
   "require_shared_memory": true,
   "shared_memory_reserve_mb": 512,
   "file_mode": "0660",
@@ -288,6 +307,7 @@ timeline, Add/Edit, logs, and Agent JSON remain usable.
 python3 -m pip install -e '.[mcp,gpu]'
 PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'
 PYTHONPATH=src python3 benchmarks/scheduler_queue.py
+PYTHONPATH=src python3 benchmarks/usage_store.py
 ```
 
 Project documents: [Security](https://github.com/lzzmm/gpubk/blob/main/SECURITY.md) ·

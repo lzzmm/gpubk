@@ -55,6 +55,12 @@ class ConfigTests(unittest.TestCase):
                         "dir_mode": "2770",
                         "require_shared_memory": True,
                         "ledger_retention_days": 45,
+                        "usage_minute_retention_days": 30,
+                        "usage_five_minute_retention_days": 365,
+                        "usage_ten_minute_retention_days": 1095,
+                        "usage_hourly_retention_days": 1500,
+                        "usage_daily_retention_days": 0,
+                        "usage_event_retention_days": 365,
                     }
                 ),
                 encoding="utf-8",
@@ -67,6 +73,12 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.dir_mode, 0o2770)
             self.assertTrue(config.require_shared_memory)
             self.assertEqual(config.ledger_retention_days, 45)
+            self.assertEqual(config.usage_minute_retention_days, 30)
+            self.assertEqual(config.usage_five_minute_retention_days, 365)
+            self.assertEqual(config.usage_ten_minute_retention_days, 1095)
+            self.assertEqual(config.usage_hourly_retention_days, 1500)
+            self.assertEqual(config.usage_daily_retention_days, 0)
+            self.assertEqual(config.usage_event_retention_days, 365)
 
     def test_config_file_must_not_be_group_writable(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -102,6 +114,17 @@ class ConfigTests(unittest.TestCase):
                 config = load_config()
 
             self.assertEqual(config.ledger_retention_days, 0)
+
+    def test_zero_daily_retention_keeps_daily_usage_forever(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(
+                "os.environ",
+                {"BK_DATA_DIR": tmp, "BK_USAGE_DAILY_RETENTION_DAYS": "0"},
+                clear=True,
+            ):
+                config = load_config()
+
+            self.assertEqual(config.usage_daily_retention_days, 0)
 
     def test_file_mode_rejects_executable_bits(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -169,15 +169,22 @@ systemctl --user enable --now bk-worker.service
 ```bash
 bk m --once
 bk m
-bk u --rollups
+bk u                              # 当前 UID 最近 24 小时
+bk u users --since 30d           # 可见用户汇总
+bk u samples --since 2d --resolution 5m --json
+bk u events --user me --since 7d
 ```
 
-NVML 只初始化一次，并复用设备句柄。监测器保存有限长度的负载汇总，以及进程开始、
-结束和授权变化事件，不会每秒写入一份完整快照。没有 NVML 时会回退到
+NVML 只初始化一次，并复用设备句柄。监测器保存有限长度的调度负载、稀疏的用户历史，
+以及进程开始、结束、授权和工作负载变化事件，不会每秒写入一份完整快照。没有 NVML 时会回退到
 `nvidia-smi`，但进程级信息会减少。
 
 进程状态根据进程 UID 和有效预约判断，包括 `ok`、`wrong-gpu`、`unreserved`、
 `unknown` 和 `system`。命令行写入共享日志前会缩减为安全标签。
+
+历史数据按天分区并带校验和，提供 1 分钟、5 分钟、10 分钟、小时和每日层级。
+Python、JSON CLI 和 MCP 统一返回 `gpubk.usage.v1` 公共模型；可视化程序不应
+直接解析内部文件。完整说明见 [Telemetry](TELEMETRY.md)。
 
 监测器也提供用户服务：
 
@@ -186,6 +193,9 @@ bk service install monitor
 systemctl --user daemon-reload
 systemctl --user enable --now bk-monitor.service
 ```
+
+共享服务器只能运行一个受信任的 monitor 写入者，不能每个用户各启一个；每位用户的
+worker 仍然相互独立。上述用户 monitor 服务适合私人服务器或管理员指定的唯一账号。
 
 ## Agent 与 MCP
 
@@ -235,6 +245,13 @@ export BK_DATA_DIR=/data2/shared/bk
   "max_shared_users": 2,
   "queue_search_hours": 168,
   "ledger_retention_days": 90,
+  "usage_load_window_minutes": 120,
+  "usage_minute_retention_days": 30,
+  "usage_five_minute_retention_days": 365,
+  "usage_ten_minute_retention_days": 1095,
+  "usage_hourly_retention_days": 1500,
+  "usage_daily_retention_days": 0,
+  "usage_event_retention_days": 365,
   "require_shared_memory": true,
   "shared_memory_reserve_mb": 512,
   "file_mode": "0660",
@@ -272,6 +289,7 @@ JSON 均可正常使用。
 python3 -m pip install -e '.[mcp,gpu]'
 PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'
 PYTHONPATH=src python3 benchmarks/scheduler_queue.py
+PYTHONPATH=src python3 benchmarks/usage_store.py
 ```
 
 项目文档：[安全说明](SECURITY.md) · [发布流程](RELEASING.md) ·

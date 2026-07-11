@@ -10,6 +10,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Align compact status with allocator live-state rules so display-server contexts do not make idle GPUs look busy.
 - Replace the reservation table's numbered header and dot map with a plain `GPU` header and position-aligned device numbers.
 - Compact TUI GPU labels, neutral header focus, auto-framed Add/Edit zoom, quick duration controls, and reliable speed levels.
+- Add a versioned, sparse telemetry store with checksummed daily partitions, explicit legacy migration, and 1-minute through daily retention tiers.
+- Separate collection, storage, workload classification, and `gpubk.usage.v1` querying behind public Python, JSON CLI, and UID-bound MCP interfaces.
+- Classify common Python, distributed, service, notebook, container, and native workloads without storing raw arguments or absolute paths.
+- Recover process-event and state updates through an idempotent journal, and fail closed before unknown future fields can be lost during compaction.
 
 ## 0.1.0 - 2026-07-12
 

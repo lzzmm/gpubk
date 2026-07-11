@@ -140,7 +140,7 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
             ("Shared", "Split or woven cells divide space among sharers"),
             ("GPU focus", "Tab to expand share lanes and live processes"),
             ("Reservation", "Select a row to blink its exact interval"),
-            ("Util history", "Run: bk usage --rollups"),
+            ("Util history", "Run: bk u me, users, samples, or events"),
             ("Live context", "Run: bk agent context --compact"),
             ("Theme", "Auto-detect; set BK_TUI_THEME=dark or light"),
             ("", "PAST RESERVATIONS ARE READ-ONLY"),
@@ -156,7 +156,7 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
             ("a then 2", "Preview earliest two-GPU slot; Enter confirms"),
             ("Tab", "Inspect a GPU's sharers and processes"),
             ("e", "Edit a selected future reservation on timeline"),
-            ("bk usage --rollups", "Inspect historical utilization summaries"),
+            ("bk u", "Show this UID's historical GPU summary"),
             ("bk agent context", "Give an Agent privacy-safe allocation context"),
             ("bk doctor", "Read-only policy and ledger diagnostics"),
         ),
@@ -720,7 +720,7 @@ def _editor_banner_text(state: TuiState, preview: AddPreview) -> str:
     return (
         f" {operation} {mode} | {len(preview.selected_gpus)} GPU [{gpu_text}] | "
         f"{_weekday_label(local_start)} {local_start:%m-%d %H:%M}->{local_end:%H:%M} | "
-        f"{_duration_text(local_end - local_start)} | {state.speed_multiplier}x | {memory} | {status} "
+        f"{_duration_detail_text(local_end - local_start)} | {state.speed_multiplier}x | {memory} | {status} "
     )
 
 
@@ -1769,7 +1769,7 @@ def _build_add_preview(ledger: dict, config: Config, state: TuiState, view_start
 def _preview_status_text(preview: AddPreview, operation: str = "add") -> str:
     local_start = preview.start.astimezone()
     local_end = preview.end.astimezone()
-    duration = _duration_text(local_end - local_start)
+    duration = _duration_detail_text(local_end - local_start)
     gpu_text = ",".join(map(str, preview.selected_gpus)) or "-"
     status = "ok" if preview.valid else preview.reason
     return (
@@ -1827,7 +1827,7 @@ def _reservation_table_line(
 ) -> str:
     start = parse_iso(reservation["start_at"]).astimezone()
     end = parse_iso(reservation["end_at"]).astimezone()
-    duration = _duration_text(end - start)
+    duration = _truncate(_duration_text(end - start), 7)
     user_width = 10 if width < 100 else 16
     gpu_width = _reservation_gpu_width(width, gpu_count)
     mode_label = _mode_mark(reservation) if width < 100 else reservation.get("mode", "")[:4]
@@ -2356,6 +2356,21 @@ def _duration_text(delta: timedelta) -> str:
     if hours:
         return f"{hours}h"
     return f"{mins}m"
+
+
+def _duration_detail_text(delta: timedelta) -> str:
+    compact = _duration_text(delta)
+    minutes = max(0, int(delta.total_seconds() // 60))
+    days, remainder = divmod(minutes, 24 * 60)
+    if not days:
+        return compact
+    hours, mins = divmod(remainder, 60)
+    parts = [f"{days}d"]
+    if hours:
+        parts.append(f"{hours}h")
+    if mins:
+        parts.append(f"{mins}m")
+    return f"{compact} ({''.join(parts)})"
 
 
 def _truncate(value: str, width: int) -> str:

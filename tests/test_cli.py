@@ -352,6 +352,16 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("T", result.stdout)
             self.assertNotIn("Z", result.stdout)
 
+    def test_list_expands_long_duration_without_changing_total_hours(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            created = self.run_bk(["1", "5d4h20m", "--quiet"], data_dir)
+            listed = self.run_bk(["l"], data_dir)
+
+            self.assertEqual(created.returncode, 0, created.stderr)
+            self.assertEqual(listed.returncode, 0, listed.stderr)
+            self.assertIn("dur=124h20m (5d4h20m)", listed.stdout)
+
     def test_short_id_and_index_can_delete_reservation(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
@@ -700,16 +710,42 @@ class CliTests(unittest.TestCase):
                 data_dir,
                 {"BK_GPU_SIM_FILE": str(simulation)},
             )
-            events = self.run_bk(["usage"], data_dir)
-            rollups = self.run_bk(["usage", "--rollups"], data_dir)
+            events = self.run_bk(["usage", "events", "--all", "--since", "1h"], data_dir)
+            rollups = self.run_bk(
+                ["usage", "samples", "--all", "--since", "1h", "--resolution", "1m", "--json", "--compact"],
+                data_dir,
+            )
 
             self.assertEqual(monitor.returncode, 0, monitor.stderr)
             self.assertIn("monitor started", monitor.stdout)
             self.assertIn("process-start", monitor.stdout)
             self.assertEqual(events.returncode, 0, events.stderr)
-            self.assertIn('"status": "unreserved"', events.stdout)
+            self.assertIn("unreserved", events.stdout)
+            self.assertIn("train.py", events.stdout)
             self.assertEqual(rollups.returncode, 0, rollups.stderr)
             self.assertIn('"partial": true', rollups.stdout)
+            self.assertIn('"schema_version": "gpubk.usage.v1"', rollups.stdout)
+
+    def test_usage_cli_exposes_stable_storage_and_dry_run_maintenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+
+            storage = self.run_bk(["usage", "storage", "--json"], data_dir)
+            maintenance = self.run_bk(["usage", "maintain", "--json"], data_dir)
+
+            self.assertEqual(storage.returncode, 0, storage.stderr)
+            self.assertIn('"kind": "usage-storage"', storage.stdout)
+            self.assertEqual(maintenance.returncode, 0, maintenance.stderr)
+            self.assertIn('"dry_run": true', maintenance.stdout)
+            self.assertFalse((data_dir / "usage").exists())
+            self.assertFalse((data_dir / "usage.lock").exists())
+
+    def test_usage_cli_rejects_bad_historical_time_with_actionable_example(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_bk(["usage", "events", "--from", "hwo"], Path(tmp))
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("YYYY-MM-DD HH:MM", result.stderr)
 
     def test_cli_schedules_and_runs_command_with_user_worker(self):
         with tempfile.TemporaryDirectory() as tmp:

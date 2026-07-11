@@ -1,0 +1,1400 @@
+from __future__ import annotations
+
+import gzip
+import hashlib
+import hmac
+import json
+import os
+import secrets
+import shutil
+import stat
+import tempfile
+from dataclasses import dataclass
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
+from pathlib import Path
+from typing import Dict, Iterable, Iterator, List, Optional, Protocol, Sequence, Tuple
+
+from .fileio import ensure_directory, open_existing_regular, open_or_create_regular
+from .storage import FileLock
+from .timeparse import parse_iso, to_iso, utc_now
+from .usage_schema import (
+    EVENT_SCHEMA_VERSION,
+    ROLLUP_SCHEMA_VERSION,
+    STORE_FORMAT,
+    STORE_FORMAT_MAJOR,
+    STORE_FORMAT_MINOR,
+    TIER_FOR_RESOLUTION,
+    aggregate_rollups,
+    decode_event,
+    decode_rollup,
+    decode_workload,
+    encode_event,
+    encode_rollup,
+    encode_workload,
+    unknown_storage_fields,
+)
+from .workload import WorkloadDescriptor, describe_workload
+
+
+MAX_USAGE_LINE_BYTES = 1024 * 1024
+MAX_DICTIONARY_BYTES = 64 * 1024 * 1024
+MAX_PARTITION_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+PARTITION_SUFFIX = ".v1.jsonl"
+
+
+class UsageFormatError(OSError):
+    pass
+
+
+class TelemetrySink(Protocol):
+    """Stable writer boundary for the bundled or an external collector."""
+
+    def append_events(self, events: Iterable[dict]) -> int: ...
+
+    def append_rollups(self, rollups: Iterable[dict]) -> int: ...
+
+    def register_workload(self, uid: Optional[int], descriptor: WorkloadDescriptor) -> int: ...
+
+    def load_state(self) -> Dict[str, dict]: ...
+
+    def save_state(self, processes: Dict[str, dict]) -> None: ...
+
+    def commit_state_transition(self, events: Sequence[dict], processes: Dict[str, dict]) -> int: ...
+
+    def load_load_history(self) -> dict: ...
+
+    def save_load_history(self, history: dict) -> None: ...
+
+    def maintain(
+        self,
+        policy: "UsageRetentionPolicy",
+        *,
+        now: Optional[datetime] = None,
+        dry_run: bool = False,
+    ) -> dict: ...
+
+
+@dataclass(frozen=True)
+class UsageRetentionPolicy:
+    load_minutes: int = 120
+    minute_days: int = 30
+    five_minute_days: int = 365
+    ten_minute_days: int = 1095
+    hourly_days: int = 1500
+    daily_days: int = 0
+    event_days: int = 365
+
+    @classmethod
+    def from_config(cls, config) -> "UsageRetentionPolicy":
+        return cls(
+            load_minutes=int(config.usage_load_window_minutes),
+            minute_days=int(config.usage_minute_retention_days),
+            five_minute_days=int(config.usage_five_minute_retention_days),
+            ten_minute_days=int(config.usage_ten_minute_retention_days),
+            hourly_days=int(config.usage_hourly_retention_days),
+            daily_days=int(config.usage_daily_retention_days),
+            event_days=int(config.usage_event_retention_days),
+        )
+
+
+class UsageAuditStore:
+    """Versioned, append-oriented telemetry store with legacy v1 readers."""
+
+    def __init__(
+        self,
+        data_dir: Path,
+        lock_timeout_seconds: float = 10.0,
+        file_mode: int = 0o600,
+        dir_mode: int = 0o700,
+    ):
+        self.data_dir = data_dir
+        self.lock_timeout_seconds = lock_timeout_seconds
+        self.file_mode = file_mode
+        self.dir_mode = dir_mode
+        self.lock_path = data_dir / "usage.lock"
+
+        self.usage_dir = data_dir / "usage"
+        self.meta_path = self.usage_dir / "store.json"
+        self.state_path = self.usage_dir / "state.json"
+        self.transition_journal_path = self.usage_dir / "state-transition.json"
+        self.load_path = self.usage_dir / "load.json"
+        self.users_path = self.usage_dir / "users.json"
+        self.workloads_path = self.usage_dir / "workloads.v1.jsonl"
+        self.key_path = self.usage_dir / "workload.key"
+        self.migrations_dir = self.usage_dir / "migrations"
+
+        # Pre-versioned paths remain readable and are never silently deleted.
+        self.legacy_state_path = data_dir / "usage-state.json"
+        self.events_path = data_dir / "usage-events.jsonl"
+        self.rollups_path = data_dir / "usage-rollups.jsonl"
+        self.legacy_load_path = data_dir / "usage-load.json"
+
+        self.last_warnings: List[str] = []
+        self._users: Optional[dict] = None
+        self._workloads_by_fingerprint: Optional[Dict[str, int]] = None
+        self._workloads_by_id: Optional[Dict[int, dict]] = None
+        self._workload_key: Optional[bytes] = None
+
+    def ensure(self) -> None:
+        ensure_directory(self.data_dir, self.dir_mode)
+        ensure_directory(self.usage_dir, self.dir_mode)
+        ensure_directory(self.migrations_dir, self.dir_mode)
+        if self.meta_path.exists():
+            self._validate_meta(self._read_json(self.meta_path))
+            return
+        payload = {
+            "format": STORE_FORMAT,
+            "format_major": STORE_FORMAT_MAJOR,
+            "format_minor": STORE_FORMAT_MINOR,
+            "min_reader_major": 1,
+            "min_reader_minor": 0,
+            "min_writer_major": 1,
+            "min_writer_minor": 0,
+            "features": [
+                "daily-partitions",
+                "compact-json-objects",
+                "gzip-closed-partitions",
+                "partition-checksums",
+                "workload-dictionary",
+            ],
+            "created_at": to_iso(utc_now()),
+        }
+        _atomic_write_json(self.meta_path, payload, self.file_mode, self.usage_dir, ".store.")
+
+    def lock(self) -> FileLock:
+        ensure_directory(self.data_dir, self.dir_mode)
+        return FileLock(self.lock_path, self.lock_timeout_seconds, self.file_mode, self.dir_mode)
+
+    def load_state(self) -> Dict[str, dict]:
+        if self.transition_journal_path.exists():
+            self._recover_state_transition()
+        path = self.state_path if self.state_path.exists() else self.legacy_state_path
+        if not path.exists():
+            return {}
+        try:
+            payload = self._read_json(path)
+            if payload.get("version") != 1 or not isinstance(payload.get("processes"), dict):
+                return {}
+            return payload["processes"]
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {}
+
+    def save_state(self, processes: Dict[str, dict]) -> None:
+        self.ensure()
+        _atomic_write_json(
+            self.state_path,
+            {"version": 1, "processes": processes},
+            self.file_mode,
+            self.usage_dir,
+            ".state.",
+        )
+
+    def commit_state_transition(self, events: Sequence[dict], processes: Dict[str, dict]) -> int:
+        self.ensure()
+        sanitized_events = [dict(item) for item in events]
+        for item in sanitized_events:
+            item.pop("command", None)
+        _atomic_write_json(
+            self.transition_journal_path,
+            {
+                "version": 1,
+                "created_at": to_iso(utc_now()),
+                "events": sanitized_events,
+                "processes": processes,
+            },
+            self.file_mode,
+            self.usage_dir,
+            ".state-transition.",
+        )
+        written = self.append_events(sanitized_events)
+        self.save_state(processes)
+        self.transition_journal_path.unlink(missing_ok=True)
+        _fsync_dir(self.usage_dir)
+        return written
+
+    def load_load_history(self) -> dict:
+        path = self.load_path if self.load_path.exists() else self.legacy_load_path
+        if not path.exists():
+            return {"version": 1, "updated_at": None, "gpus": {}}
+        try:
+            payload = self._read_json(path)
+            if payload.get("version") != 1 or not isinstance(payload.get("gpus"), dict):
+                raise ValueError("invalid load history")
+            return payload
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {"version": 1, "updated_at": None, "gpus": {}}
+
+    def save_load_history(self, history: dict) -> None:
+        self.ensure()
+        _atomic_write_json(self.load_path, history, self.file_mode, self.usage_dir, ".load.")
+
+    def append_events(self, events: Iterable[dict]) -> int:
+        items = [dict(item) for item in events if str(item.get("status", "")) != "system"]
+        if not items:
+            return 0
+        self.ensure()
+        self._remember_users(items)
+        grouped: Dict[date, List[dict]] = {}
+        for item in items:
+            timestamp = parse_iso(str(item["timestamp"]))
+            grouped.setdefault(timestamp.date(), []).append(encode_event(item))
+        return sum(self._append_event_partition(day, records) for day, records in grouped.items())
+
+    def append_rollups(self, rollups: Iterable[dict]) -> int:
+        items = [
+            dict(item)
+            for item in rollups
+            if item.get("uid") is not None and str(item.get("status", "")) not in {"idle", "system"}
+        ]
+        if not items:
+            return 0
+        self.ensure()
+        self._remember_users(items)
+        grouped: Dict[date, List[dict]] = {}
+        for item in items:
+            start = parse_iso(str(item["window_start"]))
+            grouped.setdefault(start.date(), []).append(encode_rollup(item))
+        return sum(self._append_partition("minute", day, records) for day, records in grouped.items())
+
+    def register_workload(self, uid: Optional[int], descriptor: WorkloadDescriptor) -> int:
+        self.ensure()
+        self._load_workload_registry()
+        key = self._load_or_create_workload_key()
+        material = f"{uid if uid is not None else -1}\x00{descriptor.signature}".encode("utf-8", errors="replace")
+        fingerprint = hmac.new(key, material, hashlib.sha256).hexdigest()
+        assert self._workloads_by_fingerprint is not None
+        assert self._workloads_by_id is not None
+        existing = self._workloads_by_fingerprint.get(fingerprint)
+        if existing is not None:
+            return existing
+        workload_id = max(self._workloads_by_id, default=0) + 1
+        record = encode_workload(workload_id, fingerprint, descriptor, utc_now())
+        self._append_jsonl(self.workloads_path, [record], self.usage_dir)
+        self._workloads_by_fingerprint[fingerprint] = workload_id
+        self._workloads_by_id[workload_id] = record
+        return workload_id
+
+    def workloads(self) -> Dict[int, dict]:
+        self._check_readable()
+        self._load_workload_registry()
+        assert self._workloads_by_id is not None
+        return {workload_id: decode_workload(record) for workload_id, record in self._workloads_by_id.items()}
+
+    def recent_events(self, limit: int = 20) -> List[dict]:
+        if limit < 1:
+            return []
+        if not self._all_partition_paths("events") and self._legacy_visible() and self.events_path.exists():
+            return _recent_plain_jsonl(self.events_path, limit)
+        records = list(self.iter_events(limit=limit, newest_first=True))
+        records.reverse()
+        return records
+
+    def recent_rollups(self, limit: int = 20) -> List[dict]:
+        if limit < 1:
+            return []
+        if not self._all_partition_paths("minute") and self._legacy_visible() and self.rollups_path.exists():
+            return _recent_plain_jsonl(self.rollups_path, limit)
+        records = list(self.iter_rollups("minute", limit=limit, newest_first=True))
+        records.reverse()
+        return records
+
+    def rollups_since(self, cutoff: datetime, max_records: int = 200_000) -> Tuple[List[dict], bool]:
+        if max_records < 1:
+            raise ValueError("max_records must be >= 1")
+        records = list(self.iter_rollups("minute", start=cutoff, limit=max_records + 1))
+        return records[:max_records], len(records) > max_records
+
+    def iter_events(
+        self,
+        *,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        uid: Optional[int] = None,
+        gpu: Optional[int] = None,
+        limit: Optional[int] = None,
+        newest_first: bool = False,
+    ) -> Iterator[dict]:
+        self._check_readable()
+        count = 0
+        seen = set()
+        paths = self._partition_paths("events", start, end, newest_first)
+        for path in paths:
+            raw_records = list(self._read_jsonl(path))
+            if newest_first:
+                raw_records.reverse()
+            for raw in raw_records:
+                try:
+                    if int(raw.get("v", EVENT_SCHEMA_VERSION)) > EVENT_SCHEMA_VERSION:
+                        self.last_warnings.append(f"skipped newer event schema in {path}")
+                        continue
+                    record = decode_event(raw, self.username_for_uid)
+                except (TypeError, ValueError, KeyError) as exc:
+                    self.last_warnings.append(f"skipped invalid event in {path}: {exc}")
+                    continue
+                timestamp = parse_iso(str(record["timestamp"]))
+                if not _in_range(timestamp, start, end) or (uid is not None and record.get("uid") != uid):
+                    continue
+                if gpu is not None and record.get("gpu") != gpu:
+                    continue
+                key = _public_event_key(record)
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield record
+                count += 1
+                if limit is not None and count >= limit:
+                    return
+        if self._legacy_visible() and self.events_path.exists():
+            legacy = list(self._read_jsonl(self.events_path))
+            if newest_first:
+                legacy.reverse()
+            for raw in legacy:
+                if not isinstance(raw, dict):
+                    continue
+                try:
+                    record = decode_event(raw, self.username_for_uid)
+                    timestamp = parse_iso(str(record["timestamp"]))
+                except (TypeError, ValueError, KeyError):
+                    continue
+                if not _in_range(timestamp, start, end) or (uid is not None and record.get("uid") != uid):
+                    continue
+                if gpu is not None and record.get("gpu") != gpu:
+                    continue
+                key = _public_event_key(record)
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield record
+                count += 1
+                if limit is not None and count >= limit:
+                    return
+
+    def iter_rollups(
+        self,
+        tier: str,
+        *,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        uid: Optional[int] = None,
+        gpu: Optional[int] = None,
+        limit: Optional[int] = None,
+        newest_first: bool = False,
+    ) -> Iterator[dict]:
+        if tier not in set(TIER_FOR_RESOLUTION.values()):
+            raise ValueError(f"unknown usage tier: {tier}")
+        self._check_readable()
+        count = 0
+        seen = set()
+        paths = self._partition_paths(tier, start, end, newest_first)
+        for path in paths:
+            raw_records = list(self._read_jsonl(path))
+            if newest_first:
+                raw_records.reverse()
+            for raw in raw_records:
+                try:
+                    if int(raw.get("v", ROLLUP_SCHEMA_VERSION)) > ROLLUP_SCHEMA_VERSION:
+                        self.last_warnings.append(f"skipped newer rollup schema in {path}")
+                        continue
+                    record = decode_rollup(raw, self.username_for_uid)
+                except (TypeError, ValueError, KeyError) as exc:
+                    self.last_warnings.append(f"skipped invalid rollup in {path}: {exc}")
+                    continue
+                timestamp = parse_iso(str(record["window_start"]))
+                if not _in_range(timestamp, start, end) or (uid is not None and record.get("uid") != uid):
+                    continue
+                if gpu is not None and record.get("gpu") != gpu:
+                    continue
+                key = _public_rollup_key(record)
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield record
+                count += 1
+                if limit is not None and count >= limit:
+                    return
+        if tier == "minute" and self._legacy_visible() and self.rollups_path.exists():
+            legacy = list(self._read_jsonl(self.rollups_path))
+            if newest_first:
+                legacy.reverse()
+            for raw in legacy:
+                try:
+                    record = decode_rollup(raw, self.username_for_uid)
+                    timestamp = parse_iso(str(record["window_start"]))
+                except (TypeError, ValueError, KeyError):
+                    continue
+                if not _in_range(timestamp, start, end) or (uid is not None and record.get("uid") != uid):
+                    continue
+                if gpu is not None and record.get("gpu") != gpu:
+                    continue
+                key = _public_rollup_key(record)
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield record
+                count += 1
+                if limit is not None and count >= limit:
+                    return
+
+    def username_for_uid(self, uid: Optional[int]) -> str:
+        if uid is None:
+            return "?"
+        users = self._load_users().get("users", {})
+        item = users.get(str(uid), {})
+        return str(item.get("username", uid))
+
+    def maintain(
+        self,
+        policy: UsageRetentionPolicy,
+        *,
+        now: Optional[datetime] = None,
+        dry_run: bool = False,
+    ) -> dict:
+        if dry_run:
+            if self.meta_path.exists():
+                self._validate_meta(self._read_json(self.meta_path))
+        else:
+            self.ensure()
+        current = (now or utc_now()).astimezone(timezone.utc)
+        today = current.date()
+        report = {"generated": [], "sealed": [], "removed": [], "blocked": [], "dry_run": dry_run}
+        unsafe_dates = set()
+
+        source_targets = {
+            "minute": ("five-minute", "ten-minute", "hourly", "daily"),
+            "five-minute": ("ten-minute", "hourly", "daily"),
+            "ten-minute": ("hourly", "daily"),
+            "hourly": ("daily",),
+        }
+        for source_tier, targets in source_targets.items():
+            for day in self._tier_dates(source_tier):
+                if day >= today:
+                    continue
+                try:
+                    records, compactable = self._records_for_day(source_tier, day)
+                except (OSError, ValueError) as exc:
+                    report["blocked"].append(f"{source_tier}/{day}: {exc}")
+                    unsafe_dates.add((source_tier, day))
+                    continue
+                if not records:
+                    continue
+                if not compactable:
+                    report["blocked"].append(f"{source_tier}/{day}: unknown fields require a newer compactor")
+                    unsafe_dates.add((source_tier, day))
+                    continue
+                for target_tier in targets:
+                    if self._partition_exists(target_tier, day):
+                        continue
+                    target_seconds = _resolution_for_tier(target_tier)
+                    try:
+                        generated = aggregate_rollups(records, target_seconds)
+                    except ValueError as exc:
+                        report["blocked"].append(f"{source_tier}/{day}->{target_tier}: {exc}")
+                        unsafe_dates.add((source_tier, day))
+                        continue
+                    report["generated"].append(f"{target_tier}/{day}:{len(generated)}")
+                    if not dry_run:
+                        self._write_closed_partition(target_tier, day, [encode_rollup(item) for item in generated])
+
+        for tier in ("events", "minute", "five-minute", "ten-minute", "hourly", "daily"):
+            for path in self._plain_partition_paths(tier):
+                day = _partition_day(path)
+                if day is None or day >= today:
+                    continue
+                report["sealed"].append(str(path.relative_to(self.usage_dir)))
+                if not dry_run:
+                    self._seal_partition(path)
+
+        retention = {
+            "events": policy.event_days,
+            "minute": policy.minute_days,
+            "five-minute": policy.five_minute_days,
+            "ten-minute": policy.ten_minute_days,
+            "hourly": policy.hourly_days,
+            "daily": policy.daily_days,
+        }
+        for tier, days in retention.items():
+            if days <= 0:
+                continue
+            cutoff = current - timedelta(days=days)
+            for path in self._all_partition_paths(tier):
+                day = _partition_day(path)
+                if day is None or _day_end(day) > cutoff:
+                    continue
+                if (tier, day) in unsafe_dates:
+                    report["blocked"].append(f"{tier}/{day}: retained because compaction was blocked")
+                    continue
+                if tier != "events" and not self._safe_to_remove_tier(tier, day):
+                    report["blocked"].append(f"{tier}/{day}: derived history is incomplete")
+                    continue
+                relative = str(path.relative_to(self.usage_dir))
+                report["removed"].append(relative)
+                if not dry_run:
+                    path.unlink(missing_ok=True)
+                    _meta_path_for(path).unlink(missing_ok=True)
+        return report
+
+    def migrate_legacy(self, *, dry_run: bool = True) -> dict:
+        if not dry_run:
+            self.ensure()
+        marker = self.migrations_dir / "legacy-v1.json"
+        sources = [path for path in (self.events_path, self.rollups_path) if path.exists()]
+        marker_payload = self._read_json(marker) if marker.exists() else None
+        source_changed = bool(marker_payload) and _legacy_sources_changed(marker_payload, sources)
+        report = {
+            "migration": "legacy-v1",
+            "dry_run": dry_run,
+            "already_migrated": marker.exists() and not source_changed,
+            "source_changed": source_changed,
+            "sources": [str(path) for path in sources],
+            "events": 0,
+            "rollups": 0,
+        }
+        if report["already_migrated"] or not sources:
+            return report
+        events = [decode_event(item, self.username_for_uid) for item in self._read_jsonl(self.events_path)] if self.events_path.exists() else []
+        rollups = [decode_rollup(item, self.username_for_uid) for item in self._read_jsonl(self.rollups_path)] if self.rollups_path.exists() else []
+        report["events"] = len(events)
+        report["rollups"] = len(rollups)
+        if dry_run:
+            return report
+        for event in events:
+            if event.get("workload_id") is None and event.get("command") and event.get("uid") is not None:
+                event["workload_id"] = self.register_workload(
+                    int(event["uid"]),
+                    describe_workload(str(event["command"])),
+                )
+        for rollup in rollups:
+            legacy_labels = rollup.pop("workloads", [])
+            if not legacy_labels or rollup.get("uid") is None:
+                continue
+            workload_ids = [
+                self.register_workload(int(rollup["uid"]), describe_workload(str(label)))
+                for label in legacy_labels
+            ]
+            rollup["workload_ids"] = sorted(set(workload_ids))
+            observed = float(rollup.get("active_observed_seconds", 0))
+            rollup["workload_observed_seconds"] = {str(workload_id): observed for workload_id in workload_ids}
+        self._remember_users([*events, *rollups])
+        event_groups: Dict[date, List[dict]] = {}
+        for item in events:
+            if str(item.get("status", "")) == "system":
+                continue
+            event_groups.setdefault(parse_iso(str(item["timestamp"])).date(), []).append(encode_event(item))
+        for day, records in event_groups.items():
+            self._merge_plain_partition("events", day, records, _event_storage_key)
+        rollup_groups: Dict[date, List[dict]] = {}
+        for item in rollups:
+            if item.get("uid") is None or str(item.get("status", "")) in {"idle", "system"}:
+                continue
+            rollup_groups.setdefault(parse_iso(str(item["window_start"])).date(), []).append(encode_rollup(item))
+        for day, records in rollup_groups.items():
+            self._merge_plain_partition("minute", day, records, _rollup_storage_key)
+        digest = hashlib.sha256()
+        for path in sources:
+            digest.update(path.name.encode("utf-8"))
+            digest.update(_file_digest(path).encode("ascii"))
+        _atomic_write_json(
+            marker,
+            {
+                "version": 1,
+                "completed_at": to_iso(utc_now()),
+                "source_digest": digest.hexdigest(),
+                "source_files": _legacy_source_metadata(sources),
+                "events": len(events),
+                "rollups": len(rollups),
+                "legacy_files_retained": True,
+            },
+            self.file_mode,
+            self.migrations_dir,
+            ".legacy-migration.",
+        )
+        return report
+
+    def storage_info(self) -> dict:
+        meta = self._read_json(self.meta_path) if self.meta_path.exists() else None
+        tiers = {}
+        for tier in ("events", "minute", "five-minute", "ten-minute", "hourly", "daily"):
+            paths = self._all_partition_paths(tier)
+            tiers[tier] = {
+                "partitions": len(paths),
+                "bytes": sum(path.stat().st_size for path in paths),
+                "oldest": str(min((_partition_day(path) for path in paths if _partition_day(path)), default="")),
+                "newest": str(max((_partition_day(path) for path in paths if _partition_day(path)), default="")),
+            }
+        return {
+            "format": meta,
+            "path": str(self.usage_dir),
+            "tiers": tiers,
+            "legacy": {
+                "events": self.events_path.exists(),
+                "rollups": self.rollups_path.exists(),
+                "migrated": (self.migrations_dir / "legacy-v1.json").exists(),
+                "changed_after_migration": (
+                    (self.migrations_dir / "legacy-v1.json").exists() and self._legacy_visible()
+                ),
+            },
+            "warnings": list(self.last_warnings),
+        }
+
+    def health_issues(self) -> List[dict]:
+        issues = []
+        if self.transition_journal_path.exists():
+            issues.append(
+                {
+                    "type": "usage-pending-journal",
+                    "path": str(self.transition_journal_path),
+                    "message": "the monitor will recover this state transition while holding usage.lock",
+                }
+            )
+        if self.meta_path.exists():
+            try:
+                self._validate_meta(self._read_json(self.meta_path))
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                issues.append({"type": "usage-format", "path": str(self.meta_path), "message": str(exc)})
+        if self.workloads_path.exists() and not self.key_path.exists():
+            issues.append(
+                {
+                    "type": "usage-key-missing",
+                    "path": str(self.key_path),
+                    "message": "workload identities cannot continue safely",
+                }
+            )
+        for tier in ("events", "minute", "five-minute", "ten-minute", "hourly", "daily"):
+            try:
+                paths = self._all_partition_paths(tier)
+            except OSError as exc:
+                issues.append({"type": "usage-tier", "path": str(self.usage_dir / tier), "message": str(exc)})
+                continue
+            for path in paths:
+                if path.name.endswith(".gz") and not _meta_path_for(path).exists():
+                    issues.append(
+                        {
+                            "type": "usage-partition-metadata",
+                            "path": str(path),
+                            "message": "closed partition is missing checksum metadata",
+                        }
+                    )
+        return issues
+
+    def clear_unlocked(self) -> dict:
+        result = {
+            "usage_events": _line_count(self.events_path),
+            "usage_rollups": _line_count(self.rollups_path),
+            "usage_state": int(self.legacy_state_path.exists() or self.state_path.exists()),
+            "usage_load": int(self.legacy_load_path.exists() or self.load_path.exists()),
+        }
+        for tier in ("events", "minute", "five-minute", "ten-minute", "hourly", "daily"):
+            result["usage_events" if tier == "events" else "usage_rollups"] += sum(
+                _partition_record_count(path) for path in self._all_partition_paths(tier)
+            )
+        if self.usage_dir.exists():
+            metadata = self.usage_dir.lstat()
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise OSError(f"refusing non-directory usage store: {self.usage_dir}")
+            shutil.rmtree(self.usage_dir)
+        for path in (self.events_path, self.rollups_path, self.legacy_state_path, self.legacy_load_path):
+            path.unlink(missing_ok=True)
+        self._users = None
+        self._workloads_by_fingerprint = None
+        self._workloads_by_id = None
+        self._workload_key = None
+        return result
+
+    def _validate_meta(self, payload: dict) -> None:
+        if payload.get("format") != STORE_FORMAT:
+            raise UsageFormatError(f"unsupported usage store: {self.meta_path}")
+        major = int(payload.get("format_major", -1))
+        min_writer = int(payload.get("min_writer_major", major))
+        min_writer_minor = int(payload.get("min_writer_minor", 0))
+        if (
+            major != STORE_FORMAT_MAJOR
+            or min_writer > STORE_FORMAT_MAJOR
+            or (min_writer == STORE_FORMAT_MAJOR and min_writer_minor > STORE_FORMAT_MINOR)
+        ):
+            raise UsageFormatError(
+                f"usage store format {major} requires a newer gpubk; refusing to write"
+            )
+
+    def _check_readable(self) -> None:
+        if not self.meta_path.exists():
+            return
+        payload = self._read_json(self.meta_path)
+        if payload.get("format") != STORE_FORMAT:
+            raise UsageFormatError(f"unsupported usage store: {self.meta_path}")
+        min_reader = int(payload.get("min_reader_major", payload.get("format_major", -1)))
+        min_reader_minor = int(payload.get("min_reader_minor", 0))
+        if min_reader > STORE_FORMAT_MAJOR or (
+            min_reader == STORE_FORMAT_MAJOR and min_reader_minor > STORE_FORMAT_MINOR
+        ):
+            raise UsageFormatError("usage store requires a newer gpubk reader")
+
+    def _append_partition(self, tier: str, day: date, records: Sequence[dict]) -> int:
+        path = self._partition_path(tier, day)
+        ensure_directory(path.parent, self.dir_mode)
+        return self._append_jsonl(path, records, path.parent)
+
+    def _append_event_partition(self, day: date, records: Sequence[dict]) -> int:
+        existing_ids = set()
+        plain = self._partition_path("events", day)
+        candidates = (plain, plain.with_suffix(plain.suffix + ".gz"))
+        for path in candidates:
+            if not path.exists():
+                continue
+            for item in self._read_jsonl(path):
+                event_id = str(item.get("id", ""))
+                if event_id:
+                    existing_ids.add(event_id)
+        filtered = []
+        for record in records:
+            event_id = str(record.get("id", ""))
+            if event_id and event_id in existing_ids:
+                continue
+            filtered.append(record)
+            if event_id:
+                existing_ids.add(event_id)
+        return self._append_partition("events", day, filtered)
+
+    def _append_jsonl(self, path: Path, records: Sequence[dict], directory: Path) -> int:
+        if not records:
+            return 0
+        ensure_directory(directory, self.dir_mode)
+        fd = open_or_create_regular(path, os.O_WRONLY | os.O_APPEND, self.file_mode)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            for record in records:
+                line = json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+                if len(line.encode("utf-8")) > MAX_USAGE_LINE_BYTES:
+                    raise ValueError("usage record exceeds the 1 MiB limit")
+                fh.write(line + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        return len(records)
+
+    def _merge_plain_partition(self, tier: str, day: date, records: Sequence[dict], key_fn) -> None:
+        path = self._partition_path(tier, day)
+        closed = path.with_suffix(path.suffix + ".gz")
+        if closed.exists():
+            raise UsageFormatError(f"cannot merge legacy data into an already closed partition: {closed}")
+        existing = list(self._read_jsonl(path)) if path.exists() else []
+        merged = {key_fn(item): item for item in existing}
+        for record in records:
+            merged.setdefault(key_fn(record), record)
+        ensure_directory(path.parent, self.dir_mode)
+        _atomic_write_jsonl(path, list(merged.values()), self.file_mode, path.parent)
+
+    def _partition_path(self, tier: str, day: date) -> Path:
+        return self.usage_dir / tier / f"{day:%Y}" / f"{day:%m}" / f"{day.isoformat()}{PARTITION_SUFFIX}"
+
+    def _partition_paths(
+        self,
+        tier: str,
+        start: Optional[datetime],
+        end: Optional[datetime],
+        newest_first: bool,
+    ) -> List[Path]:
+        paths = self._all_partition_paths(tier)
+        filtered = []
+        for path in paths:
+            day = _partition_day(path)
+            if day is None:
+                continue
+            if start is not None and _day_end(day) <= start.astimezone(timezone.utc):
+                continue
+            if end is not None and _day_start(day) >= end.astimezone(timezone.utc):
+                continue
+            filtered.append(path)
+        return sorted(filtered, reverse=newest_first)
+
+    def _all_partition_paths(self, tier: str) -> List[Path]:
+        root = self.usage_dir / tier
+        if not os.path.lexists(root):
+            return []
+        if not stat.S_ISDIR(root.lstat().st_mode):
+            raise UsageFormatError(f"usage tier must be a real directory: {root}")
+        return sorted(
+            path
+            for path in root.rglob("*")
+            if _is_regular_path(path) and (path.name.endswith(".jsonl") or path.name.endswith(".jsonl.gz"))
+        )
+
+    def _plain_partition_paths(self, tier: str) -> List[Path]:
+        return [path for path in self._all_partition_paths(tier) if path.name.endswith(".jsonl")]
+
+    def _tier_dates(self, tier: str) -> List[date]:
+        return sorted({_partition_day(path) for path in self._all_partition_paths(tier) if _partition_day(path)})
+
+    def _partition_exists(self, tier: str, day: date) -> bool:
+        path = self._partition_path(tier, day)
+        return path.exists() or path.with_suffix(path.suffix + ".gz").exists()
+
+    def _records_for_day(self, tier: str, day: date) -> tuple[List[dict], bool]:
+        paths = [path for path in self._all_partition_paths(tier) if _partition_day(path) == day]
+        records = []
+        seen = set()
+        compactable = True
+        for path in paths:
+            for raw in self._read_jsonl(path):
+                if unknown_storage_fields(raw, "rollups"):
+                    compactable = False
+                if int(raw.get("v", ROLLUP_SCHEMA_VERSION)) != ROLLUP_SCHEMA_VERSION:
+                    compactable = False
+                    continue
+                key = _rollup_storage_key(raw)
+                if key in seen:
+                    continue
+                seen.add(key)
+                records.append(decode_rollup(raw, self.username_for_uid))
+        return records, compactable
+
+    def _write_closed_partition(self, tier: str, day: date, records: Sequence[dict]) -> Path:
+        plain = self._partition_path(tier, day)
+        target = plain.with_suffix(plain.suffix + ".gz")
+        ensure_directory(target.parent, self.dir_mode)
+        if target.exists() and _meta_path_for(target).exists():
+            return target
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
+        tmp_path = Path(tmp_name)
+        digest = hashlib.sha256()
+        count = 0
+        try:
+            os.fchmod(fd, self.file_mode)
+            raw = os.fdopen(fd, "wb")
+            fd = -1
+            with raw, gzip.GzipFile(fileobj=raw, mode="wb", filename="", mtime=0) as compressed:
+                for record in records:
+                    line = (json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
+                    if len(line) > MAX_USAGE_LINE_BYTES:
+                        raise ValueError("usage record exceeds the 1 MiB limit")
+                    digest.update(line)
+                    compressed.write(line)
+                    count += 1
+            _verify_gzip(tmp_path, digest.hexdigest(), count)
+            os.replace(tmp_path, target)
+            _fsync_dir(target.parent)
+            _atomic_write_json(
+                _meta_path_for(target),
+                {
+                    "format": STORE_FORMAT,
+                    "record_type": tier,
+                    "schema_major": 1,
+                    "schema_minor": 0,
+                    "codec": "jsonl+gzip",
+                    "day": day.isoformat(),
+                    "record_count": count,
+                    "uncompressed_sha256": digest.hexdigest(),
+                },
+                self.file_mode,
+                target.parent,
+                ".partition-meta.",
+            )
+            return target
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            tmp_path.unlink(missing_ok=True)
+
+    def _seal_partition(self, path: Path) -> None:
+        if not path.name.endswith(".jsonl"):
+            return
+        target = path.with_suffix(path.suffix + ".gz")
+        if target.exists() and _meta_path_for(target).exists():
+            metadata = self._read_json(_meta_path_for(target))
+            source_digest, source_count = _plain_partition_digest(path)
+            if (
+                hmac.compare_digest(str(metadata.get("uncompressed_sha256", "")), source_digest)
+                and int(metadata.get("record_count", -1)) == source_count
+            ):
+                path.unlink(missing_ok=True)
+                return
+            self.last_warnings.append(f"both open and closed partitions contain different data: {path}")
+            return
+        raw_records = list(self._read_jsonl(path))
+        self._write_closed_partition(_tier_from_path(self.usage_dir, path), _partition_day(path), raw_records)
+        path.unlink(missing_ok=True)
+
+    def _safe_to_remove_tier(self, tier: str, day: date) -> bool:
+        if tier == "minute":
+            return all(
+                self._valid_partition_exists(target, day)
+                for target in ("five-minute", "ten-minute", "hourly", "daily")
+            )
+        if tier == "five-minute":
+            return all(
+                self._valid_partition_exists(target, day)
+                for target in ("ten-minute", "hourly", "daily")
+            )
+        if tier == "ten-minute":
+            return all(self._valid_partition_exists(target, day) for target in ("hourly", "daily"))
+        if tier == "hourly":
+            return self._valid_partition_exists("daily", day)
+        return True
+
+    def _valid_partition_exists(self, tier: str, day: date) -> bool:
+        plain = self._partition_path(tier, day)
+        if plain.exists():
+            return _is_regular_path(plain)
+        closed = plain.with_suffix(plain.suffix + ".gz")
+        if not closed.exists():
+            return False
+        try:
+            _verify_closed_partition(closed)
+            return True
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            self.last_warnings.append(f"invalid derived partition {closed}: {exc}")
+            return False
+
+    def _read_jsonl(self, path: Path) -> Iterator[dict]:
+        if not path.exists():
+            return
+        fd = open_existing_regular(path)
+        raw = os.fdopen(fd, "rb")
+        parsed_records = []
+        digest = hashlib.sha256()
+        line_count = 0
+        uncompressed_bytes = 0
+        try:
+            stream = gzip.GzipFile(fileobj=raw, mode="rb") if path.name.endswith(".gz") else raw
+            with stream:
+                for raw_line in stream:
+                    uncompressed_bytes += len(raw_line)
+                    if uncompressed_bytes > MAX_PARTITION_UNCOMPRESSED_BYTES:
+                        raise UsageFormatError(f"usage partition exceeds the 512 MiB safety limit: {path}")
+                    if len(raw_line) > MAX_USAGE_LINE_BYTES:
+                        self.last_warnings.append(f"skipped oversized usage record in {path}")
+                        continue
+                    digest.update(raw_line)
+                    line_count += 1
+                    try:
+                        value = json.loads(raw_line)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        self.last_warnings.append(f"skipped malformed usage record in {path}")
+                        continue
+                    if isinstance(value, dict):
+                        parsed_records.append(value)
+        finally:
+            if not raw.closed:
+                raw.close()
+        if path.name.endswith(".gz"):
+            self._verify_partition_metadata(path, digest.hexdigest(), line_count)
+        yield from parsed_records
+
+    def _verify_partition_metadata(self, path: Path, digest: str, line_count: int) -> None:
+        meta_path = _meta_path_for(path)
+        if not meta_path.exists():
+            raise UsageFormatError(f"closed usage partition has no metadata: {path}")
+        metadata = self._read_json(meta_path)
+        if metadata.get("format") != STORE_FORMAT or int(metadata.get("schema_major", -1)) != 1:
+            raise UsageFormatError(f"unsupported partition metadata: {meta_path}")
+        if int(metadata.get("record_count", -1)) != line_count:
+            raise UsageFormatError(f"usage partition record count mismatch: {path}")
+        if not hmac.compare_digest(str(metadata.get("uncompressed_sha256", "")), digest):
+            raise UsageFormatError(f"usage partition checksum mismatch: {path}")
+
+    def _read_json(self, path: Path) -> dict:
+        fd = open_existing_regular(path)
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            value = json.load(fh)
+        if not isinstance(value, dict):
+            raise ValueError(f"{path} must contain an object")
+        return value
+
+    def _load_users(self) -> dict:
+        if self._users is not None:
+            return self._users
+        if not self.users_path.exists():
+            self._users = {"version": 1, "users": {}}
+            return self._users
+        try:
+            value = self._read_json(self.users_path)
+            if value.get("version") != 1 or not isinstance(value.get("users"), dict):
+                raise ValueError("invalid users dictionary")
+            self._users = value
+        except (OSError, ValueError, json.JSONDecodeError):
+            self._users = {"version": 1, "users": {}}
+        return self._users
+
+    def _recover_state_transition(self) -> None:
+        try:
+            journal = self._read_json(self.transition_journal_path)
+            if journal.get("version") != 1:
+                raise ValueError("unsupported state transition journal")
+            events = journal.get("events")
+            processes = journal.get("processes")
+            if not isinstance(events, list) or not isinstance(processes, dict):
+                raise ValueError("invalid state transition journal")
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise UsageFormatError(f"cannot recover usage state transition: {exc}") from exc
+        self.append_events(item for item in events if isinstance(item, dict))
+        self.save_state(processes)
+        self.transition_journal_path.unlink(missing_ok=True)
+        _fsync_dir(self.usage_dir)
+
+    def _remember_users(self, records: Sequence[dict]) -> None:
+        users = self._load_users()
+        changed = False
+        for record in records:
+            uid = record.get("uid")
+            username = str(record.get("username", "")).strip()
+            if uid is None or not username:
+                continue
+            key = str(int(uid))
+            current = users["users"].get(key)
+            if current is None or current.get("username") != username:
+                users["users"][key] = {"username": username[:128], "updated_at": to_iso(utc_now())}
+                changed = True
+        if changed:
+            _atomic_write_json(self.users_path, users, self.file_mode, self.usage_dir, ".users.")
+
+    def _load_workload_registry(self) -> None:
+        if self._workloads_by_id is not None:
+            return
+        by_id: Dict[int, dict] = {}
+        by_fingerprint: Dict[str, int] = {}
+        if self.workloads_path.exists():
+            metadata = self.workloads_path.lstat()
+            if not stat.S_ISREG(metadata.st_mode):
+                raise UsageFormatError("workload dictionary must be a regular file")
+            if metadata.st_size > MAX_DICTIONARY_BYTES:
+                raise UsageFormatError("workload dictionary exceeds the 64 MiB safety limit")
+            for record in self._read_jsonl(self.workloads_path):
+                try:
+                    if int(record.get("v", 1)) > 1:
+                        self.last_warnings.append("skipped a newer workload dictionary record")
+                        continue
+                    workload_id = int(record["id"])
+                    fingerprint = str(record["fp"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                by_id[workload_id] = record
+                by_fingerprint[fingerprint] = workload_id
+        self._workloads_by_id = by_id
+        self._workloads_by_fingerprint = by_fingerprint
+
+    def _load_or_create_workload_key(self) -> bytes:
+        if self._workload_key is not None:
+            return self._workload_key
+        if self.key_path.exists():
+            fd = open_existing_regular(self.key_path)
+            with os.fdopen(fd, "rb") as fh:
+                key = fh.read(64)
+            if len(key) != 32:
+                raise UsageFormatError("invalid workload HMAC key")
+            self._workload_key = key
+            return key
+        if self.workloads_path.exists() and self.workloads_path.lstat().st_size:
+            raise UsageFormatError("workload HMAC key is missing; refusing to fork workload identities")
+        key = secrets.token_bytes(32)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(str(self.key_path), flags, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            os.write(fd, key)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        _fsync_dir(self.usage_dir)
+        self._workload_key = key
+        return key
+
+    def _legacy_visible(self) -> bool:
+        marker = self.migrations_dir / "legacy-v1.json"
+        if not marker.exists():
+            return True
+        try:
+            payload = self._read_json(marker)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return True
+        sources = [path for path in (self.events_path, self.rollups_path) if path.exists()]
+        return _legacy_sources_changed(payload, sources)
+
+
+# Public name for new integrations; the old name remains import-compatible.
+VersionedUsageStore = UsageAuditStore
+
+
+def _resolution_for_tier(tier: str) -> int:
+    for seconds, value in TIER_FOR_RESOLUTION.items():
+        if value == tier:
+            return seconds
+    raise ValueError(f"unknown usage tier: {tier}")
+
+
+def _partition_day(path: Path) -> Optional[date]:
+    try:
+        return date.fromisoformat(path.name[:10])
+    except ValueError:
+        return None
+
+
+def _tier_from_path(root: Path, path: Path) -> str:
+    return path.relative_to(root).parts[0]
+
+
+def _day_start(day: date) -> datetime:
+    return datetime.combine(day, datetime_time.min, timezone.utc)
+
+
+def _day_end(day: date) -> datetime:
+    return _day_start(day) + timedelta(days=1)
+
+
+def _in_range(value: datetime, start: Optional[datetime], end: Optional[datetime]) -> bool:
+    normalized = value.astimezone(timezone.utc)
+    if start is not None and normalized < start.astimezone(timezone.utc):
+        return False
+    return end is None or normalized <= end.astimezone(timezone.utc)
+
+
+def _atomic_write_json(path: Path, payload: dict, mode: int, directory: Path, prefix: str) -> None:
+    metadata = directory.lstat()
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise NotADirectoryError(f"refusing non-directory path: {directory}")
+    fd, tmp_name = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=str(directory))
+    tmp_path = Path(tmp_name)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fd = -1
+            json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
+        _fsync_dir(directory)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        tmp_path.unlink(missing_ok=True)
+
+
+def _atomic_write_jsonl(path: Path, records: Sequence[dict], mode: int, directory: Path) -> None:
+    metadata = directory.lstat()
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise NotADirectoryError(f"refusing non-directory path: {directory}")
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(directory))
+    tmp_path = Path(tmp_name)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fd = -1
+            for record in records:
+                line = json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+                if len(line.encode("utf-8")) > MAX_USAGE_LINE_BYTES:
+                    raise ValueError("usage record exceeds the 1 MiB limit")
+                fh.write(line + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
+        _fsync_dir(directory)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        tmp_path.unlink(missing_ok=True)
+
+
+def _is_regular_path(path: Path) -> bool:
+    try:
+        return stat.S_ISREG(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
+def _event_storage_key(record: dict) -> tuple:
+    event_id = str(record.get("id", ""))
+    if event_id:
+        return ("id", event_id)
+    return (
+        "event",
+        record.get("e"),
+        record.get("t"),
+        record.get("g"),
+        record.get("p"),
+        record.get("u"),
+    )
+
+
+def _rollup_storage_key(record: dict) -> tuple:
+    record_id = str(record.get("id", ""))
+    if record_id:
+        return ("id", record_id)
+    return (
+        record.get("t"),
+        record.get("d"),
+        record.get("g"),
+        record.get("u"),
+        record.get("s"),
+        tuple(record.get("r", [])),
+    )
+
+
+def _public_event_key(record: dict) -> tuple:
+    event_id = str(record.get("event_id", ""))
+    if event_id:
+        return ("id", event_id)
+    return (
+        "event",
+        record.get("event"),
+        record.get("timestamp"),
+        record.get("gpu"),
+        record.get("pid"),
+        record.get("uid"),
+    )
+
+
+def _public_rollup_key(record: dict) -> tuple:
+    record_id = str(record.get("record_id", ""))
+    if record_id:
+        return ("id", record_id)
+    return (
+        record.get("window_start"),
+        record.get("window_end"),
+        record.get("gpu"),
+        record.get("uid"),
+        record.get("status"),
+        tuple(record.get("reservation_ids", [])),
+    )
+
+
+def _verify_gzip(path: Path, expected_digest: str, expected_count: int) -> None:
+    digest = hashlib.sha256()
+    count = 0
+    with gzip.open(path, "rb") as fh:
+        for line in fh:
+            digest.update(line)
+            count += 1
+    if digest.hexdigest() != expected_digest or count != expected_count:
+        raise OSError(f"closed usage partition failed verification: {path}")
+
+
+def _verify_closed_partition(path: Path) -> None:
+    meta_path = _meta_path_for(path)
+    fd = open_existing_regular(meta_path)
+    with os.fdopen(fd, "r", encoding="utf-8") as fh:
+        metadata = json.load(fh)
+    if not isinstance(metadata, dict) or metadata.get("format") != STORE_FORMAT:
+        raise UsageFormatError(f"invalid partition metadata: {meta_path}")
+    _verify_gzip(
+        path,
+        str(metadata.get("uncompressed_sha256", "")),
+        int(metadata.get("record_count", -1)),
+    )
+
+
+def _plain_partition_digest(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    count = 0
+    fd = open_existing_regular(path)
+    with os.fdopen(fd, "rb") as fh:
+        for line in fh:
+            digest.update(line)
+            count += 1
+    return digest.hexdigest(), count
+
+
+def _meta_path_for(path: Path) -> Path:
+    return path.with_name(path.name + ".meta.json")
+
+
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    fd = open_existing_regular(path)
+    with os.fdopen(fd, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _legacy_source_metadata(paths: Sequence[Path]) -> dict:
+    result = {}
+    for path in paths:
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode):
+            raise UsageFormatError(f"legacy usage source must be a regular file: {path}")
+        result[path.name] = {"size": metadata.st_size, "mtime_ns": metadata.st_mtime_ns}
+    return result
+
+
+def _legacy_sources_changed(marker: dict, paths: Sequence[Path]) -> bool:
+    if not paths:
+        return False
+    expected = marker.get("source_files")
+    if not isinstance(expected, dict):
+        return bool(paths)
+    try:
+        return expected != _legacy_source_metadata(paths)
+    except OSError:
+        return True
+
+
+def _partition_record_count(path: Path) -> int:
+    meta = _meta_path_for(path)
+    if meta.exists():
+        try:
+            fd = open_existing_regular(meta)
+            with os.fdopen(fd, "r", encoding="utf-8") as fh:
+                return max(0, int(json.load(fh).get("record_count", 0)))
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+    if path.name.endswith(".gz"):
+        fd = open_existing_regular(path)
+        raw = os.fdopen(fd, "rb")
+        try:
+            with gzip.GzipFile(fileobj=raw, mode="rb") as fh:
+                return sum(1 for _line in fh)
+        finally:
+            if not raw.closed:
+                raw.close()
+    return _line_count(path)
+
+
+def _line_count(path: Path) -> int:
+    if not path.exists():
+        return 0
+    fd = open_existing_regular(path)
+    with os.fdopen(fd, "rb") as fh:
+        return sum(1 for _line in fh)
+
+
+def _recent_plain_jsonl(path: Path, limit: int) -> List[dict]:
+    newest = []
+    for line in _reverse_lines(path):
+        try:
+            value = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if isinstance(value, dict):
+            newest.append(value)
+            if len(newest) >= limit:
+                break
+    return list(reversed(newest))
+
+
+def _reverse_lines(path: Path, chunk_size: int = 64 * 1024) -> Iterator[bytes]:
+    fd = open_existing_regular(path)
+    with os.fdopen(fd, "rb") as fh:
+        position = fh.seek(0, os.SEEK_END)
+        remainder = b""
+        while position > 0:
+            read_size = min(chunk_size, position)
+            position -= read_size
+            fh.seek(position)
+            parts = (fh.read(read_size) + remainder).split(b"\n")
+            if position > 0:
+                remainder = parts.pop(0)
+            else:
+                remainder = b""
+            for line in reversed(parts):
+                if line:
+                    yield line
+
+
+def _fsync_dir(path: Path) -> None:
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)

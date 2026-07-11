@@ -24,6 +24,7 @@ The publish jobs receive `id-token: write` only inside their protected environme
    python -m compileall -q src tests benchmarks
    ruff check src tests benchmarks
    PYTHONPATH=src python benchmarks/scheduler_queue.py
+   PYTHONPATH=src python benchmarks/usage_store.py
    coverage run -m unittest discover -s tests -p 'test_*.py'
    coverage combine
    coverage report

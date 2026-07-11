@@ -7,7 +7,7 @@ from unittest import mock
 
 from bk.config import Config
 from bk.gpu import GpuProcessSnapshot, GpuSnapshot
-from bk.monitor import UsageAuditStore, UsageMonitor
+from bk.monitor import UsageAuditStore, UsageMonitor, _proc_parent_pid
 from bk.storage import LedgerStore
 
 
@@ -46,11 +46,14 @@ class UsageMonitorTests(unittest.TestCase):
                 for index in range(5000, 5003):
                     fh.write(json.dumps({"index": index}) + "\n")
 
-            with mock.patch("bk.monitor.json.loads", wraps=json.loads) as loads:
+            with mock.patch("bk.usage_store.json.loads", wraps=json.loads) as loads:
                 recent = store.recent_events(3)
 
         self.assertEqual([item["index"] for item in recent], [5000, 5001, 5002])
         self.assertLessEqual(loads.call_count, 4)
+
+    def test_proc_parent_parser_handles_commands_with_spaces(self):
+        self.assertEqual(_proc_parent_pid("123 (python worker 0) S 42 1 2 3"), 42)
 
     def test_read_only_loads_do_not_create_an_empty_data_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -70,10 +73,24 @@ class UsageMonitorTests(unittest.TestCase):
             store.ensure()
             target = Path(tmp) / "victim"
             target.write_text("keep", encoding="utf-8")
-            store.events_path.symlink_to(target)
+            event = {
+                "event": "process-start",
+                "timestamp": "2030-01-01T12:00:00Z",
+                "event_id": "unsafe",
+                "key": "g0:p1:s1",
+                "gpu": 0,
+                "pid": 1,
+                "uid": 1001,
+                "username": "alice",
+                "status": "ok",
+                "reservation_ids": [],
+            }
+            partition = store._partition_path("events", datetime(2030, 1, 1, tzinfo=timezone.utc).date())
+            partition.parent.mkdir(parents=True)
+            partition.symlink_to(target)
 
             with self.assertRaises(OSError):
-                store.append_events([{"event": "unsafe"}])
+                store.append_events([event])
 
             self.assertEqual(target.read_text(encoding="utf-8"), "keep")
 
@@ -225,6 +242,7 @@ class UsageMonitorTests(unittest.TestCase):
             self.assertEqual(rollup["avg_sm_percent"], 40)
             self.assertEqual(rollup["avg_gpu_memory_mb"], 1024)
             self.assertEqual(rollup["avg_device_util_percent"], 70)
+            self.assertEqual(len(rollup["workload_ids"]), 1)
             self.assertTrue(rollup["partial"])
 
     def test_reserved_but_idle_user_is_present_in_rollup(self):
@@ -279,6 +297,69 @@ class UsageMonitorTests(unittest.TestCase):
             self.assertEqual(record["avg_utilization_percent"], 75)
             self.assertEqual(record["avg_memory_percent"], 50)
             self.assertEqual(record["busy_fraction"], 1)
+
+    def test_system_display_processes_do_not_pollute_long_term_user_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self.write_ledger(data_dir, [])
+            config = Config(data_dir=data_dir, gpu_count=1)
+            ledger_store = LedgerStore(data_dir)
+            audit_store = UsageAuditStore(data_dir)
+            devices = [
+                GpuSnapshot(
+                    0,
+                    "sim",
+                    processes=(GpuProcessSnapshot(10, 0, "root", "/usr/lib/Xorg", host_start_id="xorg"),),
+                    source="simulation",
+                )
+            ]
+            monitor = UsageMonitor(config, ledger_store, audit_store, snapshot_provider=lambda _config: devices)
+
+            monitor.collect(self.now)
+            monitor.close(self.now + timedelta(seconds=1))
+
+            self.assertEqual(audit_store.recent_events(10), [])
+            self.assertEqual(audit_store.recent_rollups(10), [])
+            self.assertEqual(audit_store.workloads(), {})
+
+    def test_managed_runner_pid_enriches_workload_without_reading_private_job_spec(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            booking = reservation(
+                "managed-booking",
+                1001,
+                0,
+                self.now - timedelta(minutes=1),
+                self.now + timedelta(minutes=5),
+            )
+            booking["job"] = {"summary": "torchrun train.py (+4 args)", "runner_pid": 10}
+            self.write_ledger(data_dir, [booking])
+            config = Config(data_dir=data_dir, gpu_count=1)
+            audit_store = UsageAuditStore(data_dir)
+            devices = [
+                GpuSnapshot(
+                    0,
+                    "sim",
+                    processes=(
+                        GpuProcessSnapshot(10, 1001, "alice", "python train.py", host_start_id="managed"),
+                    ),
+                    source="simulation",
+                )
+            ]
+            monitor = UsageMonitor(
+                config,
+                LedgerStore(data_dir),
+                audit_store,
+                snapshot_provider=lambda _config: devices,
+            )
+
+            monitor.collect(self.now)
+            monitor.close(self.now + timedelta(seconds=1))
+            workload = next(iter(audit_store.workloads().values()))
+
+            self.assertEqual(workload["source"], "managed")
+            self.assertEqual(workload["launcher"], "torchrun")
+            self.assertEqual(workload["label"], "torchrun train.py (+4 args)")
 
 
 if __name__ == "__main__":

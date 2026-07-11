@@ -12,6 +12,10 @@ Supported security boundaries:
 - Scheduled command arguments live in UID-owned `0600` specs, not the shared ledger.
 - External allocators can advise ordering but cannot bypass deterministic validation.
 - External allocator output is bounded and allocator timeouts terminate the isolated process group.
+- Telemetry stores only sanitized workload labels and keyed identities, not raw arguments,
+  environments, stdout, or absolute script paths.
+- Closed telemetry partitions carry record counts and SHA-256 checksums. Unknown future
+  fields block compaction instead of being discarded.
 
 Administrator responsibilities:
 
@@ -21,6 +25,10 @@ Administrator responsibilities:
 - Control `/dev/nvidia*` access separately if hard enforcement is required.
 - Run MCP over per-user local stdio unless an authenticated remote transport is deliberately engineered.
 - Treat allocator commands as trusted code running with the configuring user's privileges.
+- Run exactly one trusted telemetry writer per server. Do not expose `TelemetrySink` as an
+  unauthenticated network write endpoint or allow users to submit records for arbitrary UIDs.
+- Back up the complete `usage/` directory, including `workload.key`; losing only that key
+  prevents stable workload identity from continuing and intentionally fails closed.
 
 ## Reporting
 

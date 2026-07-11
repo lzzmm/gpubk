@@ -32,6 +32,8 @@ from bk.tui import (
     _date_label,
     _decorate_timeline_cell,
     _default_timeline_view_start,
+    _duration_detail_text,
+    _duration_text,
     _editor_banner_text,
     _footer_label,
     _gpu_label,
@@ -152,7 +154,7 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertIn("any GPUs", pages["Add / Edit"]["f"])
         self.assertIn("exactly the selected GPUs", pages["Add / Edit"]["g"])
         self.assertIn("restore", pages["Add / Edit"]["r"])
-        self.assertIn("bk usage --rollups", pages["Quick Tour"])
+        self.assertIn("bk u", pages["Quick Tour"])
 
         minimum_window_width = 70
         for _title, entries in HELP_PAGES:
@@ -979,6 +981,12 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertIn("Tue 01-01 17:30->18:15", add_text)
         self.assertIn("45m", add_text)
         self.assertIn("EDIT abcdef12 X", edit_text)
+
+    def test_long_duration_shows_total_hours_and_day_breakdown(self):
+        duration = timedelta(days=5, hours=4, minutes=20)
+
+        self.assertEqual(_duration_text(duration), "124h20m")
+        self.assertEqual(_duration_detail_text(duration), "124h20m (5d4h20m)")
 
     def test_gpu_label_is_compact_and_shows_shared_peak(self):
         label = _gpu_label(GpuSnapshot(index=0, name="unknown"), 30, peak_shared=4, shared_limit=4)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import timedelta
 from pathlib import Path
 from typing import List, Optional
 
@@ -19,7 +20,8 @@ from .service import (
     submit_edit,
 )
 from .storage import LedgerStore
-from .timeparse import parse_duration_seconds, parse_memory_mb, parse_start
+from .timeparse import parse_duration_seconds, parse_memory_mb, parse_start, to_iso, utc_now
+from .usage_api import UsageQueryService
 from .worker import job_log_path
 
 
@@ -109,6 +111,45 @@ class BkMcpBackend:
             "kind": "reservations",
             "reservations": [public_reservation(item, self.actor) for item in active],
         }
+
+    def usage(
+        self,
+        since: str = "24h",
+        resolution: str = "auto",
+        include_events: bool = False,
+        limit: int = 1000,
+    ) -> dict:
+        seconds = parse_duration_seconds(since)
+        end = utc_now()
+        start = end - timedelta(seconds=seconds)
+        api = UsageQueryService(self.config)
+        payload = {
+            "schema_version": "gpubk.usage.v1",
+            "kind": "my-usage",
+            "generated_at": to_iso(end),
+            "summary": api.users(
+                start=start,
+                end=end,
+                resolution=resolution,
+                uid=self.actor.uid,
+                limit=1,
+            ),
+            "samples": api.samples(
+                start=start,
+                end=end,
+                resolution=resolution,
+                uid=self.actor.uid,
+                limit=limit,
+            ),
+        }
+        if include_events:
+            payload["events"] = api.events(
+                start=start,
+                end=end,
+                uid=self.actor.uid,
+                limit=min(limit, 5000),
+            )
+        return payload
 
     def edit(
         self,
@@ -221,6 +262,11 @@ def create_mcp_server(backend: Optional[BkMcpBackend] = None):
         """Current privacy-safe GPU allocation context."""
         return json.dumps(api.context(), ensure_ascii=False, sort_keys=True)
 
+    @mcp.resource("bk://usage/me/recent")
+    def resource_my_usage() -> str:
+        """Current UID's versioned 24-hour usage summary."""
+        return json.dumps(api.usage(), ensure_ascii=False, sort_keys=True)
+
     read_only = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     idempotent_write = ToolAnnotations(
         readOnlyHint=False,
@@ -281,6 +327,16 @@ def create_mcp_server(backend: Optional[BkMcpBackend] = None):
     def list_gpu_reservations(mine_only: bool = False) -> dict[str, object]:
         """List active reservations using the stable privacy-safe schema."""
         return api.list_reservations(mine_only)
+
+    @mcp.tool(annotations=read_only, structured_output=True)
+    def get_my_gpu_usage(
+        since: str = "24h",
+        resolution: str = "auto",
+        include_events: bool = False,
+        limit: int = 1000,
+    ) -> dict[str, object]:
+        """Read the current UID's historical GPU usage; never accepts another UID."""
+        return api.usage(since, resolution, include_events, limit)
 
     @mcp.tool(annotations=idempotent_write, structured_output=True)
     def edit_my_gpu_booking(
