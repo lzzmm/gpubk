@@ -344,6 +344,43 @@ class CliTests(unittest.TestCase):
             self.assertIn("right", result.stdout)
             self.assertIn("third", result.stdout)
 
+    def test_doctor_json_is_read_only_without_explicit_probe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "not-created"
+
+            result = self.run_bk(["doctor", "--json"], data_dir)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["schema_version"], "gpubk.doctor.v1")
+            self.assertEqual(payload["probes"], [])
+            self.assertTrue(payload["healthy"])
+            self.assertIsNone(payload["ready"])
+            self.assertFalse(data_dir.exists())
+
+    def test_doctor_probe_is_machine_readable_and_strict_rejects_simulation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "probe-data"
+            simulation = Path(tmp) / "gpu-sim.json"
+            simulation.write_text(
+                json.dumps({"gpus": [{"index": 0, "name": "sim", "processes": []}]}),
+                encoding="utf-8",
+            )
+            env = {"BK_GPU_SIM_FILE": str(simulation)}
+
+            report = self.run_bk(["doctor", "--probe", "--json"], data_dir, env)
+            strict = self.run_bk(["doctor", "--probe", "--json", "--strict"], data_dir, env)
+
+            self.assertEqual(report.returncode, 0, report.stderr)
+            self.assertEqual(strict.returncode, 2, strict.stderr)
+            payload = json.loads(report.stdout)
+            by_name = {item["name"]: item for item in payload["probes"]}
+            self.assertEqual(by_name["atomic-replace"]["status"], "pass")
+            self.assertEqual(by_name["process-lock"]["status"], "pass")
+            self.assertEqual(by_name["gpu-telemetry"]["status"], "warn")
+            self.assertFalse(payload["ready"])
+            self.assertEqual(list(data_dir.glob(".gpubk-probe-*")), [])
+
     def test_booking_output_uses_local_time_not_utc_z_suffix(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.run_bk(["1", "30m"], Path(tmp))

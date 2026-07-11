@@ -29,6 +29,8 @@ Administrator responsibilities:
   unauthenticated network write endpoint or allow users to submit records for arbitrary UIDs.
 - Review generated user units before enabling them. `bk service install` captures absolute data
   and private job-log paths; reinstall the unit after those paths change.
+- Run `bk doctor --probe --strict` on the target mount before enabling services. Its lock check is
+  cross-process on one host; shared NFS/FUSE deployments still require a second-host lock test.
 - Back up the complete `usage/` directory, including `workload.key`; losing only that key
   prevents stable workload identity from continuing and intentionally fails closed.
 

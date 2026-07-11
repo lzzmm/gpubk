@@ -17,6 +17,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Capture absolute data and private job-log paths in generated systemd units so unattended services cannot silently fall back to another ledger.
 - Make duplicate telemetry monitors fail quickly with a dedicated exit status and prevent systemd restart loops while retaining kernel-released single-writer locking.
 - Release file-lock descriptors immediately when lock metadata persistence fails, avoiding transient false deadlocks during storage errors.
+- Add `bk doctor --probe --json --strict` for cleanup-safe atomic-replace, fsync, process-lock, permission, disk-space, and real GPU telemetry deployment checks.
 
 ## 0.1.0 - 2026-07-12
 

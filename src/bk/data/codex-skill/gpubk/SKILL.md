@@ -75,3 +75,4 @@ For edits, an explicit `start` is exact and does not move unless `allow_queue=tr
 - Treat live utilization as a soft forecast because running processes have no reliable end time.
 - Do not delete journal or lock files manually.
 - Do not enable a worker, monitor, or service on a shared server without the user's or administrator's approval.
+- Before an approved service deployment, run `bk doctor --probe --json --strict`; do not treat a simulation or single-host NFS lock check as proof of the complete production boundary.

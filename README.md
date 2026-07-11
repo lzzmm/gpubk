@@ -290,8 +290,22 @@ sudo chmod 0644 /data2/shared/bk/config.json
 
 All users and user services must use the same `BK_DATA_DIR`. The first write
 binds scheduling and storage policy into the ledger; clients with conflicting
-settings fail closed. Verify `flock` and atomic rename on the actual NFS or FUSE
-mount before deployment. Every writer must use GPUbk.
+settings fail closed. Run the deployment preflight before enabling services:
+
+```bash
+BK_DATA_DIR=/data2/shared/bk bk doctor --probe --strict
+BK_DATA_DIR=/data2/shared/bk bk doctor --probe --json --strict
+```
+
+The probe creates randomly named temporary files, verifies same-directory atomic
+replace and directory fsync, checks same-host cross-process `flock`, confirms
+configured modes and free space, probes the real GPU telemetry source, and then
+removes its files. A simulation or `nvidia-smi` fallback is a strict-mode warning.
+In JSON, `healthy` covers read-only ledger checks; `ready` remains `null` until
+`--probe` supplies deployment evidence.
+For NFS/FUSE used by multiple hosts, additionally verify locking from a second
+host because one machine cannot prove cross-host lock propagation. Every writer
+must use GPUbk.
 
 See [SECURITY.md](https://github.com/lzzmm/gpubk/blob/main/SECURITY.md) for the supported boundary, file safety, WAL
 recovery, private job specs, MCP isolation, and administrator responsibilities.

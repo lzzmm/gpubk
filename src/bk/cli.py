@@ -128,7 +128,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if head in {"log", "lg"}:
             return _log_command(config, store)
         if head in {"doctor", "dr"}:
-            return _doctor_command(config, store)
+            return _doctor_command(argv[1:], config, store)
         if head in {"list", "ls", "l"}:
             return _list_command(argv[1:], store)
         if head in {"-h", "--help", "help"}:
@@ -228,7 +228,7 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
         _log_command(config, store)
         return True
     if head in {"doctor", "dr"}:
-        _doctor_command(config, store)
+        _doctor_command(args[1:], config, store)
         return True
     if head in {"del", "delete", "cancel", "d", "rm"}:
         _delete_command(args[1:], store)
@@ -1320,7 +1320,18 @@ def _list_command(argv: List[str], store: LedgerStore) -> int:
     return 0
 
 
-def _doctor_command(config: Config, store: LedgerStore) -> int:
+def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
+    from .diagnostics import DOCTOR_SCHEMA_VERSION, probes_ready, run_deployment_probes
+
+    parser = argparse.ArgumentParser(prog="bk doctor")
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="create and remove temporary files to verify deployment prerequisites",
+    )
+    parser.add_argument("--json", action="store_true", help="emit a stable machine-readable report")
+    parser.add_argument("--strict", action="store_true", help="return nonzero for any issue or warning")
+    args = parser.parse_args(argv)
     usage_store = UsageAuditStore(
         config.data_dir,
         config.lock_timeout_seconds,
@@ -1331,13 +1342,50 @@ def _doctor_command(config: Config, store: LedgerStore) -> int:
     ledger = store.load()
     issues = find_policy_violations(ledger, config.max_shared_users)
     privacy_issues = [
-        item
+        {
+            "type": "legacy-inline-job-command",
+            "reservation_id": str(item.get("id", "")),
+            "message": "full argv is visible in the shared ledger; recreate this pending job",
+        }
         for item in ledger.get("reservations", [])
         if isinstance(item.get("job"), dict) and "argv" in item["job"]
     ]
-    if not issues and not storage_issues and not privacy_issues:
+    probes = run_deployment_probes(config) if args.probe else []
+    healthy = not issues and not storage_issues and not privacy_issues
+    ready = healthy and probes_ready(probes) if args.probe else None
+    strict_ok = bool(ready) if args.probe else healthy
+    report = {
+        "schema_version": DOCTOR_SCHEMA_VERSION,
+        "kind": "doctor",
+        "healthy": healthy,
+        "ready": ready,
+        "data_dir": str(config.data_dir),
+        "configured_gpu_count": config.gpu_count,
+        "file_mode": f"{config.file_mode:04o}",
+        "dir_mode": f"{config.dir_mode:04o}",
+        "storage_issues": storage_issues,
+        "policy_issues": issues,
+        "privacy_issues": privacy_issues,
+        "probes": probes,
+    }
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
+        return 0 if not args.strict or strict_ok else 2
+    if healthy and not probes:
         print("No policy issues found.")
         return 0
+    if probes:
+        print(f"Deployment preflight: {'ready' if ready else 'not ready'}")
+        for probe in probes:
+            details = " ".join(
+                f"{key}={value}"
+                for key, value in probe.items()
+                if key not in {"name", "status", "message", "indices"}
+            )
+            suffix = f" {details}" if details else ""
+            print(f"{probe['status']:<4} {probe['name']}: {probe['message']}{suffix}")
+    if not issues and not storage_issues and not privacy_issues:
+        return 0 if not args.strict or strict_ok else 2
     print(
         f"Found {len(storage_issues)} storage issue(s), {len(issues)} policy issue(s), "
         f"{len(privacy_issues)} privacy issue(s):"
@@ -1349,10 +1397,10 @@ def _doctor_command(config: Config, store: LedgerStore) -> int:
             if key not in {"type", "message"}
         )
         print(f"{issue['type']} {details} {issue.get('message', '')}".rstrip())
-    for reservation in privacy_issues:
+    for issue in privacy_issues:
         print(
-            f"legacy-inline-job-command id={_short_id(reservation)} "
-            "full argv is visible in the shared ledger; recreate this pending job"
+            f"legacy-inline-job-command id={str(issue['reservation_id'])[:8]} "
+            f"{issue['message']}"
         )
     for issue in issues:
         if issue["type"] == "shared-capacity":
@@ -1369,7 +1417,7 @@ def _doctor_command(config: Config, store: LedgerStore) -> int:
                 f"{str(issue['left_id'])[:8]}[{format_local_range(issue['left_start_at'], issue['left_end_at'])}] "
                 f"overlaps {str(issue['right_id'])[:8]}[{format_local_range(issue['right_start_at'], issue['right_end_at'])}]"
             )
-    return 0
+    return 0 if not args.strict or strict_ok else 2
 
 
 def _reset_command(argv: List[str], config: Config, store: LedgerStore) -> int:
@@ -1637,7 +1685,8 @@ AGENTS AND ADMIN
   bk agent context               stable machine-readable context
   bk agent recommend 2 1h30m    read-only legal placement
   bk mcp / bk skill install      MCP server or bundled Codex skill
-  bk doctor / bk reset --yes     diagnose or explicitly clear data
+  bk doctor --probe --strict     verify deployment prerequisites
+  bk reset --yes                 explicitly clear data
 
 TIME AND POLICY
   Durations: 30m, 1h30m, 1d. All reservations use 5-minute slices.
@@ -1668,7 +1717,7 @@ def _print_shell_help() -> None:
   d <number|short_id>       cancel your reservation
   l | list                  list active reservations
   lg | log                  show your operation log
-  dr | doctor               report policy violations in the ledger
+  dr | doctor               report policy or deployment issues
   m | monitor               continuously audit GPU process usage
   u                          summarize this UID's last 24h usage
   u users --since 30d       summarize visible users

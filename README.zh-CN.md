@@ -271,8 +271,20 @@ sudo chmod 0644 /data2/shared/bk/config.json
 ```
 
 所有用户和用户服务必须使用同一个 `BK_DATA_DIR`。第一次写入会把调度与存储策略
-绑定到台账，配置冲突的客户端会直接拒绝操作。正式部署前，应在实际 NFS 或 FUSE
-挂载上验证 `flock` 和原子 rename。所有写入者都必须通过 GPUbk。
+绑定到台账，配置冲突的客户端会直接拒绝操作。启用服务前运行部署预检：
+
+```bash
+BK_DATA_DIR=/data2/shared/bk bk doctor --probe --strict
+BK_DATA_DIR=/data2/shared/bk bk doctor --probe --json --strict
+```
+
+预检会创建随机命名的临时文件，验证同目录原子替换与目录 fsync、同机跨进程
+`flock`、配置权限、剩余空间和真实 GPU 探测，随后删除所有临时文件。模拟环境或
+`nvidia-smi` 回退在 strict 模式下会作为警告失败。JSON 中的 `healthy` 只表示只读
+台账检查，未运行 `--probe` 时 `ready` 保持为 `null`。
+若 NFS/FUSE 被多台机器共同挂载，
+仍需从第二台机器验证跨主机锁传播，因为单机测试无法证明这一点。所有写入者都必须
+通过 GPUbk。
 
 安全边界、文件保护、WAL 恢复、私有任务文件和 MCP 隔离说明见
 [SECURITY.md](SECURITY.md)。
