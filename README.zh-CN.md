@@ -1,0 +1,244 @@
+# GPUbk
+
+[English](README.md) | **简体中文**
+
+GPUbk 是面向 Linux 共享服务器的 GPU 预约工具。PyPI 包名是 `gpubk`，
+日常命令使用更短的 `bk`。
+
+它可以完全离线运行，使用本地文件保存数据，核心功能没有第三方运行时依赖。
+用户可以通过普通终端会话、curses TUI、JSON 命令或可选的本地 MCP 服务预约 GPU。
+
+## 主要功能
+
+- 5 分钟粒度的 shared 与 exclusive 预约。
+- 自动排队、实时 GPU 感知和每卡显存预算。
+- 同时适配深色、浅色终端的紧凑时间轴。
+- 到点执行命令并自动设置 `CUDA_VISIBLE_DEVICES`。
+- 基于 NVML 的进程监测和近期负载历史。
+- 稳定 JSON、MCP 工具、内置 Codex Skill 和可选外部 allocator。
+- 原子文件事务、UID 权限检查、备份和只追加审计日志。
+
+GPUbk 是协作式调度器，不代替 Linux 设备权限。拥有 `/dev/nvidia*` 直接访问权的
+用户仍可绕过本工具，管理员需要另行配置设备访问策略。
+
+## 安装
+
+GPUbk 需要 Python 3.10 或更高版本。
+
+```bash
+python3 -m pip install gpubk          # 核心 CLI 与 TUI，无依赖
+python3 -m pip install 'gpubk[gpu]'  # 增加低开销 NVML 监测
+python3 -m pip install 'gpubk[mcp]'  # 增加本地 MCP 服务
+python3 -m pip install 'gpubk[all]'  # 安装全部可选功能
+```
+
+检查安装：
+
+```bash
+bk --version
+bk --help
+```
+
+## 预约 GPU
+
+默认使用 shared 模式：
+
+```bash
+bk 1 30m                         # 预约 1 张 GPU，持续 30 分钟
+bk 2 1h30m --mem 12g            # 每张卡预计使用 12 GiB 显存
+bk s 1 2h --gpu 3               # 显式 shared，固定 GPU 3
+bk x 2 4h                        # exclusive 排他预约
+bk 1 1h --start 2026-07-12T20:00:00+08:00
+```
+
+可以用列表序号或短 ID 管理自己的预约：
+
+```bash
+bk l
+bk e 1 --duration 2h
+bk d 1
+bk doctor                         # 只读检查台账
+```
+
+调度规则保持简单：
+
+- 开始时间和持续时间使用 5 分钟边界。
+- 不传 `--start` 时自动选择最早合法时段；若不是立即开始，会显示 `queued:`。
+- 传入 `--start` 表示精确时间；发生冲突时直接报错，不会悄悄移动预约。
+- shared 容量按重叠预约条数计算；exclusive 不能与任何预约重叠。
+- `--mem` 表示**每张 GPU**预计使用的显存，管理员可将其设为 shared 必填项。
+- 用户看到的是本地时间，台账内部保存 UTC。
+
+自动选卡会综合已有预约、物理空闲显存、当前 GPU 进程、近期负载和未来预约压力。
+若发现没有预约的进程，系统会给出提示，并在有其他合适 GPU 时避开忙卡。
+
+## 终端界面
+
+`bk` 打开普通行式会话，不接管屏幕，也不改变终端背景。`bk t` 打开全屏 TUI。
+
+```bash
+bk
+bk t
+```
+
+常用 TUI 按键：
+
+| 按键 | 操作 |
+| --- | --- |
+| `a` / `e` / `d` | 新增、编辑或取消预约 |
+| `Tab`、`↑`、`↓` | 在预约列表和 GPU 详情之间移动 |
+| `←`、`→` | 浏览时间轴；在 Add/Edit 中移动时间 |
+| `Space` | 在 Add/Edit 中选择或取消当前 GPU |
+| `+`、`-` | 缩放时间轴或调整预约时长 |
+| `1`-`9` | 选择 GPU 数量并跳到最近合法时段 |
+| `s`、`x` | 在 Add/Edit 中切换 shared/exclusive |
+| `f`、`g` | 查找任意可用卡，或固定当前已选卡查找 |
+| `n` | 回到带 `NOW` 标记的实时窗口 |
+| `c` | 切换深色/浅色主题 |
+| `?` | 打开分页帮助和快速上手说明 |
+| `Enter`、`Esc`、`q` | 提交、取消当前操作或退出 |
+
+时间轴可以查看过去的预约，但历史只读。Add 和 Edit 提交时，调度器会在文件锁事务内
+再次校验所选时段。
+
+## 到点运行命令
+
+把命令写在 `--` 后：
+
+```bash
+bk 2 1h30m --mem 12g -- python train.py --config exp.yaml
+bk j                    # 查看任务
+bk w                    # 执行当前用户已经到点的任务
+```
+
+worker 会设置 `CUDA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER`、
+`BK_RESERVATION_ID` 和 `BK_RESERVED_GPUS`。命令和工作目录保存在当前 UID 所有的
+`0600` 私有文件里，不会写入共享台账。worker 使用 `shell=False`；确实需要 shell
+语法时应明确调用 shell：
+
+```bash
+bk 1 30m -- sh -lc 'python train.py > train.log 2>&1'
+```
+
+需要无人值守运行时，每位用户可以安装内置的 systemd user unit：
+
+```bash
+bk service install worker
+systemctl --user daemon-reload
+systemctl --user enable --now bk-worker.service
+```
+
+## 监测与自动选卡
+
+安装 `gpu` extra 后，可以采样一次或持续低开销监测：
+
+```bash
+bk m --once
+bk m
+bk u --rollups
+```
+
+NVML 只初始化一次，并复用设备句柄。监测器保存有限长度的负载汇总，以及进程开始、
+结束和授权变化事件，不会每秒写入一份完整快照。没有 NVML 时会回退到
+`nvidia-smi`，但进程级信息会减少。
+
+进程状态根据进程 UID 和有效预约判断，包括 `ok`、`wrong-gpu`、`unreserved`、
+`unknown` 和 `system`。命令行写入共享日志前会缩减为安全标签。
+
+监测器也提供用户服务：
+
+```bash
+bk service install monitor
+systemctl --user daemon-reload
+systemctl --user enable --now bk-monitor.service
+```
+
+## Agent 与 MCP
+
+Agent 应使用版本化 JSON，而不是解析彩色终端文本：
+
+```bash
+bk agent context --compact
+bk agent recommend 2 1h30m --mem 12g --compact
+bk 2 1h30m --mem 12g --op-id run-20260712-001 --json
+bk agent edit 6e957ef1 --duration 2h --op-id edit-20260712-001 --compact
+bk agent cancel 6e957ef1 --compact
+```
+
+create 和 edit 必须使用稳定的 operation ID。完全相同的重试返回 `status=exists`；
+同一个 ID 被用于不同写入时会拒绝执行。recommend 只读，身份始终来自本地进程 UID。
+
+启动可选的 stdio MCP 服务：
+
+```bash
+bk-mcp                       # 等同于 bk mcp
+bk skill install            # 安装 wheel 内置的 Codex Skill
+```
+
+MCP 提供 context、recommend、create、list、edit、cancel 和私有任务日志工具。
+它只使用 stdio，不监听网络端口；每位用户运行自己的 MCP 进程。工具 schema 标明
+read-only、idempotent、destructive 和 closed-world 属性。
+
+管理员还可以通过 `BK_ALLOCATOR_COMMAND` 配置受信任的本地程序。它读取
+`bk.allocator.v1` JSON，并返回 GPU 排序。外部结果只提供建议，最终仍须通过内置的
+冲突、显存、时间、UID 和事务校验。完整格式见
+[Agent 协议](src/bk/data/codex-skill/gpubk/references/protocol.md)。
+
+## 多人服务器配置
+
+为实验室用户组创建 setgid 目录：
+
+```bash
+sudo install -d -m 2770 -o root -g gpuusers /data2/shared/bk
+export BK_DATA_DIR=/data2/shared/bk
+```
+
+在目录中放置由 root 管理的 `config.json`：
+
+```json
+{
+  "gpu_count": 8,
+  "max_shared_users": 2,
+  "queue_search_hours": 168,
+  "ledger_retention_days": 90,
+  "require_shared_memory": true,
+  "shared_memory_reserve_mb": 512,
+  "file_mode": "0660",
+  "dir_mode": "2770"
+}
+```
+
+```bash
+sudo chown root:gpuusers /data2/shared/bk/config.json
+sudo chmod 0644 /data2/shared/bk/config.json
+```
+
+所有用户和用户服务必须使用同一个 `BK_DATA_DIR`。第一次写入会把调度与存储策略
+绑定到台账，配置冲突的客户端会直接拒绝操作。正式部署前，应在实际 NFS 或 FUSE
+挂载上验证 `flock` 和原子 rename。所有写入者都必须通过 GPUbk。
+
+安全边界、文件保护、WAL 恢复、私有任务文件和 MCP 隔离说明见
+[SECURITY.md](SECURITY.md)。
+
+## 无 GPU 机器试用
+
+指定模拟卡数即可体验预约和 TUI：
+
+```bash
+BK_DATA_DIR=/tmp/gpubk-demo BK_GPU_COUNT=4 bk t
+BK_DATA_DIR=/tmp/gpubk-demo BK_GPU_COUNT=4 bk 1 30m
+```
+
+此时硬件指标显示为 unknown，但调度、shared 容量、时间轴、Add/Edit、日志和 Agent
+JSON 均可正常使用。
+
+## 开发
+
+```bash
+python3 -m pip install -e '.[mcp,gpu]'
+PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'
+PYTHONPATH=src python3 benchmarks/scheduler_queue.py
+```
+
+项目文档：[安全说明](SECURITY.md) · [发布流程](RELEASING.md) ·
+[更新记录](CHANGELOG.md) · [Apache-2.0 许可证](LICENSE)
