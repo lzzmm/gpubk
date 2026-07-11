@@ -292,7 +292,8 @@ class CliTests(unittest.TestCase):
     def test_short_management_aliases_list_edit_and_delete(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
-            create = self.run_bk(["1", "30m"], data_dir)
+            start = iso(ceil_5m(datetime.now(timezone.utc) + timedelta(minutes=10)))
+            create = self.run_bk(["1", "30m", "--start", start], data_dir)
             listed = self.run_bk(["l"], data_dir)
             edited = self.run_bk(["e", "1", "--duration", "1h"], data_dir)
             deleted = self.run_bk(["d", "1"], data_dir)
