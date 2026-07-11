@@ -162,6 +162,10 @@ systemctl --user daemon-reload
 systemctl --user enable --now bk-worker.service
 ```
 
+生成的 unit 会固化安装当时生效的绝对 `BK_DATA_DIR` 与私有 `BK_JOB_LOG_DIR`。
+可用 `bk service show worker` 检查；路径变化后使用 `--force` 重新安装。其他策略仍从
+`config.json` 读取，并在服务每次启动时重新加载。
+
 ## 监测与自动选卡
 
 安装 `gpu` extra 后，可以采样一次或持续低开销监测：
@@ -196,6 +200,8 @@ systemctl --user enable --now bk-monitor.service
 
 共享服务器只能运行一个受信任的 monitor 写入者，不能每个用户各启一个；每位用户的
 worker 仍然相互独立。上述用户 monitor 服务适合私人服务器或管理员指定的唯一账号。
+生成的 unit 会固化共享数据目录；第二个 monitor 会以状态码 75 快速退出，systemd
+不会循环重启这个重复实例。
 
 ## Agent 与 MCP
 

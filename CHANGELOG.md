@@ -14,6 +14,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Separate collection, storage, workload classification, and `gpubk.usage.v1` querying behind public Python, JSON CLI, and UID-bound MCP interfaces.
 - Classify common Python, distributed, service, notebook, container, and native workloads without storing raw arguments or absolute paths.
 - Recover process-event and state updates through an idempotent journal, and fail closed before unknown future fields can be lost during compaction.
+- Capture absolute data and private job-log paths in generated systemd units so unattended services cannot silently fall back to another ledger.
+- Make duplicate telemetry monitors fail quickly with a dedicated exit status and prevent systemd restart loops while retaining kernel-released single-writer locking.
+- Release file-lock descriptors immediately when lock metadata persistence fails, avoiding transient false deadlocks during storage errors.
 
 ## 0.1.0 - 2026-07-12
 

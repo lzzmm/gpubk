@@ -27,6 +27,8 @@ Administrator responsibilities:
 - Treat allocator commands as trusted code running with the configuring user's privileges.
 - Run exactly one trusted telemetry writer per server. Do not expose `TelemetrySink` as an
   unauthenticated network write endpoint or allow users to submit records for arbitrary UIDs.
+- Review generated user units before enabling them. `bk service install` captures absolute data
+  and private job-log paths; reinstall the unit after those paths change.
 - Back up the complete `usage/` directory, including `workload.key`; losing only that key
   prevents stable workload identity from continuing and intentionally fails closed.
 

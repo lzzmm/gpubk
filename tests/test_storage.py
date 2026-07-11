@@ -61,6 +61,19 @@ class LedgerStorageTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "file lock is not held"):
             lock.__exit__(None, None, None)
 
+    def test_file_lock_releases_descriptor_when_metadata_write_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "metadata-failure.lock"
+            broken = FileLock(path, timeout_seconds=0)
+
+            with mock.patch.object(broken, "_write_metadata", side_effect=OSError("disk failure")):
+                with self.assertRaisesRegex(OSError, "disk failure"):
+                    broken.__enter__()
+
+            self.assertIsNone(broken._fh)
+            with FileLock(path, timeout_seconds=0):
+                pass
+
     def test_empty_load_is_side_effect_free(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "not-created"

@@ -161,9 +161,10 @@ class UsageAuditStore:
         }
         _atomic_write_json(self.meta_path, payload, self.file_mode, self.usage_dir, ".store.")
 
-    def lock(self) -> FileLock:
+    def lock(self, timeout_seconds: Optional[float] = None) -> FileLock:
         ensure_directory(self.data_dir, self.dir_mode)
-        return FileLock(self.lock_path, self.lock_timeout_seconds, self.file_mode, self.dir_mode)
+        timeout = self.lock_timeout_seconds if timeout_seconds is None else timeout_seconds
+        return FileLock(self.lock_path, timeout, self.file_mode, self.dir_mode)
 
     def load_state(self) -> Dict[str, dict]:
         if self.transition_journal_path.exists():

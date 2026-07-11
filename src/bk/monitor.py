@@ -12,6 +12,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .config import Config
 from .gpu import GpuSnapshot, snapshot
+from .models import BookingError
 from .scheduler import list_active
 from .storage import LedgerStore
 from .timeparse import parse_iso, to_iso, utc_now
@@ -28,6 +29,11 @@ from .workload import describe_workload
 
 
 SnapshotProvider = Callable[[Config], List[GpuSnapshot]]
+MONITOR_BUSY_EXIT_CODE = 75
+
+
+class MonitorBusyError(BookingError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -261,11 +267,18 @@ def run_monitor(
         config.file_mode,
         config.dir_mode,
     )
-    stop_event = threading.Event()
-    previous_handlers = _install_signal_handlers(stop_event)
+    lease = audit_store.lock(timeout_seconds=min(2.0, config.lock_timeout_seconds))
+    try:
+        lease.__enter__()
+    except TimeoutError as exc:
+        raise MonitorBusyError(
+            f"another monitor or telemetry maintenance writer is active for {config.data_dir}"
+        ) from exc
     samples = 0
     try:
-        with audit_store.lock():
+        stop_event = threading.Event()
+        previous_handlers = _install_signal_handlers(stop_event)
+        try:
             monitor = UsageMonitor(config, ledger_store, audit_store, interval_seconds, rollup_seconds)
             print(
                 f"monitor started: interval={interval_seconds:g}s rollup={rollup_seconds}s "
@@ -285,8 +298,10 @@ def run_monitor(
             finally:
                 flushed = monitor.close()
                 print(f"monitor stopped: samples={samples} partial_rollups={flushed}")
+        finally:
+            _restore_signal_handlers(previous_handlers)
     finally:
-        _restore_signal_handlers(previous_handlers)
+        lease.__exit__(None, None, None)
     return 0
 
 

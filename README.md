@@ -173,6 +173,11 @@ systemctl --user daemon-reload
 systemctl --user enable --now bk-worker.service
 ```
 
+The generated unit captures the absolute `BK_DATA_DIR` and private
+`BK_JOB_LOG_DIR` in effect at installation time. Review it with
+`bk service show worker`; reinstall with `--force` after changing either path.
+Other policy remains in `config.json` and is reloaded whenever the service starts.
+
 ## Monitoring and Placement
 
 Install the `gpu` extra, then run a single sample or a low-overhead monitor:
@@ -210,7 +215,9 @@ systemctl --user enable --now bk-monitor.service
 
 Run exactly one trusted monitor writer on a shared server. Per-user workers are
 still separate. The monitor service above is intended for a private server or
-for the one account selected by the administrator.
+for the one account selected by the administrator. Its generated unit captures
+the absolute shared data directory. A second monitor fails with exit status 75;
+systemd does not restart that duplicate instance in a loop.
 
 ## Agents and MCP
 

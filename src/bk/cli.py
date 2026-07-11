@@ -17,7 +17,7 @@ from .config import Config, load_config
 from .fileio import open_existing_regular
 from .gpu import snapshot
 from .identity import current_actor
-from .monitor import run_monitor
+from .monitor import MONITOR_BUSY_EXIT_CODE, MonitorBusyError, run_monitor
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, EditRequest
 from .scheduler import (
     cancel_booking,
@@ -116,7 +116,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if head == "skill":
             return _skill_command(argv[1:])
         if head == "service":
-            return _service_command(argv[1:])
+            return _service_command(argv[1:], config)
         if head in {"add", "a"}:
             return _add_interactive(config, store)
         if head in {"edit", "e"}:
@@ -140,6 +140,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"未知命令: {head}", file=sys.stderr)
         _print_help(file=sys.stderr)
         return 2
+    except MonitorBusyError as exc:
+        print(f"bk: {exc}", file=sys.stderr)
+        return MONITOR_BUSY_EXIT_CODE
     except (BookingError, ValueError, TimeoutError, OSError) as exc:
         if _json_requested(argv):
             print(
@@ -761,8 +764,8 @@ def _skill_command(argv: List[str]) -> int:
     return 0
 
 
-def _service_command(argv: List[str]) -> int:
-    from .systemd import install_user_unit, unit_text
+def _service_command(argv: List[str], config: Config) -> int:
+    from .systemd import install_user_unit, service_environment, unit_text
 
     parser = argparse.ArgumentParser(prog="bk service")
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -773,11 +776,20 @@ def _service_command(argv: List[str]) -> int:
     show_parser = subparsers.add_parser("show")
     show_parser.add_argument("kind", choices=["monitor", "worker"])
     args = parser.parse_args(argv)
+    environment = service_environment(config, args.kind)
     if args.action == "show":
-        print(unit_text(args.kind), end="")
+        print(unit_text(args.kind, environment=environment), end="")
         return 0
-    path = install_user_unit(args.kind, args.target_dir, force=args.force)
+    path = install_user_unit(
+        args.kind,
+        args.target_dir,
+        environment=environment,
+        force=args.force,
+    )
     print(f"installed unit: {path}")
+    print(f"captured data directory: {environment['BK_DATA_DIR']}")
+    if "BK_JOB_LOG_DIR" in environment:
+        print(f"captured job log directory: {environment['BK_JOB_LOG_DIR']}")
     print("not enabled or started; review it, then run systemctl --user daemon-reload")
     if args.kind == "monitor":
         print("shared server note: run exactly one trusted monitor writer; do not enable one per user")

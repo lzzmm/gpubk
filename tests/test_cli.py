@@ -726,6 +726,50 @@ class CliTests(unittest.TestCase):
             self.assertIn('"partial": true', rollups.stdout)
             self.assertIn('"schema_version": "gpubk.usage.v1"', rollups.stdout)
 
+    def test_monitor_fails_fast_when_another_writer_holds_the_usage_lock(self):
+        from bk.usage_store import UsageAuditStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store = UsageAuditStore(data_dir, lock_timeout_seconds=0.05)
+
+            with store.lock():
+                result = self.run_bk(
+                    ["monitor", "--once"],
+                    data_dir,
+                    {"BK_LOCK_TIMEOUT_SECONDS": "0.05"},
+                )
+
+            self.assertEqual(result.returncode, 75)
+            self.assertIn("another monitor or telemetry maintenance writer is active", result.stderr)
+
+    def test_service_unit_captures_effective_data_and_job_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "shared data"
+            jobs = root / "private jobs"
+            units = root / "units"
+
+            shown = self.run_bk(
+                ["service", "show", "worker"],
+                data_dir,
+                {"BK_JOB_LOG_DIR": str(jobs)},
+            )
+            installed = self.run_bk(
+                ["service", "install", "worker", "--target-dir", str(units)],
+                data_dir,
+                {"BK_JOB_LOG_DIR": str(jobs)},
+            )
+
+            self.assertEqual(shown.returncode, 0, shown.stderr)
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            unit = (units / "bk-worker.service").read_text(encoding="utf-8")
+            self.assertEqual(shown.stdout, unit)
+            self.assertIn(f'Environment="BK_DATA_DIR={data_dir}"', unit)
+            self.assertIn(f'Environment="BK_JOB_LOG_DIR={jobs}"', unit)
+            self.assertNotIn("EnvironmentFile=", unit)
+            self.assertIn(f"captured data directory: {data_dir}", installed.stdout)
+
     def test_usage_cli_exposes_stable_storage_and_dry_run_maintenance(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

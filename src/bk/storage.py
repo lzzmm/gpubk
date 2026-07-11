@@ -47,17 +47,20 @@ class FileLock:
         fd = open_or_create_regular(self.path, os.O_RDWR, self.file_mode)
         self._fh = os.fdopen(fd, "r+", encoding="utf-8")
         deadline = time.monotonic() + self.timeout_seconds
-        while True:
-            try:
-                fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                self._write_metadata()
-                return self
-            except BlockingIOError as exc:
-                if time.monotonic() >= deadline:
-                    self._fh.close()
-                    self._fh = None
-                    raise TimeoutError(f"timeout waiting for lock {self.path}") from exc
-                time.sleep(0.05)
+        try:
+            while True:
+                try:
+                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    self._write_metadata()
+                    return self
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"timeout waiting for lock {self.path}") from exc
+                    time.sleep(0.05)
+        except BaseException:
+            self._fh.close()
+            self._fh = None
+            raise
 
     def _write_metadata(self) -> None:
         fh = self._require_handle()
@@ -70,9 +73,11 @@ class FileLock:
 
     def __exit__(self, exc_type, exc, tb):
         fh = self._require_handle()
-        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-        fh.close()
-        self._fh = None
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fh.close()
+            self._fh = None
 
     def _require_handle(self):
         if self._fh is None:
