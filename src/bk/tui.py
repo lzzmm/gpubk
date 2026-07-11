@@ -395,20 +395,44 @@ def _draw_header(
     width: int,
     state: TuiState,
 ) -> None:
-    title = (
-        f" bk GPU Booker | now {now.astimezone():%Y-%m-%d %H:%M:%S %z} "
-        f"| window {view_start.astimezone():%m-%d %H:%M} -> {view_end.astimezone():%m-%d %H:%M} "
+    title, details = _header_lines(config, now, view_start, view_end, width, state)
+    _addstr(stdscr, 0, 0, title.ljust(width), width, COLOR_HEADER)
+    _addstr(stdscr, 1, 0, details.ljust(width), width, COLOR_MUTED)
+
+
+def _header_lines(
+    config: Config,
+    now: datetime,
+    view_start: datetime,
+    view_end: datetime,
+    width: int,
+    state: TuiState,
+) -> Tuple[str, str]:
+    local_now = now.astimezone()
+    local_start = view_start.astimezone()
+    local_end = view_end.astimezone()
+    wide_title = (
+        f" bk GPU Booker | now {local_now:%Y-%m-%d %H:%M:%S %z} "
+        f"| window {local_start:%m-%d %H:%M} -> {local_end:%m-%d %H:%M} "
         f"| {state.slot_minutes}m/col "
     )
-    _addstr(stdscr, 0, 0, title.ljust(width), width, COLOR_HEADER)
-    _addstr(
-        stdscr,
-        1,
-        0,
-        f" data={config.data_dir} | shared_limit={config.max_shared_users} | refresh=1s | q quit, ? help",
-        width,
-        COLOR_MUTED,
+    wide_details = (
+        f" data={config.data_dir} | shared_limit={config.max_shared_users} "
+        "| refresh=1s | q quit | ? help"
     )
+    if width >= 100 and len(wide_title) < width and len(wide_details) < width:
+        title = wide_title
+        details = wide_details
+    else:
+        title = (
+            f" bk GPU Booker | {_weekday_label(local_now)} {local_now:%m-%d %H:%M:%S} "
+            f"| {local_start:%m-%d %H:%M}->{local_end:%m-%d %H:%M} | {state.slot_minutes}m"
+        )
+        suffix = f" | share={config.max_shared_users} | 1s refresh | q quit | ? help"
+        path_budget = max(1, width - len(" data=") - len(suffix) - 1)
+        details = f" data={_truncate(config.data_dir.name or str(config.data_dir), path_budget)}{suffix}"
+    limit = max(0, width - 1)
+    return title[:limit], details[:limit]
 
 
 def _draw_time_axis(stdscr, row: int, label_width: int, timeline_width: int, start: datetime, end: datetime, width: int) -> None:
@@ -758,20 +782,39 @@ def _draw_footer(stdscr, height: int, width: int, state: TuiState, preview: Opti
         operation = "edit" if state.edit_mode else "add"
         message = state.message or _preview_status_text(preview, operation)
         message_color = COLOR_ERROR if state.error or not preview.valid else _preview_color(preview.mode)
-        if state.add_mode:
-            footer = " ADD | arrows | Space | 1-9 GPUs | +/- dur | m memory | s/x | f/g | r | Enter/Esc "
-        else:
-            footer = " EDIT | arrows | Space | 1-9 GPUs | +/- dur | m memory | s/x | f/g | r | Enter/Esc "
     elif state.focus == FOCUS_GPUS:
         message = state.message or f"GPU {state.selected_gpu} focus"
         message_color = COLOR_ERROR if state.error else COLOR_SELECTED
-        footer = " GPU FOCUS | up/down select GPU | Tab reservations | a add here | +/- zoom | <-/-> pan | q quit "
     else:
         message = state.message
         message_color = COLOR_ERROR if state.error else COLOR_MUTED
-        footer = f" RESERVATIONS | up/down select | Tab GPUs | a add | e edit | d delete | +/- zoom {state.slot_minutes}m/col | q quit "
+    footer = _footer_label(state, preview, width)
     _addstr(stdscr, height - 2, 0, message[: width - 1], width, message_color)
     _addstr(stdscr, height - 1, 0, footer.ljust(width), width, COLOR_HEADER)
+
+
+def _footer_label(state: TuiState, preview: Optional[AddPreview], width: int) -> str:
+    if state.editor_active and preview is not None:
+        operation = "ADD" if state.add_mode else "EDIT"
+        short = f" {operation} | arrows | Space | 1-9 | +/- dur | m mem | s/x | f/g | Enter/Esc "
+        long = (
+            f" {operation} | arrows | Space | 1-9 GPUs | +/- dur | m memory "
+            "| s/x | f/g | r | Enter/Esc "
+        )
+    elif state.focus == FOCUS_GPUS:
+        short = " GPU | up/down | Tab RSV | a add | +/- zoom | left/right pan | q quit "
+        long = (
+            " GPU FOCUS | up/down select GPU | Tab reservations | a add here "
+            "| +/- zoom | <-/-> pan | q quit "
+        )
+    else:
+        short = " RSV | up/down | Tab GPU | a add | e edit | d del | +/- zoom | q quit "
+        long = (
+            " RESERVATIONS | up/down select | Tab GPUs | a add | e edit | d delete "
+            f"| +/- zoom {state.slot_minutes}m/col | q quit "
+        )
+    footer = long if len(long) < width else short
+    return footer[: max(0, width - 1)]
 
 
 def _start_add_select(config: Config, state: TuiState) -> None:

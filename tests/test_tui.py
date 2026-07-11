@@ -29,7 +29,9 @@ from bk.tui import (
     _cell_for_gpu,
     _date_label,
     _editor_banner_text,
+    _footer_label,
     _gpu_label,
+    _header_lines,
     _handle_add_key,
     _handle_key,
     _hour_label,
@@ -100,6 +102,32 @@ class TuiAddPreviewTests(unittest.TestCase):
 
     def ledger(self, reservations):
         return {"version": 1, "reservations": reservations}
+
+    def test_compact_header_and_footers_fit_minimum_terminal_width(self):
+        config = Config(
+            data_dir=Path("/home/example/.local/share/a-very-long-bk-trial-name"),
+            gpu_count=8,
+            max_shared_users=3,
+        )
+        width = 72
+        title, details = _header_lines(config, self.start, self.start, self.end, width, TuiState())
+
+        self.assertLessEqual(len(title), width - 1)
+        self.assertLessEqual(len(details), width - 1)
+        self.assertTrue(title.endswith("5m"), title)
+        self.assertTrue(details.endswith("? help"), details)
+
+        preview = AddPreview(self.start, self.end, (0,), 0, MODE_SHARED, True, blink=True)
+        variants = [
+            (_footer_label(TuiState(), None, width), "+/- zoom", "q quit"),
+            (_footer_label(TuiState(focus=FOCUS_GPUS), None, width), "left/right pan", "q quit"),
+            (_footer_label(TuiState(add_mode=True), preview, width), "f/g", "Enter/Esc"),
+            (_footer_label(TuiState(edit_mode=True), preview, width), "f/g", "Enter/Esc"),
+        ]
+        for footer, control, ending in variants:
+            self.assertLessEqual(len(footer), width - 1)
+            self.assertIn(control, footer)
+            self.assertTrue(footer.rstrip().endswith(ending), footer)
 
     def test_indexed_timeline_cells_do_not_reparse_reservation_times(self):
         active = []
