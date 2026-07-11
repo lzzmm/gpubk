@@ -30,6 +30,7 @@ class CliTests(unittest.TestCase):
         env["BK_DATA_DIR"] = str(data_dir)
         env["BK_GPU_COUNT"] = "1"
         env["BK_MAX_SHARED_USERS"] = "2"
+        env["BK_GPU_SIM_FILE"] = str(Path(data_dir) / "missing-gpu-simulation.json")
         if extra_env:
             env.update(extra_env)
         return subprocess.run(
@@ -48,6 +49,7 @@ class CliTests(unittest.TestCase):
         env["BK_DATA_DIR"] = str(data_dir)
         env["BK_GPU_COUNT"] = "2"
         env["BK_MAX_SHARED_USERS"] = "2"
+        env["BK_GPU_SIM_FILE"] = str(Path(data_dir) / "missing-gpu-simulation.json")
         return subprocess.run(
             [sys.executable, "-m", "bk"] + args,
             input=text,
