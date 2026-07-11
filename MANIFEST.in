@@ -1,5 +1,6 @@
 include CHANGELOG.md
 include LICENSE
+include README.zh-CN.md
 include RELEASING.md
 include SECURITY.md
 recursive-include src/bk/data *

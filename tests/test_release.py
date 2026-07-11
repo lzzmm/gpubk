@@ -19,6 +19,7 @@ class ReleaseConfigurationTests(unittest.TestCase):
 
         public_files = [
             ROOT / "README.md",
+            ROOT / "README.zh-CN.md",
             ROOT / "RELEASING.md",
             ROOT / "src" / "bk" / "mcp_server.py",
             ROOT / ".github" / "workflows" / "ci.yml",
@@ -29,6 +30,23 @@ class ReleaseConfigurationTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertNotIn(old_distribution, text, str(path.relative_to(ROOT)))
             self.assertNotIn(old_skill, text, str(path.relative_to(ROOT)))
+
+    def test_default_readme_is_english_with_a_packaged_chinese_guide(self):
+        english = (ROOT / "README.md").read_text(encoding="utf-8")
+        chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+
+        self.assertIn('readme = "README.md"', pyproject)
+        self.assertIn(
+            "**English** | [简体中文](https://github.com/lzzmm/gpubk/blob/main/README.zh-CN.md)",
+            english,
+        )
+        self.assertIn("[English](README.md) | **简体中文**", chinese)
+        self.assertIn("include README.zh-CN.md", manifest)
+        self.assertIn("## Install", english)
+        self.assertIn("## 安装", chinese)
+        self.assertNotIn("The detailed guide below is currently in Chinese.", english)
 
     def test_external_github_actions_are_pinned_to_commit_shas(self):
         workflows = ROOT / ".github" / "workflows"
