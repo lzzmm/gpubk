@@ -65,6 +65,8 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(context["capabilities"]["idempotent_edit_history_limit"], 256)
         self.assertTrue(context["capabilities"]["structured_cancel"])
         self.assertTrue(context["capabilities"]["scheduled_job_live_guard"])
+        self.assertTrue(context["capabilities"]["weighted_shared_capacity"])
+        self.assertEqual(context["policy"]["shared_capacity_units_per_gpu"], 2)
         self.assertNotIn("secret", str(context))
 
     def test_recommendation_is_read_only_and_prefers_live_idle_gpu(self):
@@ -130,6 +132,69 @@ class AgentServiceTests(unittest.TestCase):
 
         self.assertEqual(submission.result.reservation["start_at"], "2030-01-01T12:40:00Z")
         self.assertFalse(submission.result.queued)
+
+    def test_weighted_share_is_exposed_in_recommendation_and_public_result(self):
+        config = Config(data_dir=self.data_dir, gpu_count=2, max_shared_users=4)
+        advice = build_gpu_advice(config, snapshots=self.snapshots, history={}, at=self.start)
+
+        recommendation = recommend_booking(
+            config,
+            self.store,
+            self.actor,
+            count=1,
+            duration_seconds=30 * 60,
+            start_at=self.start,
+            mode=MODE_SHARED,
+            share_units=3,
+            allow_queue=False,
+            advice=advice,
+        )
+        submission = submit_booking(
+            config,
+            self.store,
+            self.actor,
+            count=1,
+            duration_seconds=30 * 60,
+            start_at=self.start,
+            mode=MODE_SHARED,
+            share_units=3,
+            allow_queue=False,
+            advice=advice,
+        )
+
+        self.assertEqual(recommendation["request"]["share_units_per_gpu"], 3)
+        self.assertEqual(recommendation["request"]["share_fraction_per_gpu"], "3/4")
+        self.assertEqual(submission.result.reservation["share_units"], 3)
+
+    def test_context_fails_closed_for_malformed_legacy_share_units(self):
+        add_booking(
+            self.store,
+            self.config,
+            BookingRequest(
+                actor=self.actor,
+                count=1,
+                duration_seconds=30 * 60,
+                start_at=self.start,
+                mode=MODE_SHARED,
+            ),
+        )
+
+        def damage_share_units(ledger):
+            ledger["reservations"][0]["share_units"] = "broken"
+            return ledger, None, [], True
+
+        self.store.transaction(damage_share_units)
+        context = build_agent_context(
+            self.config,
+            self.store,
+            self.actor,
+            at=self.start,
+            advice=self.advice,
+        )
+
+        reservation = context["reservations"][0]
+        self.assertEqual(reservation["share_units_per_gpu"], 2)
+        self.assertEqual(reservation["share_fraction_per_gpu"], "2/2")
 
     def test_exact_conflict_returns_nearest_without_writing(self):
         add_booking(

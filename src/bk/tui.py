@@ -29,8 +29,9 @@ from .scheduler import (
     edit_booking,
     find_earliest_slot,
     list_active,
-    max_shared_record_count_for_reservation,
+    shared_capacity_units_for_gpu,
 )
+from .sharing import parse_share_units, reservation_share_units, share_example, share_text
 from .storage import LedgerStore
 from .timeparse import format_local_range, parse_iso, parse_memory_mb, utc_now
 from .usage import ProcessUsage, classify_process_usage, summarize_process_command
@@ -49,9 +50,12 @@ COLOR_PREVIEW_EXCLUSIVE = 10
 COLOR_RES_BASE = 11
 
 ADD_STEP_MINUTES = 5
+MIN_SHORT_ID_WIDTH = 6
+MAX_SHORT_ID_WIDTH = 12
 BAR_CHAR = "█"
 SHARED_CHAR = "▓"
 SPLIT_CHAR = "▀"
+LOWER_SPLIT_CHAR = "▄"
 WEAVE_CHARS = ("▚", "▞")
 FREE_CHAR = "."
 NOW_CHAR = "│"
@@ -124,6 +128,7 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
             ("Shift", "Larger step for movement, duration, and zoom"),
             ("v", "Cycle 1x, 6x, or 24x when Shift is not reported"),
             ("s / x", "Choose shared or exclusive mode"),
+            ("u", "Set shared capacity units or fraction"),
             ("m", "Set expected VRAM per GPU, such as 12g"),
             ("r", "Reset Add defaults or restore original Edit values"),
             ("Enter / Esc", "Submit the exact preview or cancel"),
@@ -151,13 +156,14 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
         (
             ("bk 2 1h", "Book two shared GPUs at best available time"),
             ("bk 1 30m --mem 12g", "Book shared capacity with expected VRAM"),
+            ("bk 1 30m --share 1/2", "Reserve half of the shared capacity"),
             ("bk x 1 30m", "Book one GPU exclusively; x means exclusive"),
             ("bk tui", "Open this timeline"),
-            ("a then 2", "Preview earliest two-GPU slot; Enter confirms"),
+            ("a then 2", "Find earliest two-GPU slot; Enter confirms"),
             ("Tab", "Inspect a GPU's sharers and processes"),
-            ("e", "Edit a selected future reservation on timeline"),
+            ("e", "Edit a selected future reservation"),
             ("bk u", "Show this UID's historical GPU summary"),
-            ("bk agent context", "Give an Agent privacy-safe allocation context"),
+            ("bk agent context", "Give an Agent safe allocation context"),
             ("bk doctor", "Read-only policy and ledger diagnostics"),
         ),
     ),
@@ -183,6 +189,7 @@ class TuiState:
     add_selected_gpus: set[int] = field(default_factory=set)
     add_booking_mode: str = MODE_SHARED
     add_expected_memory_mb: Optional[int] = None
+    add_share_units: int = 1
     gpu_memory_capacity_mb: dict[int, int] = field(default_factory=dict)
     gpu_memory_free_mb: dict[int, int] = field(default_factory=dict)
     timeline_columns: int = DEFAULT_TIMELINE_COLUMNS
@@ -211,6 +218,8 @@ class AddPreview:
     valid: bool
     reason: str = ""
     blink: bool = False
+    share_units: int = 1
+    share_capacity: int = 1
 
 
 def run_tui(config: Config, store: LedgerStore) -> int:
@@ -540,11 +549,12 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
         statuses=(STATUS_ACTIVE, STATUS_EXPIRED),
     )
     timeline_records = timeline_index.records()
+    id_width = _visible_id_width([*active, *timeline_records])
     preview = _build_add_preview(ledger, config, state, view_start) if state.editor_active else None
     color_map = _reservation_color_map(timeline_records, timeline_index)
 
     _draw_header(stdscr, config, now, view_start, view_end, width, state)
-    _draw_editor_banner(stdscr, 2, width, state, preview)
+    _draw_editor_banner(stdscr, 2, width, state, preview, id_width)
     _draw_time_axis(stdscr, timeline_top, label_width, timeline_width, view_start, view_end, width, now)
     row = timeline_top + 4
     for gpu in gpu_snapshots:
@@ -588,11 +598,20 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
         focused_gpu,
         timeline_index,
         now,
+        id_width,
     )
 
     if focused_gpu is not None:
         gpu = gpu_by_index.get(focused_gpu, GpuSnapshot(index=focused_gpu, name="unknown"))
-        _draw_process_panel(stdscr, row, width, height, gpu, usage_by_gpu.get(focused_gpu, []))
+        _draw_process_panel(
+            stdscr,
+            row,
+            width,
+            height,
+            gpu,
+            usage_by_gpu.get(focused_gpu, []),
+            id_width,
+        )
     else:
         panel_top = min(height - 7, row + 1)
         _draw_reservation_panel(
@@ -607,6 +626,7 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
             config.max_shared_users,
             color_map,
             config.gpu_count,
+            id_width,
         )
     _draw_footer(stdscr, height, width, state, preview)
     stdscr.refresh()
@@ -649,7 +669,7 @@ def _header_lines(
         f"| {state.slot_minutes}m/col "
     )
     wide_details = (
-        f" data={config.data_dir} | shared_limit={config.max_shared_users} "
+        f" data={config.data_dir} | shared_capacity={config.max_shared_users} units/GPU "
         "| refresh=1s | n NOW | q quit | ? help"
     )
     if width >= 100 and len(wide_title) < width and len(wide_details) < width:
@@ -660,7 +680,7 @@ def _header_lines(
             f" GPUbk {window_mode} | {_weekday_label(local_now)} {local_now:%m-%d %H:%M:%S} "
             f"| {local_start:%m-%d %H:%M}->{local_end:%m-%d %H:%M} | {state.slot_minutes}m"
         )
-        suffix = f" | share={config.max_shared_users} | 1s refresh | n NOW | ? help"
+        suffix = f" | cap={config.max_shared_users}u/GPU | 1s refresh | n NOW | ? help"
         path_budget = max(1, width - len(" data=") - len(suffix) - 1)
         details = f" data={_truncate(config.data_dir.name or str(config.data_dir), path_budget)}{suffix}"
     limit = max(0, width - 1)
@@ -679,6 +699,10 @@ def _draw_time_axis(
 ) -> None:
     dates, hours, minutes, ruler = _time_axis_lines(start, end, timeline_width)
     local_start = start.astimezone()
+    now_col = _timeline_now_col(now, start, end, timeline_width)
+    now_label_col = None
+    if now_col is not None:
+        minutes, now_label_col = _clear_now_label_slot(minutes, now_col)
     _addstr(stdscr, row, 0, f"Date {_date_label(local_start)}".ljust(label_width), width, COLOR_MUTED)
     _addstr(stdscr, row + 1, 0, "Hour".ljust(label_width), width, COLOR_MUTED)
     _addstr(stdscr, row + 2, 0, "Minute".ljust(label_width), width, COLOR_MUTED)
@@ -687,10 +711,16 @@ def _draw_time_axis(
     _addstr(stdscr, row + 1, label_width, hours, width, COLOR_MUTED)
     _addstr(stdscr, row + 2, label_width, minutes, width, COLOR_MUTED)
     _addstr(stdscr, row + 3, label_width, ruler, width, COLOR_MUTED)
-    now_col = _timeline_now_col(now, start, end, timeline_width)
-    if now_col is not None:
-        label_col = min(max(0, now_col - 1), max(0, timeline_width - 3))
-        _addstr(stdscr, row + 2, label_width + label_col, "NOW", width, COLOR_SELECTED, curses.A_BOLD)
+    if now_col is not None and now_label_col is not None:
+        _addstr(
+            stdscr,
+            row + 2,
+            label_width + now_label_col,
+            "NOW",
+            width,
+            COLOR_SELECTED,
+            curses.A_BOLD,
+        )
         _addstr(stdscr, row + 3, label_width + now_col, NOW_CHAR, width, COLOR_SELECTED, curses.A_BOLD)
 
 
@@ -700,18 +730,35 @@ def _draw_editor_banner(
     width: int,
     state: TuiState,
     preview: Optional[AddPreview],
+    id_width: int = MIN_SHORT_ID_WIDTH,
 ) -> None:
     if not state.editor_active or preview is None:
         return
     color = _preview_color(preview.mode) if preview.valid else COLOR_ERROR
-    _addstr(stdscr, row, 0, _editor_banner_text(state, preview), width, color, curses.A_BOLD)
+    _addstr(
+        stdscr,
+        row,
+        0,
+        _editor_banner_text(state, preview, id_width),
+        width,
+        color,
+        curses.A_BOLD,
+    )
 
 
-def _editor_banner_text(state: TuiState, preview: AddPreview) -> str:
+def _editor_banner_text(
+    state: TuiState,
+    preview: AddPreview,
+    id_width: int = MIN_SHORT_ID_WIDTH,
+) -> str:
     operation = "EDIT" if state.edit_mode else "ADD"
     if state.edit_mode and state.edit_reservation_id:
-        operation += f" {state.edit_reservation_id[:8]}"
-    mode = "S" if preview.mode == MODE_SHARED else "X"
+        operation += f" {state.edit_reservation_id[:id_width]}"
+    mode = (
+        f"S{share_text(preview.share_units, preview.share_capacity)}"
+        if preview.mode == MODE_SHARED
+        else "X"
+    )
     gpu_text = ",".join(map(str, preview.selected_gpus)) or "-"
     local_start = preview.start.astimezone()
     local_end = preview.end.astimezone()
@@ -745,9 +792,40 @@ def _draw_gpu_row(
     now: Optional[datetime] = None,
 ) -> None:
     view_end = start + timedelta(minutes=slot_minutes * timeline_width)
-    peak_shared = _peak_shared_count_for_gpu(active, gpu.index, start, view_end, reservation_index)
+    if now is not None:
+        peak_shared = shared_capacity_units_for_gpu(
+            active,
+            gpu.index,
+            now,
+            now + timedelta(seconds=1),
+            shared_limit,
+        )
+        exclusive_now = _gpu_is_exclusive_now(
+            active,
+            gpu.index,
+            now,
+            reservation_index,
+        )
+    else:
+        peak_shared = _peak_shared_count_for_gpu(
+            active,
+            gpu.index,
+            start,
+            view_end,
+            reservation_index,
+            shared_limit,
+        )
+        exclusive_now = False
     violations = sum(1 for item in process_usage if item.violation)
-    label = _gpu_row_label(gpu, label_width, peak_shared, shared_limit, violations, focused)
+    label = _gpu_row_label(
+        gpu,
+        label_width,
+        peak_shared,
+        shared_limit,
+        violations,
+        focused,
+        exclusive_now,
+    )
     cursor_active = preview is not None and gpu.index == preview.cursor_gpu
     if cursor_active:
         label_color = _preview_color(preview.mode)
@@ -777,6 +855,7 @@ def _draw_gpu_row(
                     lane,
                     band_rows,
                     reservation_index,
+                    shared_limit,
                 )
             char, color, attr = _decorate_timeline_cell(char, color, attr, left, right, now)
             _addstr(stdscr, row + lane, label_width + col, char, width, color, attr)
@@ -798,6 +877,7 @@ def _draw_selected_gpu_lanes(
     focused_gpu: Optional[int] = None,
     reservation_index: Optional[ReservationIndex] = None,
     now: Optional[datetime] = None,
+    id_width: int = MIN_SHORT_ID_WIDTH,
 ) -> int:
     view_end = start + timedelta(minutes=slot_minutes * timeline_width)
     if focused_gpu is not None:
@@ -822,7 +902,7 @@ def _draw_selected_gpu_lanes(
     visible = related[:lanes]
     for lane, reservation in enumerate(visible):
         hidden = len(related) - lanes if lane == lanes - 1 else 0
-        label = _share_lane_label(gpu, lane, len(related), reservation, hidden)
+        label = _share_lane_label(gpu, reservation, shared_limit, hidden, id_width)
         label_color = _reservation_color(reservation, color_map)
         reservation_start = parse_iso(reservation["start_at"])
         reservation_end = parse_iso(reservation["end_at"])
@@ -865,6 +945,7 @@ def _draw_process_panel(
     height: int,
     gpu: GpuSnapshot,
     usage: Sequence[ProcessUsage],
+    id_width: int = MIN_SHORT_ID_WIDTH,
 ) -> None:
     if top >= height - 2:
         return
@@ -880,7 +961,7 @@ def _draw_process_panel(
     _addstr(stdscr, top, 0, title.ljust(width), width, COLOR_HEADER)
     if top + 1 >= height - 2:
         return
-    _addstr(stdscr, top + 1, 0, _process_table_header(width), width, COLOR_MUTED)
+    _addstr(stdscr, top + 1, 0, _process_table_header(width, id_width), width, COLOR_MUTED)
     if not usage:
         if top + 2 < height - 2:
             _addstr(stdscr, top + 2, 0, "  no GPU processes", width, COLOR_MUTED)
@@ -889,30 +970,50 @@ def _draw_process_panel(
     for offset, item in enumerate(usage[:rows]):
         color = COLOR_ERROR if item.violation else (COLOR_MUTED if item.status in {"unknown", "system"} else COLOR_MINE)
         attr = curses.A_BOLD if item.violation else 0
-        _addstr(stdscr, top + 2 + offset, 0, _process_table_line(item, width), width, color, attr)
+        _addstr(
+            stdscr,
+            top + 2 + offset,
+            0,
+            _process_table_line(item, width, id_width),
+            width,
+            color,
+            attr,
+        )
 
 
-def _process_table_header(width: int) -> str:
+def _process_table_header(width: int, id_width: int = MIN_SHORT_ID_WIDTH) -> str:
     if width < 100:
-        return f"{'PID':>7} {'User':<10} {'T':<3} {'SM':>3} {'Mem':>6} {'State':<11} Command"
-    return f"{'PID':>7} {'User':<16} {'Type':<4} {'SM':>4} {'Memory':>8} {'State':<11} {'Booking':<8} Command"
+        return (
+            f"{'PID':>7} {'User':<10} {'T':<3} {'SM':>3} {'Mem':>6} "
+            f"{'State':<11} {'Booking':<{id_width}} Command"
+        )
+    return (
+        f"{'PID':>7} {'User':<16} {'Type':<4} {'SM':>4} {'Memory':>8} "
+        f"{'State':<11} {'Booking':<{id_width}} Command"
+    )
 
 
-def _process_table_line(item: ProcessUsage, width: int) -> str:
+def _process_table_line(
+    item: ProcessUsage,
+    width: int,
+    id_width: int = MIN_SHORT_ID_WIDTH,
+) -> str:
     process = item.process
     sm = f"{process.sm_utilization_percent}%" if process.sm_utilization_percent is not None else "-"
     memory = f"{process.gpu_memory_mb}M" if process.gpu_memory_mb else "-"
-    booking = ",".join(value[:6] for value in item.reservation_ids) or "-"
+    booking = _truncate(",".join(value[:id_width] for value in item.reservation_ids) or "-", id_width)
     command = summarize_process_command(process.command)
     if width < 100:
         prefix = (
             f"{process.pid:>7} {_truncate(process.username, 10):<10} "
             f"{process.kind:<3} {sm:>3} {memory:>6} {item.status:<11} "
+            f"{booking:<{id_width}} "
         )
     else:
         prefix = (
             f"{process.pid:>7} {_truncate(process.username, 16):<16} "
-            f"{process.kind:<4} {sm:>4} {memory:>8} {item.status:<11} {booking:<8} "
+            f"{process.kind:<4} {sm:>4} {memory:>8} {item.status:<11} "
+            f"{booking:<{id_width}} "
         )
     return prefix + _truncate(command, max(1, width - len(prefix) - 1))
 
@@ -928,6 +1029,7 @@ def _cell_for_gpu(
     lane: int = 0,
     lane_count: int = 1,
     reservation_index: Optional[ReservationIndex] = None,
+    shared_limit: int = 1,
 ) -> Tuple[str, int, int]:
     if reservation_index is None:
         overlapping = sorted(
@@ -953,33 +1055,13 @@ def _cell_for_gpu(
     chosen = _choose_selected_or_first(shared_items, selected_id)
     if chosen is None:
         return FREE_CHAR, COLOR_FREE, 0
-    if len(shared_items) == 1:
-        if selected_id and chosen.get("id") == selected_id:
-            return BAR_CHAR, _reservation_color(chosen, color_map), _selected_bar_attr()
-        return BAR_CHAR, _reservation_color(chosen, color_map), curses.A_BOLD
+    visual_slots = _shared_visual_slots(shared_items, shared_limit)
+    occupied_slots = [item for item in visual_slots if item is not None]
+    if lane_count <= 1:
+        top_item, bottom_item = _shared_visual_pair(visual_slots, col)
+        return _render_shared_pair(top_item, bottom_item, color_map, selected_id, col)
 
-    if len(shared_items) == 2 and lane_count <= 1:
-        top_color = _reservation_color(shared_items[0], color_map)
-        bottom_color = _reservation_color(shared_items[1], color_map)
-        mixed_color = _mixed_color_pair(top_color, bottom_color)
-        if mixed_color is not None:
-            attr = curses.A_BOLD
-            if selected_id and any(item.get("id") == selected_id for item in shared_items):
-                attr |= curses.A_BLINK
-            return SPLIT_CHAR, mixed_color, attr
-
-    if len(shared_items) > 2 and lane_count <= 1:
-        top_item, bottom_item = _shared_weave_pair(shared_items, col)
-        top_color = _reservation_color(top_item, color_map)
-        bottom_color = _reservation_color(bottom_item, color_map)
-        mixed_color = _mixed_color_pair(top_color, bottom_color)
-        if mixed_color is not None:
-            attr = curses.A_BOLD
-            if selected_id and selected_id in {top_item.get("id"), bottom_item.get("id")}:
-                attr |= curses.A_BLINK
-            return WEAVE_CHARS[col % len(WEAVE_CHARS)], mixed_color, attr
-
-    visible = _shared_lane_item(shared_items, selected_id, col, lane, lane_count)
+    visible = _shared_lane_item(occupied_slots, selected_id, col, lane, lane_count)
     attr = curses.A_BOLD
     if selected_id and visible.get("id") == selected_id:
         attr |= curses.A_BLINK
@@ -1018,6 +1100,7 @@ def _draw_reservation_panel(
     shared_limit: int,
     color_map: dict[str, int],
     gpu_count: int,
+    id_width: int = MIN_SHORT_ID_WIDTH,
 ) -> None:
     actor = _current_actor()
     mine = [item for item in active if int(item.get("uid")) == actor.uid]
@@ -1030,7 +1113,7 @@ def _draw_reservation_panel(
     header_focused = state.focus == FOCUS_RESERVATIONS and state.selected < 0 and not state.editor_active
     title = "> Reservations" if header_focused else "  Reservations"
     _addstr(stdscr, top, 0, title.ljust(width), width, COLOR_HEADER, curses.A_BOLD if header_focused else 0)
-    header = _table_header(width, gpu_count)
+    header = _table_header(width, gpu_count, id_width)
     _addstr(stdscr, top + 1, 0, header, width, COLOR_MUTED)
     if not active:
         _addstr(stdscr, top + 2, 0, "  none", width, COLOR_MUTED)
@@ -1041,7 +1124,15 @@ def _draw_reservation_panel(
         row = top + 2 + offset
         own_number = mine_index.get(reservation["id"])
         prefix = f">{own_number}" if reservation.get("id") == selected_id else (str(own_number) if own_number else "-")
-        line = _reservation_table_line(reservation, prefix, width, active, shared_limit, gpu_count)
+        line = _reservation_table_line(
+            reservation,
+            prefix,
+            width,
+            active,
+            shared_limit,
+            gpu_count,
+            id_width,
+        )
         selected = reservation.get("id") == selected_id
         color = _reservation_color(reservation, color_map)
         _addstr(stdscr, row, 0, line, width, color, curses.A_BOLD if selected else 0)
@@ -1072,7 +1163,7 @@ def _footer_label(state: TuiState, preview: Optional[AddPreview], width: int) ->
         )
         long = (
             f" {operation} {state.speed_multiplier}x | arrows move | Space GPU | [] duration | ,. quick "
-            "| -/= zoom | Shift faster | v speed | m memory | s/x | 1-9/f/g find "
+            "| -/= zoom | Shift faster | v speed | m memory | u share | s/x | 1-9/f/g find "
             "| r reset | Enter/Esc | ? help "
         )
     elif state.focus == FOCUS_GPUS:
@@ -1110,6 +1201,7 @@ def _start_add_select(config: Config, state: TuiState) -> None:
     state.add_selected_gpus = {state.add_cursor_gpu} if config.gpu_count else set()
     state.add_booking_mode = MODE_SHARED
     state.add_expected_memory_mb = None
+    state.add_share_units = 1
     state.message = "Add: press 1-9 or f to auto-find; arrows and Space adjust"
     state.error = False
 
@@ -1152,6 +1244,7 @@ def _load_edit_state(config: Config, state: TuiState, reservation: dict) -> None
     state.add_booking_mode = reservation.get("mode") if reservation.get("mode") in {MODE_SHARED, MODE_EXCLUSIVE} else MODE_SHARED
     raw_memory = reservation.get("expected_memory_mb")
     state.add_expected_memory_mb = int(raw_memory) if raw_memory is not None else None
+    state.add_share_units = reservation_share_units(reservation, config.max_shared_users)
     state.message = ""
     state.error = False
 
@@ -1297,7 +1390,12 @@ def _handle_add_key(
             state.error = False
             return
         default = _memory_input_text(state.add_expected_memory_mb)
-        raw = _prompt_line(stdscr, "Memory per GPU (12g/4096m, - clears)", default)
+        raw = _prompt_line(
+            stdscr,
+            "Memory per GPU (12g/4096m, - clears)",
+            default,
+            title="Expected VRAM",
+        )
         if raw == "-":
             state.add_expected_memory_mb = None
         elif raw:
@@ -1308,6 +1406,32 @@ def _handle_add_key(
                 state.error = True
                 return
         state.message = f"expected memory: {_editor_memory_label(state)}"
+        state.error = False
+        return
+    if key == ord("u"):
+        if stdscr is None:
+            state.message = "press u in the live TUI to set shared capacity"
+            state.error = False
+            return
+        if state.add_booking_mode == MODE_EXCLUSIVE:
+            state.message = "share capacity applies only to shared reservations"
+            state.error = True
+            return
+        default = share_text(state.add_share_units, config.max_shared_users)
+        raw = _prompt_line(
+            stdscr,
+            f"Share per GPU (1-{config.max_shared_users}, {share_example(config.max_shared_users)})",
+            default,
+            title="Shared capacity",
+        )
+        if raw:
+            try:
+                state.add_share_units = parse_share_units(raw, config.max_shared_users)
+            except ValueError as exc:
+                state.message = str(exc)
+                state.error = True
+                return
+        state.message = f"share per GPU: {share_text(state.add_share_units, config.max_shared_users)}"
         state.error = False
         return
     if key in (ord("r"), ord("R")):
@@ -1348,6 +1472,8 @@ def _handle_add_key(
                         expected_memory_mb=state.add_expected_memory_mb,
                         update_expected_memory=True,
                         gpu_memory_capacity_mb=state.gpu_memory_capacity_mb,
+                        share_units=state.add_share_units if preview.mode == MODE_SHARED else None,
+                        update_share_units=True,
                     ),
                 )
             else:
@@ -1364,6 +1490,7 @@ def _handle_add_key(
                         allow_queue=False,
                         expected_memory_mb=state.add_expected_memory_mb,
                         gpu_memory_capacity_mb=state.gpu_memory_capacity_mb,
+                        share_units=state.add_share_units if preview.mode == MODE_SHARED else None,
                     ),
                 )
         except BookingError as exc:
@@ -1371,10 +1498,15 @@ def _handle_add_key(
             state.error = True
             return
         reservation_id = str(result.reservation["id"])
+        visible_after = list_active(store.load())
+        id_width = _visible_id_width(visible_after)
         _close_editor(state)
         state.focus = FOCUS_RESERVATIONS
         state.selected = _own_reservation_index(store, reservation_id)
-        state.message = f"{'updated' if operation == 'edit' else 'created'} {reservation_id[:8]}"
+        state.message = (
+            f"{'updated' if operation == 'edit' else 'created'} "
+            f"{reservation_id[:id_width]}"
+        )
         state.error = False
 
 
@@ -1418,6 +1550,7 @@ def _find_add_slot(
             start_at=earliest_start,
             mode=mode,
             expected_memory_mb=state.add_expected_memory_mb,
+            share_units=state.add_share_units,
         )
         if not fixed_gpus
         else AllocatorDecision(list(advice.order), dict(advice.scores), "fixed-gpu")
@@ -1436,6 +1569,7 @@ def _find_add_slot(
         gpu_scores=allocator.scores,
         expected_memory_mb=state.add_expected_memory_mb,
         gpu_memory_capacity_mb=state.gpu_memory_capacity_mb,
+        share_units=state.add_share_units if mode == MODE_SHARED else 1,
     )
     if slot is None:
         scope = "selected GPUs" if fixed_gpus else f"{count} GPU"
@@ -1591,13 +1725,20 @@ def _delete_selected(stdscr, store: LedgerStore, state: TuiState) -> None:
         state.error = True
         return
     reservation = mine[state.selected]
-    answer = _prompt_line(stdscr, f"Delete {reservation['id'][:8]}? type yes", "")
+    id_width = _visible_id_width(mine)
+    short_id = reservation["id"][:id_width]
+    answer = _prompt_line(
+        stdscr,
+        f"Delete {short_id}? type yes",
+        "",
+        title="Cancel booking",
+    )
     if answer != "yes":
         state.message = "delete cancelled"
         state.error = False
         return
     cancel_booking(store, reservation["id"], _current_actor())
-    state.message = f"deleted {reservation['id'][:8]}"
+    state.message = f"deleted {short_id}"
     state.error = False
 
 
@@ -1613,7 +1754,14 @@ def _prompt_fields(stdscr, title: str, fields: Sequence[Tuple[str, str]]) -> Opt
     try:
         curses.curs_set(1)
         win.box()
-        _win_addstr(win, 1, 2, title[: win_width - 4])
+        _win_addstr(
+            win,
+            0,
+            2,
+            f" {title[: max(0, win_width - 6)]} ",
+            COLOR_HEADER,
+            curses.A_BOLD,
+        )
         for index, (label, default) in enumerate(fields):
             prompt = f"{label} [{default}]: " if default else f"{label}: "
             _win_addstr(win, index + 2, 2, prompt[: win_width - 4])
@@ -1630,8 +1778,8 @@ def _prompt_fields(stdscr, title: str, fields: Sequence[Tuple[str, str]]) -> Opt
         curses.curs_set(0)
 
 
-def _prompt_line(stdscr, prompt: str, default: str = "") -> str:
-    values = _prompt_fields(stdscr, "Confirm", [(prompt, default)])
+def _prompt_line(stdscr, prompt: str, default: str = "", *, title: str = "Input") -> str:
+    values = _prompt_fields(stdscr, title, [(prompt, default)])
     if values is None:
         return ""
     return values[0]
@@ -1735,6 +1883,8 @@ def _build_add_preview(ledger: dict, config: Config, state: TuiState, view_start
             False,
             f"start must be at or after {local_earliest:%m-%d %H:%M}",
             blink=state.add_mode,
+            share_units=state.add_share_units,
+            share_capacity=config.max_shared_users,
         )
     if not selected:
         return AddPreview(
@@ -1746,6 +1896,8 @@ def _build_add_preview(ledger: dict, config: Config, state: TuiState, view_start
             False,
             "select at least one GPU with space",
             blink=state.add_mode,
+            share_units=state.add_share_units,
+            share_capacity=config.max_shared_users,
         )
     availability_ledger = _availability_ledger(ledger, state)
     for gpu in selected:
@@ -1760,10 +1912,32 @@ def _build_add_preview(ledger: dict, config: Config, state: TuiState, view_start
             state.add_expected_memory_mb,
             state.gpu_memory_capacity_mb,
             config.shared_memory_reserve_mb,
+            state.add_share_units if mode == MODE_SHARED else 1,
         )
         if not ok:
-            return AddPreview(start, end, selected, cursor_gpu, mode, False, reason, blink=state.add_mode)
-    return AddPreview(start, end, selected, cursor_gpu, mode, True, blink=state.add_mode)
+            return AddPreview(
+                start,
+                end,
+                selected,
+                cursor_gpu,
+                mode,
+                False,
+                reason,
+                blink=state.add_mode,
+                share_units=state.add_share_units,
+                share_capacity=config.max_shared_users,
+            )
+    return AddPreview(
+        start,
+        end,
+        selected,
+        cursor_gpu,
+        mode,
+        True,
+        blink=state.add_mode,
+        share_units=state.add_share_units,
+        share_capacity=config.max_shared_users,
+    )
 
 
 def _preview_status_text(preview: AddPreview, operation: str = "add") -> str:
@@ -1772,8 +1946,13 @@ def _preview_status_text(preview: AddPreview, operation: str = "add") -> str:
     duration = _duration_detail_text(local_end - local_start)
     gpu_text = ",".join(map(str, preview.selected_gpus)) or "-"
     status = "ok" if preview.valid else preview.reason
+    share = (
+        f" share={share_text(preview.share_units, preview.share_capacity)}"
+        if preview.mode == MODE_SHARED
+        else ""
+    )
     return (
-        f"{operation} {preview.mode} GPU={gpu_text} "
+        f"{operation} {preview.mode}{share} GPU={gpu_text} "
         f"{_weekday_label(local_start)} {local_start:%m-%d %H:%M}->{local_end:%m-%d %H:%M} "
         f"{duration} | {status}"
     )
@@ -1809,12 +1988,16 @@ def _preview_color(mode: str) -> int:
     return COLOR_PREVIEW_EXCLUSIVE if mode == MODE_EXCLUSIVE else COLOR_PREVIEW_SHARED
 
 
-def _table_header(width: int, gpu_count: int = GPU_MAP_SIZE) -> str:
+def _table_header(
+    width: int,
+    gpu_count: int = GPU_MAP_SIZE,
+    id_width: int = MIN_SHORT_ID_WIDTH,
+) -> str:
     gpu_width = _reservation_gpu_width(width, gpu_count)
     gpu_header = "GPU"
     if width < 100:
-        return f"{'#':>3} {'ID':<8} {'User':<10} {'M':<1} {gpu_header:<{gpu_width}} {'Cap':<5} {'Start':<11} {'End':<11} {'Dur':<7}"
-    return f"{'#':>3} {'ID':<8} {'User':<16} {'Mode':<4} {gpu_header:<{gpu_width}} {'Cap':<5} {'Start':<11} {'End':<11} {'Dur':<7}"
+        return f"{'#':>3} {'ID':<{id_width}} {'User':<10} {'M':<1} {gpu_header:<{gpu_width}} {'Share':<5} {'Start':<11} {'End':<11} {'Dur':<7}"
+    return f"{'#':>3} {'ID':<{id_width}} {'User':<16} {'Mode':<4} {gpu_header:<{gpu_width}} {'Share':<5} {'Start':<11} {'End':<11} {'Dur':<7}"
 
 
 def _reservation_table_line(
@@ -1824,6 +2007,7 @@ def _reservation_table_line(
     active: Sequence[dict],
     shared_limit: int,
     gpu_count: int = GPU_MAP_SIZE,
+    id_width: int = MIN_SHORT_ID_WIDTH,
 ) -> str:
     start = parse_iso(reservation["start_at"]).astimezone()
     end = parse_iso(reservation["end_at"]).astimezone()
@@ -1833,7 +2017,7 @@ def _reservation_table_line(
     mode_label = _mode_mark(reservation) if width < 100 else reservation.get("mode", "")[:4]
     cap = _capacity_text(reservation, active, shared_limit)
     return (
-        f"{prefix:>3} {reservation['id'][:8]:<8} "
+        f"{prefix:>3} {reservation['id'][:id_width]:<{id_width}} "
         f"{_truncate(str(reservation.get('username', '')), user_width):<{user_width}} "
         f"{mode_label:<{1 if width < 100 else 4}} "
         f"{_reservation_gpu_text(reservation.get('gpus', []), gpu_count, gpu_width):<{gpu_width}} "
@@ -1858,8 +2042,7 @@ def _reservation_gpu_width(width: int, gpu_count: int) -> int:
 def _capacity_text(reservation: dict, active: Sequence[dict], shared_limit: int) -> str:
     if reservation.get("mode") == MODE_EXCLUSIVE:
         return "-"
-    peak = max_shared_record_count_for_reservation(active, reservation)
-    return f"{peak}/{shared_limit}"
+    return share_text(reservation_share_units(reservation, shared_limit), shared_limit)
 
 
 def _reservation_color_map(
@@ -2051,10 +2234,20 @@ def _related_shared_reservations(
     )
 
 
-def _share_lane_label(gpu: int, lane: int, total: int, reservation: dict, hidden: int = 0) -> str:
+def _share_lane_label(
+    gpu: int,
+    reservation: dict,
+    shared_limit: int,
+    hidden: int = 0,
+    id_width: int = MIN_SHORT_ID_WIDTH,
+) -> str:
     username = _truncate(str(reservation.get("username", "?")), 10)
     suffix = f" +{hidden}" if hidden else ""
-    return f"G{gpu} {lane + 1}/{total} {str(reservation.get('id', ''))[:6]} {username}{suffix}"
+    units = reservation_share_units(reservation, shared_limit)
+    return (
+        f"G{gpu} {share_text(units, shared_limit)} "
+        f"{str(reservation.get('id', ''))[:id_width]} {username}{suffix}"
+    )
 
 
 def _peak_shared_count_for_gpu(
@@ -2063,6 +2256,7 @@ def _peak_shared_count_for_gpu(
     start: datetime,
     end: datetime,
     reservation_index: Optional[ReservationIndex] = None,
+    shared_limit: int = 1,
 ) -> int:
     if reservation_index is not None:
         spans = [item for item in reservation_index.overlapping(gpu, start, end) if item.mode == MODE_SHARED]
@@ -2073,7 +2267,11 @@ def _peak_shared_count_for_gpu(
         ordered = sorted(points)
         return max(
             (
-                sum(1 for item in spans if item.start < right and left < item.end)
+                sum(
+                    reservation_share_units(item.record, shared_limit)
+                    for item in spans
+                    if item.start < right and left < item.end
+                )
                 for left, right in zip(ordered, ordered[1:])
                 if left < right
             ),
@@ -2098,7 +2296,12 @@ def _peak_shared_count_for_gpu(
             continue
         peak = max(
             peak,
-            sum(1 for item in shared if parse_iso(item["start_at"]) < right and left < parse_iso(item["end_at"])),
+            sum(
+                reservation_share_units(item, shared_limit)
+                for item in shared
+                if parse_iso(item["start_at"]) < right
+                and left < parse_iso(item["end_at"])
+            ),
         )
     return peak
 
@@ -2109,9 +2312,10 @@ def _gpu_label(
     peak_shared: int = 0,
     shared_limit: int = 1,
     violations: int = 0,
+    exclusive: bool = False,
 ) -> str:
     gpu_field = _truncate(f"G{gpu.index}", 4)
-    capacity_field = _truncate(f"{peak_shared}/{shared_limit}", 5)
+    capacity_field = _truncate("X" if exclusive else f"{peak_shared}/{shared_limit}", 5)
     extras = [f"!{violations}"] if violations else []
     util = f"{gpu.utilization_percent}%" if gpu.utilization_percent is not None else "-"
     memory = "-"
@@ -2136,10 +2340,38 @@ def _gpu_row_label(
     shared_limit: int = 1,
     violations: int = 0,
     focused: bool = False,
+    exclusive: bool = False,
 ) -> str:
     marker = ">" if focused else " "
-    content = _gpu_label(gpu, max(0, width - 1), peak_shared, shared_limit, violations)
+    content = _gpu_label(
+        gpu,
+        max(0, width - 1),
+        peak_shared,
+        shared_limit,
+        violations,
+        exclusive,
+    )
     return (marker + content)[:width].ljust(width)
+
+
+def _gpu_is_exclusive_now(
+    active: Sequence[dict],
+    gpu: int,
+    now: datetime,
+    reservation_index: Optional[ReservationIndex] = None,
+) -> bool:
+    if reservation_index is not None:
+        return any(
+            span.mode == MODE_EXCLUSIVE and span.record.get("status") == STATUS_ACTIVE
+            for span in reservation_index.overlapping(gpu, now, now + timedelta(seconds=1))
+        )
+    return any(
+        item.get("status") == STATUS_ACTIVE
+        and item.get("mode") == MODE_EXCLUSIVE
+        and gpu in item.get("gpus", [])
+        and parse_iso(item["start_at"]) <= now < parse_iso(item["end_at"])
+        for item in active
+    )
 
 
 def _timeline_label_width(terminal_width: int) -> int:
@@ -2171,6 +2403,65 @@ def _shared_lane_item(
         return shared_items[col % len(shared_items)]
     lane_index = min(len(shared_items) - 1, (max(0, lane) * len(shared_items)) // max(1, lane_count))
     return shared_items[lane_index]
+
+
+def _shared_visual_slots(
+    shared_items: Sequence[dict], capacity_units: int
+) -> List[Optional[dict]]:
+    remaining = [
+        [item, reservation_share_units(item, max(1, capacity_units))]
+        for item in shared_items
+    ]
+    slots: List[Optional[dict]] = []
+    while any(units > 0 for _item, units in remaining):
+        for entry in remaining:
+            if entry[1] <= 0:
+                continue
+            slots.append(entry[0])
+            entry[1] -= 1
+    slots.extend([None] * max(0, capacity_units - len(slots)))
+    return slots or [None]
+
+
+def _shared_visual_pair(
+    slots: Sequence[Optional[dict]], col: int
+) -> Tuple[Optional[dict], Optional[dict]]:
+    count = len(slots)
+    top_index = (max(0, col) * 2) % count
+    return slots[top_index], slots[(top_index + 1) % count]
+
+
+def _render_shared_pair(
+    top_item: Optional[dict],
+    bottom_item: Optional[dict],
+    color_map: dict[str, int],
+    selected_id: Optional[str],
+    col: int,
+) -> Tuple[str, int, int]:
+    if top_item is None and bottom_item is None:
+        return FREE_CHAR, COLOR_FREE, 0
+    visible = top_item or bottom_item
+    if visible is None:
+        return FREE_CHAR, COLOR_FREE, 0
+    selected = selected_id and selected_id in {
+        str(top_item.get("id")) if top_item is not None else "",
+        str(bottom_item.get("id")) if bottom_item is not None else "",
+    }
+    attr = curses.A_BOLD | (curses.A_BLINK if selected else 0)
+    color = _reservation_color(visible, color_map)
+    if top_item is None:
+        return LOWER_SPLIT_CHAR, color, attr
+    if bottom_item is None:
+        return SPLIT_CHAR, color, attr
+    if top_item.get("id") == bottom_item.get("id"):
+        return BAR_CHAR, color, attr
+    mixed_color = _mixed_color_pair(
+        _reservation_color(top_item, color_map),
+        _reservation_color(bottom_item, color_map),
+    )
+    if mixed_color is None:
+        return WEAVE_CHARS[col % len(WEAVE_CHARS)], color, attr
+    return SPLIT_CHAR, mixed_color, attr
 
 
 def _shared_weave_pair(shared_items: Sequence[dict], col: int) -> Tuple[dict, dict]:
@@ -2279,6 +2570,15 @@ def _timeline_now_col(
     return _time_col(now, start, max(1.0, (end - start).total_seconds()), timeline_width)
 
 
+def _clear_now_label_slot(line: str, now_col: int) -> Tuple[str, int]:
+    label_col = min(max(0, now_col - 1), max(0, len(line) - 3))
+    chars = list(line)
+    clear_start = max(0, label_col - 1)
+    clear_end = min(len(chars), label_col + 4)
+    chars[clear_start:clear_end] = [" "] * (clear_end - clear_start)
+    return "".join(chars), label_col
+
+
 def _default_timeline_view_start(now: datetime, slot_minutes: int) -> datetime:
     anchor = _floor_to_add_step(now)
     return anchor - timedelta(minutes=NOW_CONTEXT_COLUMNS * max(1, slot_minutes))
@@ -2371,6 +2671,20 @@ def _duration_detail_text(delta: timedelta) -> str:
     if mins:
         parts.append(f"{mins}m")
     return f"{compact} ({''.join(parts)})"
+
+
+def _visible_id_width(reservations: Sequence[dict]) -> int:
+    ids = sorted(
+        {
+            str(item.get("id", ""))
+            for item in reservations
+            if str(item.get("id", ""))
+        }
+    )
+    for width in range(MIN_SHORT_ID_WIDTH, MAX_SHORT_ID_WIDTH + 1):
+        if len({value[:width] for value in ids}) == len(ids):
+            return width
+    return MAX_SHORT_ID_WIDTH
 
 
 def _truncate(value: str, width: int) -> str:
@@ -2469,8 +2783,18 @@ def _win_addstr(win, row: int, col: int, text: str, color: int = 0, attr: int = 
 def _print_fallback(config: Config, store: LedgerStore) -> None:
     now = utc_now()
     print("GPUbk TUI fallback")
-    print(f"data={config.data_dir} shared_limit={config.max_shared_users}")
+    print(f"data={config.data_dir} shared_capacity={config.max_shared_users} units/GPU")
     print("active reservations:")
-    for reservation in list_active(store.load(), now):
+    active = list_active(store.load(), now)
+    id_width = _visible_id_width(active)
+    for reservation in active:
         gpus = ",".join(str(item) for item in reservation.get("gpus", []))
-        print(f"- {reservation['id'][:8]} {reservation['mode']} GPU={gpus} {format_local_range(reservation['start_at'], reservation['end_at'])}")
+        share = (
+            f" share={share_text(reservation_share_units(reservation, config.max_shared_users), config.max_shared_users)}"
+            if reservation.get("mode") == MODE_SHARED
+            else ""
+        )
+        print(
+            f"- {reservation['id'][:id_width]} {reservation['mode']}{share} "
+            f"GPU={gpus} {format_local_range(reservation['start_at'], reservation['end_at'])}"
+        )

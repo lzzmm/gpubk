@@ -33,6 +33,27 @@ def _concurrent_booking(data_dir, start_at, uid, result_queue):
         result_queue.put("conflict")
 
 
+def _concurrent_weighted_booking(data_dir, start_at, uid, result_queue):
+    config = Config(data_dir=Path(data_dir), gpu_count=1, max_shared_users=4)
+    store = LedgerStore(config.data_dir)
+    try:
+        add_booking(
+            store,
+            config,
+            BookingRequest(
+                actor=Actor(uid, f"user{uid}"),
+                count=1,
+                duration_seconds=30 * 60,
+                start_at=parse_iso(start_at),
+                preferred_gpus=[0],
+                share_units=3,
+            ),
+        )
+        result_queue.put("ok")
+    except BookingError:
+        result_queue.put("conflict")
+
+
 def _concurrent_idempotent_edit(data_dir, reservation_id, result_queue):
     config = Config(data_dir=Path(data_dir), gpu_count=1, max_shared_users=2)
     store = LedgerStore(config.data_dir)
@@ -306,6 +327,31 @@ class LedgerStorageTests(unittest.TestCase):
             events = [json.loads(line) for line in store.log_path.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(len(events), 2)
             self.assertEqual(len({item["event_id"] for item in events}), 2)
+
+    def test_cross_process_weighted_bookings_never_oversell_capacity_units(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            start_at = "2030-01-01T00:00:00Z"
+            context = multiprocessing.get_context("spawn")
+            results = context.Queue()
+            processes = [
+                context.Process(
+                    target=_concurrent_weighted_booking,
+                    args=(str(data_dir), start_at, 2000 + index, results),
+                )
+                for index in range(6)
+            ]
+            for process in processes:
+                process.start()
+            for process in processes:
+                process.join(timeout=10)
+                self.assertEqual(process.exitcode, 0)
+
+            outcomes = [results.get(timeout=1) for _process in processes]
+            self.assertEqual(outcomes.count("ok"), 1)
+            self.assertEqual(outcomes.count("conflict"), 5)
+            ledger = LedgerStore(data_dir).load()
+            self.assertEqual(sum(item.get("share_units", 1) for item in ledger["reservations"]), 3)
 
     def test_cross_process_agent_edit_is_applied_exactly_once(self):
         with tempfile.TemporaryDirectory() as tmp:

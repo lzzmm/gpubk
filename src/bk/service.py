@@ -20,6 +20,7 @@ from .scheduler import (
     reservation_pressure_scores,
     shared_memory_headroom_for_reservation,
 )
+from .sharing import normalize_share_units, reservation_share_units, share_text
 from .storage import LedgerStore
 from .timeparse import normalize_queue_start, parse_iso, to_iso, utc_now
 from .worker import delete_job_spec, prepare_job_spec
@@ -33,6 +34,7 @@ class BookingSubmission:
     result: BookingResult
     advice: GpuAdvice
     allocator: AllocatorDecision
+    share_capacity_units: int
 
 
 def submit_booking(
@@ -46,6 +48,7 @@ def submit_booking(
     mode: str = MODE_SHARED,
     preferred_gpus: Optional[Sequence[int]] = None,
     expected_memory_mb: Optional[int] = None,
+    share_units: Optional[int] = None,
     allow_queue: bool = True,
     operation_id: Optional[str] = None,
     command_argv: Optional[List[str]] = None,
@@ -54,7 +57,7 @@ def submit_booking(
 ) -> BookingSubmission:
     generated_at = utc_now()
     effective_start = normalize_queue_start(start_at, generated_at) if allow_queue else start_at
-    _validate_recommendation_request(
+    effective_share_units = _validate_recommendation_request(
         config,
         count,
         duration_seconds,
@@ -62,6 +65,7 @@ def submit_booking(
         mode,
         expected_memory_mb,
         allow_queue,
+        share_units,
     )
     validate_ledger_policy(store.load(), config)
     gpu_advice = advice or build_gpu_advice(config)
@@ -76,6 +80,7 @@ def submit_booking(
         mode,
         preferred_gpus,
         expected_memory_mb,
+        effective_share_units,
     )
     if command_argv is not None and working_directory is None:
         working_directory = os.getcwd()
@@ -104,6 +109,7 @@ def submit_booking(
                 job_summary=job_spec.summary if job_spec else None,
                 expected_memory_mb=expected_memory_mb,
                 gpu_memory_capacity_mb=gpu_advice.memory_capacities_mb,
+                share_units=effective_share_units if mode == MODE_SHARED else None,
             ),
         )
     except Exception:
@@ -114,7 +120,7 @@ def submit_booking(
         not result.created or result.reservation.get("job", {}).get("spec_id") != job_spec.spec_id
     ):
         delete_job_spec(config, job_spec.spec_id)
-    return BookingSubmission(result, gpu_advice, allocator)
+    return BookingSubmission(result, gpu_advice, allocator, config.max_shared_users)
 
 
 def submit_edit(
@@ -130,6 +136,8 @@ def submit_edit(
     count: Optional[int] = None,
     expected_memory_mb: Optional[int] = None,
     update_expected_memory: bool = False,
+    share_units: Optional[int] = None,
+    update_share_units: bool = False,
     allow_queue: bool = False,
     operation_id: Optional[str] = None,
     advice: Optional[GpuAdvice] = None,
@@ -154,6 +162,18 @@ def submit_edit(
         if update_expected_memory
         else _optional_int(reservation.get("expected_memory_mb"))
     )
+    if effective_mode == MODE_SHARED:
+        effective_share_units = (
+            share_units
+            if update_share_units
+            else (
+                reservation_share_units(reservation, config.max_shared_users)
+                if reservation.get("mode") == MODE_SHARED
+                else None
+            )
+        )
+    else:
+        effective_share_units = share_units if update_share_units else None
     effective_preferred = preferred_gpus
     if effective_preferred is None and count is None:
         effective_preferred = [int(gpu) for gpu in reservation.get("gpus", [])]
@@ -162,7 +182,7 @@ def submit_edit(
         if effective_preferred is not None
         else len(reservation.get("gpus", []))
     )
-    _validate_recommendation_request(
+    normalized_share_units = _validate_recommendation_request(
         config,
         effective_count,
         effective_duration,
@@ -170,6 +190,7 @@ def submit_edit(
         effective_mode,
         effective_memory,
         allow_queue,
+        effective_share_units,
     )
 
     gpu_advice = advice or build_gpu_advice(config)
@@ -184,6 +205,7 @@ def submit_edit(
         effective_mode,
         effective_preferred,
         effective_memory,
+        normalized_share_units,
     )
     result = edit_booking(
         store,
@@ -203,9 +225,11 @@ def submit_edit(
             expected_memory_mb=expected_memory_mb,
             update_expected_memory=update_expected_memory,
             gpu_memory_capacity_mb=gpu_advice.memory_capacities_mb,
+            share_units=share_units,
+            update_share_units=update_share_units,
         ),
     )
-    return BookingSubmission(result, gpu_advice, allocator)
+    return BookingSubmission(result, gpu_advice, allocator, config.max_shared_users)
 
 
 def build_agent_context(
@@ -232,6 +256,8 @@ def build_agent_context(
             "modes": [MODE_SHARED, MODE_EXCLUSIVE],
             "granularity_minutes": BOOKING_GRANULARITY_SECONDS // 60,
             "max_shared_reservations_per_gpu": config.max_shared_users,
+            "shared_capacity_units_per_gpu": config.max_shared_users,
+            "default_share_units_per_gpu": 1,
             "require_shared_memory": config.require_shared_memory,
             "shared_memory_reserve_mb": config.shared_memory_reserve_mb,
             "queue_search_hours": config.queue_search_hours,
@@ -248,11 +274,14 @@ def build_agent_context(
             },
         },
         "gpu_advice": gpu_advice.as_dict(),
-        "reservations": [_public_reservation(item, actor) for item in active],
+        "reservations": [
+            _public_reservation(item, actor, config.max_shared_users) for item in active
+        ],
         "capabilities": {
             "read_only_recommendation": True,
             "idempotent_booking": True,
             "idempotent_edit": True,
+            "weighted_shared_capacity": True,
             "idempotent_edit_history_limit": MAX_EDIT_OPERATIONS_PER_RESERVATION,
             "structured_cancel": True,
             "scheduled_jobs": True,
@@ -277,12 +306,13 @@ def recommend_booking(
     mode: str = MODE_SHARED,
     preferred_gpus: Optional[Sequence[int]] = None,
     expected_memory_mb: Optional[int] = None,
+    share_units: Optional[int] = None,
     allow_queue: bool = True,
     advice: Optional[GpuAdvice] = None,
 ) -> dict:
     generated_at = utc_now()
     effective_start = normalize_queue_start(start_at, generated_at) if allow_queue else start_at
-    _validate_recommendation_request(
+    effective_share_units = _validate_recommendation_request(
         config,
         count,
         duration_seconds,
@@ -290,6 +320,7 @@ def recommend_booking(
         mode,
         expected_memory_mb,
         allow_queue,
+        share_units,
     )
     ledger = store.load()
     validate_ledger_policy(ledger, config)
@@ -305,6 +336,7 @@ def recommend_booking(
         mode,
         preferred_gpus,
         expected_memory_mb,
+        effective_share_units,
     )
     duration = timedelta(seconds=duration_seconds)
     slot = find_earliest_slot(
@@ -321,6 +353,7 @@ def recommend_booking(
         allocator.scores,
         expected_memory_mb,
         gpu_advice.memory_capacities_mb,
+        effective_share_units,
     )
     nearest = slot
     if slot is None and not allow_queue:
@@ -338,6 +371,7 @@ def recommend_booking(
             allocator.scores,
             expected_memory_mb,
             gpu_advice.memory_capacities_mb,
+            effective_share_units,
         )
 
     response = {
@@ -351,6 +385,12 @@ def recommend_booking(
             "mode": mode,
             "preferred_gpus": list(preferred_gpus) if preferred_gpus is not None else None,
             "expected_memory_mb_per_gpu": expected_memory_mb,
+            "share_units_per_gpu": effective_share_units if mode == MODE_SHARED else None,
+            "share_fraction_per_gpu": (
+                share_text(effective_share_units, config.max_shared_users)
+                if mode == MODE_SHARED
+                else None
+            ),
             "allow_queue": allow_queue,
         },
         "available": slot is not None,
@@ -383,6 +423,8 @@ def recommend_booking(
     }
     if expected_memory_mb is not None:
         fake_reservation["expected_memory_mb"] = expected_memory_mb
+    if mode == MODE_SHARED:
+        fake_reservation["share_units"] = effective_share_units
     projected = shared_memory_headroom_for_reservation(
         [*list_active(ledger, scheduled_start), fake_reservation],
         fake_reservation,
@@ -411,7 +453,9 @@ def recommend_booking(
     if any(item["live_status"] == "busy" for item in gpu_details):
         response["warnings"].append("one or more selected GPUs are currently busy; live task end times are unknown")
     if mode == MODE_SHARED and expected_memory_mb is None:
-        response["warnings"].append("expected memory was omitted; equal-share memory assumptions were used where possible")
+        response["warnings"].append(
+            "expected memory was omitted; share-weighted memory assumptions were used where possible"
+        )
     if any(item["history_sample_count"] == 0 for item in gpu_details):
         response["warnings"].append("recent load history is incomplete; keep bk monitor running for better forecasts")
     return response
@@ -428,6 +472,7 @@ def _allocation_decision(
     mode: str,
     preferred_gpus: Optional[Sequence[int]],
     expected_memory_mb: Optional[int],
+    share_units: int,
 ) -> AllocatorDecision:
     if preferred_gpus is not None:
         return AllocatorDecision(list(advice.order), dict(advice.scores), "fixed-gpu")
@@ -441,6 +486,7 @@ def _allocation_decision(
         start_at=start_at,
         mode=mode,
         expected_memory_mb=expected_memory_mb,
+        share_units=share_units,
     )
 
 
@@ -479,8 +525,12 @@ def _recommendation_gpu_details(
     return details, _recommendation_confidence(details, snapshots)
 
 
-def public_reservation(reservation: dict, actor: Actor) -> dict:
-    return _public_reservation(reservation, actor)
+def public_reservation(
+    reservation: dict,
+    actor: Actor,
+    share_capacity_units: Optional[int] = None,
+) -> dict:
+    return _public_reservation(reservation, actor, share_capacity_units)
 
 
 def booking_result_payload(
@@ -514,7 +564,9 @@ def booking_result_payload(
         "schema_version": AGENT_SCHEMA_VERSION,
         "kind": "booking_result",
         "status": status,
-        "reservation": public_reservation(reservation, actor),
+        "reservation": public_reservation(
+            reservation, actor, submission.share_capacity_units
+        ),
         "allocation": {"selected": selected},
         "allocator": {
             "source": submission.allocator.source,
@@ -524,8 +576,17 @@ def booking_result_payload(
     }
 
 
-def _public_reservation(reservation: dict, actor: Actor) -> dict:
+def _public_reservation(
+    reservation: dict,
+    actor: Actor,
+    share_capacity_units: Optional[int] = None,
+) -> dict:
     job = reservation.get("job")
+    share_units = (
+        reservation_share_units(reservation, max(1, share_capacity_units or 1))
+        if reservation.get("mode") == MODE_SHARED
+        else None
+    )
     return {
         "id": reservation.get("id"),
         "short_id": str(reservation.get("id", ""))[:8],
@@ -538,6 +599,15 @@ def _public_reservation(reservation: dict, actor: Actor) -> dict:
         "end_at": reservation.get("end_at"),
         "status": reservation.get("status"),
         "expected_memory_mb_per_gpu": reservation.get("expected_memory_mb"),
+        "share_units_per_gpu": share_units,
+        "share_capacity_units_per_gpu": (
+            share_capacity_units if reservation.get("mode") == MODE_SHARED else None
+        ),
+        "share_fraction_per_gpu": (
+            share_text(share_units, share_capacity_units)
+            if share_units is not None and share_capacity_units is not None
+            else None
+        ),
         "job": (
             {
                 "status": job.get("status"),
@@ -560,7 +630,8 @@ def _validate_recommendation_request(
     mode: str,
     expected_memory_mb: Optional[int],
     allow_queue: bool,
-) -> None:
+    share_units: Optional[int],
+) -> int:
     if mode not in {MODE_SHARED, MODE_EXCLUSIVE}:
         raise BookingError(f"unsupported booking mode: {mode}")
     if count < 1 or count > config.gpu_count:
@@ -571,8 +642,18 @@ def _validate_recommendation_request(
         raise BookingError("expected GPU memory must be positive")
     if mode == MODE_SHARED and config.require_shared_memory and expected_memory_mb is None:
         raise BookingError("shared reservations must declare expected memory")
+    if mode == MODE_EXCLUSIVE:
+        if share_units is not None:
+            raise BookingError("share units apply only to shared reservations")
+        normalized_share_units = config.max_shared_users
+    else:
+        try:
+            normalized_share_units = normalize_share_units(share_units, config.max_shared_users)
+        except (TypeError, ValueError) as exc:
+            raise BookingError(str(exc)) from exc
     if not allow_queue and int(start_at.timestamp()) % BOOKING_GRANULARITY_SECONDS:
         raise BookingError("exact start time must align to a 5-minute boundary")
+    return normalized_share_units
 
 
 def _slot_dict(slot, duration: timedelta) -> Optional[dict]:

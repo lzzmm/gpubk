@@ -22,13 +22,13 @@ from bk.tui import (
     HELP_PAGES,
     MIXED_COLOR_PAIRS,
     NOW_CHAR,
-    SHARED_CHAR,
     SPLIT_CHAR,
     TuiState,
     WEAVE_CHARS,
     _build_add_preview,
     _capacity_text,
     _cell_for_gpu,
+    _clear_now_label_slot,
     _date_label,
     _decorate_timeline_cell,
     _default_timeline_view_start,
@@ -66,6 +66,7 @@ from bk.tui import (
     _theme_color_pairs,
     _toggle_focus,
     _visible_shared_reservations,
+    _visible_id_width,
     _weekday_label,
 )
 from bk.timeparse import parse_iso, utc_now
@@ -231,6 +232,12 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertTrue(past[2] & curses.A_DIM)
         self.assertFalse(future[2] & curses.A_DIM)
 
+    def test_now_label_clears_partial_neighboring_minute_digits(self):
+        cleaned, label_col = _clear_now_label_slot("15 30 35 40 45", 7)
+        rendered = cleaned[:label_col] + "NOW" + cleaned[label_col + 3 :]
+
+        self.assertEqual(rendered[label_col - 1 : label_col + 4], " NOW ")
+
     def test_timeline_can_pan_into_history_and_n_returns_to_now(self):
         state = TuiState()
         config = Config(data_dir=Path("/tmp/bk-tui-test"), gpu_count=2, ledger_retention_days=2)
@@ -290,6 +297,26 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertFalse(preview.valid)
         self.assertTrue(preview.blink)
         self.assertIn("shared capacity full", preview.reason)
+
+    def test_preview_checks_weighted_capacity_and_carries_share_metadata(self):
+        config = Config(
+            data_dir=Path("/tmp/bk-tui-test"),
+            gpu_count=1,
+            max_shared_users=4,
+        )
+        existing = reservation("one", os.getuid(), MODE_SHARED, [0], self.start, self.end)
+        existing["share_units"] = 2
+        state = self.state()
+        state.add_share_units = 2
+
+        valid = _build_add_preview(self.ledger([existing]), config, state, self.start)
+        state.add_share_units = 3
+        blocked = _build_add_preview(self.ledger([existing]), config, state, self.start)
+
+        self.assertTrue(valid.valid, valid.reason)
+        self.assertEqual((valid.share_units, valid.share_capacity), (2, 4))
+        self.assertFalse(blocked.valid)
+        self.assertIn("projected 5/4", blocked.reason)
 
     def test_preview_rejects_a_start_before_the_current_five_minute_interval(self):
         now = datetime(2030, 1, 1, 17, 2, tzinfo=timezone.utc)
@@ -726,7 +753,7 @@ class TuiAddPreviewTests(unittest.TestCase):
                 if item["id"] == created.reservation["id"]
             )
             self.assertFalse(state.editor_active)
-            self.assertEqual(state.message, f"updated {created.reservation['id'][:8]}")
+            self.assertEqual(state.message, f"updated {created.reservation['id'][:6]}")
             self.assertEqual(updated["mode"], MODE_EXCLUSIVE)
             self.assertEqual(updated["gpus"], [1])
             self.assertEqual(updated["start_at"], iso(self.start + timedelta(minutes=5)))
@@ -767,14 +794,14 @@ class TuiAddPreviewTests(unittest.TestCase):
             self.assertEqual(original["mode"], MODE_SHARED)
             self.assertEqual(original["gpus"], [0])
 
-    def test_capacity_text_reports_peak_shared_records(self):
+    def test_capacity_text_reports_this_reservations_share(self):
         active = [
             reservation("one", os.getuid(), MODE_SHARED, [0], self.start, self.end),
             reservation("two", os.getuid(), MODE_SHARED, [0], self.start, self.end),
             reservation("exclusive", os.getuid(), MODE_EXCLUSIVE, [1], self.start, self.end),
         ]
 
-        self.assertEqual(_capacity_text(active[0], active, 2), "2/2")
+        self.assertEqual(_capacity_text(active[0], active, 2), "1/2")
         self.assertEqual(_capacity_text(active[2], active, 2), "-")
 
     def test_two_shared_reservations_split_gpu_band_into_vertical_lanes(self):
@@ -813,7 +840,7 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertFalse(cells[0][2] & curses.A_BLINK)
         self.assertTrue(cells[2][2] & curses.A_BLINK)
 
-    def test_compact_row_marks_three_or_more_shared_reservations(self):
+    def test_compact_row_marks_selected_share_inside_the_woven_capacity(self):
         active = [
             reservation("a", os.getuid(), MODE_SHARED, [0], self.start, self.end),
             reservation("b", os.getuid() + 1, MODE_SHARED, [0], self.start, self.end),
@@ -829,7 +856,7 @@ class TuiAddPreviewTests(unittest.TestCase):
             "b",
         )
 
-        self.assertEqual(cell[0], SHARED_CHAR)
+        self.assertEqual(cell[0], WEAVE_CHARS[0])
         self.assertTrue(cell[2] & curses.A_BLINK)
 
     def test_compact_row_weaves_three_shared_reservations_with_equal_color_pairs(self):
@@ -865,10 +892,51 @@ class TuiAddPreviewTests(unittest.TestCase):
             MIXED_COLOR_PAIRS.clear()
             MIXED_COLOR_PAIRS.update(old_pairs)
 
-        self.assertEqual([cell[0] for cell in cells], [WEAVE_CHARS[0], WEAVE_CHARS[1], WEAVE_CHARS[0]])
+        self.assertEqual([cell[0] for cell in cells], [SPLIT_CHAR, SPLIT_CHAR, SPLIT_CHAR])
         self.assertTrue(cells[0][2] & curses.A_BLINK)
-        self.assertTrue(cells[1][2] & curses.A_BLINK)
-        self.assertFalse(cells[2][2] & curses.A_BLINK)
+        self.assertFalse(cells[1][2] & curses.A_BLINK)
+        self.assertTrue(cells[2][2] & curses.A_BLINK)
+
+    def test_weighted_shares_receive_proportional_subcells(self):
+        large = reservation("large", os.getuid(), MODE_SHARED, [0], self.start, self.end)
+        small = reservation("small", os.getuid() + 1, MODE_SHARED, [0], self.start, self.end)
+        large["share_units"] = 3
+        small["share_units"] = 1
+        active = [large, small]
+        color_map = _reservation_color_map(active)
+        pair_key = tuple(sorted((color_map["large"], color_map["small"])))
+        old_pairs = dict(MIXED_COLOR_PAIRS)
+        MIXED_COLOR_PAIRS[pair_key] = 99
+        try:
+            first = _cell_for_gpu(
+                0,
+                color_map,
+                active,
+                self.start,
+                self.start + timedelta(minutes=5),
+                "small",
+                col=0,
+                shared_limit=4,
+            )
+            second = _cell_for_gpu(
+                0,
+                color_map,
+                active,
+                self.start,
+                self.start + timedelta(minutes=5),
+                "small",
+                col=1,
+                shared_limit=4,
+            )
+        finally:
+            MIXED_COLOR_PAIRS.clear()
+            MIXED_COLOR_PAIRS.update(old_pairs)
+
+        self.assertEqual(first[:2], (SPLIT_CHAR, 99))
+        self.assertTrue(first[2] & curses.A_BLINK)
+        self.assertEqual(second[:2], (BAR_CHAR, color_map["large"]))
+        self.assertFalse(second[2] & curses.A_BLINK)
+        self.assertEqual(_capacity_text(large, active, 4), "3/4")
 
     def test_shared_weave_gives_each_reservation_equal_area_per_period(self):
         for count in (3, 4, 5, 6, 8):
@@ -980,7 +1048,14 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertIn("2 GPU [0,2]", add_text)
         self.assertIn("Tue 01-01 17:30->18:15", add_text)
         self.assertIn("45m", add_text)
-        self.assertIn("EDIT abcdef12 X", edit_text)
+        self.assertIn("EDIT abcdef X", edit_text)
+
+    def test_visible_ids_use_six_characters_until_a_collision_requires_more(self):
+        normal = [{"id": "abcdef111111"}, {"id": "123456222222"}]
+        collision = [{"id": "abcdef111111"}, {"id": "abcdef222222"}]
+
+        self.assertEqual(_visible_id_width(normal), 6)
+        self.assertEqual(_visible_id_width(collision), 7)
 
     def test_long_duration_shows_total_hours_and_day_breakdown(self):
         duration = timedelta(days=5, hours=4, minutes=20)
@@ -1015,6 +1090,24 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertEqual(idle.index("0/2"), shared.index("2/2"))
         self.assertEqual(idle.index("72%"), shared.index("72%"))
         self.assertEqual(idle.index("92.0G"), shared.index("92.0G"))
+
+    def test_gpu_label_marks_current_exclusive_without_moving_metrics(self):
+        gpu = GpuSnapshot(
+            index=2,
+            name="Sim Pro 6000",
+            memory_used_mb=4096,
+            memory_total_mb=98304,
+            utilization_percent=72,
+            source="simulation",
+        )
+
+        shared = _gpu_label(gpu, 32, peak_shared=2, shared_limit=4)
+        exclusive = _gpu_label(gpu, 32, shared_limit=4, exclusive=True)
+
+        self.assertIn("X", exclusive)
+        self.assertNotIn("0/4", exclusive)
+        self.assertEqual(shared.index("72%"), exclusive.index("72%"))
+        self.assertEqual(shared.index("92.0G"), exclusive.index("92.0G"))
 
     def test_gpu_label_shows_live_utilization_processes_and_violations(self):
         process = GpuProcessSnapshot(123, 1001, "alice", "python train.py")

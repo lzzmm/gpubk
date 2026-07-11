@@ -47,6 +47,7 @@ class BookingRequest:
     job_summary: Optional[str] = None
     expected_memory_mb: Optional[int] = None
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None
+    share_units: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,8 @@ class EditRequest:
     expected_memory_mb: Optional[int] = None
     update_expected_memory: bool = False
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None
+    share_units: Optional[int] = None
+    update_share_units: bool = False
 
 
 class BookingError(RuntimeError):

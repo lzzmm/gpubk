@@ -42,6 +42,7 @@ class SchedulerModeTests(unittest.TestCase):
         preferred_gpus=None,
         allow_queue=False,
         op_id=None,
+        share_units=None,
     ):
         return BookingRequest(
             actor=Actor(uid=uid, username=f"user{uid}"),
@@ -52,6 +53,7 @@ class SchedulerModeTests(unittest.TestCase):
             preferred_gpus=preferred_gpus,
             allow_queue=allow_queue,
             op_id=op_id,
+            share_units=share_units,
         )
 
     def test_shared_allows_configured_number_of_users(self):
@@ -121,6 +123,31 @@ class SchedulerModeTests(unittest.TestCase):
         self.assertFalse(retried.created)
         self.assertEqual(retried.reservation["id"], first.reservation["id"])
         self.assertEqual(len(self.store.load()["reservations"]), 1)
+
+    def test_operation_id_signature_includes_share_units(self):
+        config = replace(self.config, max_shared_users=4)
+        add_booking(
+            self.store,
+            config,
+            self.request(
+                1001,
+                MODE_SHARED,
+                op_id="agent-share-create",
+                share_units=1,
+            ),
+        )
+
+        with self.assertRaisesRegex(BookingError, "different write"):
+            add_booking(
+                self.store,
+                config,
+                self.request(
+                    1001,
+                    MODE_SHARED,
+                    op_id="agent-share-create",
+                    share_units=2,
+                ),
+            )
 
     def test_implicit_now_operation_id_remains_idempotent_across_a_slot_boundary(self):
         request_time = self.start + timedelta(minutes=1)
@@ -230,6 +257,98 @@ class SchedulerModeTests(unittest.TestCase):
 
         self.assertTrue(third.queued)
         self.assertEqual(parse_iso(third.reservation["start_at"]), self.start + timedelta(hours=1))
+
+    def test_weighted_share_leaves_only_the_remaining_capacity(self):
+        config = replace(self.config, max_shared_users=4)
+        first = add_booking(
+            self.store,
+            config,
+            self.request(1001, MODE_SHARED, allow_queue=True, share_units=3),
+        )
+        second = add_booking(
+            self.store,
+            config,
+            self.request(1002, MODE_SHARED, allow_queue=True),
+        )
+        third = add_booking(
+            self.store,
+            config,
+            self.request(1003, MODE_SHARED, allow_queue=True),
+        )
+
+        self.assertEqual(first.reservation["share_units"], 3)
+        self.assertFalse(second.queued)
+        self.assertEqual(second.reservation["share_units"], 1)
+        self.assertTrue(third.queued)
+        self.assertEqual(parse_iso(third.reservation["start_at"]), self.start + timedelta(hours=1))
+
+    def test_legacy_record_without_share_units_counts_as_one(self):
+        config = replace(self.config, max_shared_users=4)
+        legacy = add_booking(self.store, config, self.request(1001, MODE_SHARED)).reservation
+
+        def remove_new_field(ledger):
+            ledger["reservations"][0].pop("share_units")
+            return ledger, None, [], True
+
+        self.store.transaction(remove_new_field)
+        weighted = add_booking(
+            self.store,
+            config,
+            self.request(1002, MODE_SHARED, share_units=3),
+        )
+
+        self.assertTrue(weighted.created)
+        self.assertNotIn("share_units", next(item for item in self.store.load()["reservations"] if item["id"] == legacy["id"]))
+        with self.assertRaisesRegex(BookingError, "shared capacity full"):
+            add_booking(self.store, config, self.request(1003, MODE_SHARED))
+
+    def test_editing_share_units_rechecks_overlapping_capacity(self):
+        config = replace(self.config, max_shared_users=4)
+        mine = add_booking(self.store, config, self.request(1001, MODE_SHARED)).reservation
+        add_booking(
+            self.store,
+            config,
+            self.request(1002, MODE_SHARED, share_units=2),
+        )
+
+        with self.assertRaisesRegex(BookingError, "shared capacity full"):
+            edit_booking(
+                self.store,
+                config,
+                EditRequest(
+                    actor=Actor(1001, "user1001"),
+                    reservation_id=mine["id"],
+                    share_units=3,
+                    update_share_units=True,
+                ),
+            )
+
+        stored = next(item for item in self.store.load()["reservations"] if item["id"] == mine["id"])
+        self.assertEqual(stored["share_units"], 1)
+
+    def test_explicit_memory_is_not_multiplied_by_share_units(self):
+        config = replace(self.config, max_shared_users=4)
+        capacities = {0: 24 * 1024}
+        add_booking(
+            self.store,
+            config,
+            replace(
+                self.request(1001, MODE_SHARED, share_units=3),
+                expected_memory_mb=4 * 1024,
+                gpu_memory_capacity_mb=capacities,
+            ),
+        )
+        second = add_booking(
+            self.store,
+            config,
+            replace(
+                self.request(1002, MODE_SHARED),
+                expected_memory_mb=4 * 1024,
+                gpu_memory_capacity_mb=capacities,
+            ),
+        )
+
+        self.assertTrue(second.created)
 
     def test_third_shared_user_queues_after_shared_capacity_frees(self):
         add_booking(self.store, self.config, self.request(1001, MODE_SHARED, allow_queue=True))

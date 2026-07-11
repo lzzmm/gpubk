@@ -47,6 +47,8 @@ Shared mode is the default:
 ```bash
 bk 1 30m                         # one GPU for 30 minutes
 bk 2 1h30m --mem 12g            # 12 GiB expected VRAM per GPU
+bk 1 1h --share 1/2             # reserve half of the shared capacity
+bk 1 1h --share-with 1          # leave room for at most one minimum-share booking
 bk s 1 2h --gpu 3               # explicit shared mode on GPU 3
 bk x 2 4h                        # exclusive mode
 bk 1 1h --at +30m                # human-friendly relative time
@@ -72,8 +74,13 @@ Scheduling rules are intentionally small:
 - `--at` accepts `+30m`, `20:00`, `tomorrow 09:00`, or `07-13 20:00`.
   `--start` keeps exact ISO 8601 input for scripts and Agents. Either is exact;
   a conflict returns an error instead of silently moving the reservation.
-- Shared capacity is counted per overlapping reservation. Exclusive
-  reservations cannot overlap anything.
+- Each GPU has `max_shared_users` capacity units. A shared booking uses one unit
+  by default; `--share 3/4`, `--share 3`, and an exact percentage select a
+  larger portion. `--share-with 1` reserves all but one unit. Capacity is checked
+  independently in every overlapping 5-minute interval.
+- Share units control admission and inferred VRAM, not hardware-enforced SM
+  bandwidth. Use MIG/MPS or device controls when physical partitioning is required.
+- Exclusive reservations cannot overlap anything.
 - `--mem` is expected VRAM **per GPU**. Administrators can require it for all
   shared reservations.
 - Times shown to users are local. The ledger stores UTC.
@@ -97,8 +104,10 @@ bk slots 2 1h --mem 12g            # read-only placement alternatives
 bk slots x 1 30m --limit 3
 ```
 
-Timeline cells have fixed width: `··` is free, `MM` is yours, `XX` is
-exclusive, and `S1`-`S9` is the shared reservation count. Narrow terminals
+Timeline cells have fixed width: `··` is free; `M1`-`M9` is total shared
+capacity used in a slice that includes one of your bookings; `S1`-`S9` is total
+shared capacity used only by others; and `MX`/`XX` are exclusive bookings.
+Narrow terminals
 wrap the timeline at whole-hour boundaries without reducing the requested
 resolution.
 
@@ -132,6 +141,7 @@ Useful TUI keys:
 | `Shift` + adjustment | Use a larger step when the terminal reports it |
 | `1`-`9` | Pick a GPU count and jump to the nearest valid slot |
 | `s`, `x` | Switch between shared and exclusive in Add/Edit |
+| `u` | Set shared capacity as units, a fraction, or a percentage |
 | `f`, `g` | Find any suitable GPUs, or keep the selected GPUs fixed |
 | `n` | Return to the live `NOW` window |
 | `c` | Toggle the dark/light theme |
@@ -143,7 +153,8 @@ always validate the selected interval again inside the locked scheduler
 transaction. Reservation focus starts on the header, so no booking blinks until
 you press Down. For servers with up to ten GPUs, the `GPU` column keeps one
 fixed position per device and shows only the numbers used by that reservation;
-empty positions stay blank.
+empty positions stay blank. Reservation IDs use the shortest unique prefix from
+six characters upward, so the table, share details, and process links agree.
 
 ## Run a Command at Reservation Time
 
@@ -235,7 +246,7 @@ Agents should use the versioned JSON interface instead of parsing terminal text:
 ```bash
 bk agent context --compact
 bk agent recommend 2 1h30m --mem 12g --compact
-bk 2 1h30m --mem 12g --op-id run-20260712-001 --json
+bk 2 1h30m --mem 12g --share 1/2 --op-id run-20260712-001 --json
 bk agent edit 6e957ef1 --duration 2h --op-id edit-20260712-001 --compact
 bk agent cancel 6e957ef1 --compact
 ```
@@ -275,7 +286,7 @@ Put a root-owned `config.json` in that directory:
 ```json
 {
   "gpu_count": 8,
-  "max_shared_users": 2,
+  "max_shared_users": 4,
   "queue_search_hours": 168,
   "ledger_retention_days": 90,
   "usage_load_window_minutes": 120,
@@ -297,6 +308,10 @@ Put a root-owned `config.json` in that directory:
 sudo chown root:gpuusers /data2/shared/bk/config.json
 sudo chmod 0644 /data2/shared/bk/config.json
 ```
+
+`max_shared_users` is retained as the compatible configuration name; it now
+defines whole shared capacity units per GPU. Old reservations without a
+`share_units` field consume one unit.
 
 All users and user services must use the same `BK_DATA_DIR`. The first write
 binds scheduling and storage policy into the ledger; clients with conflicting
@@ -325,8 +340,8 @@ recovery, private job specs, MCP isolation, and administrator responsibilities.
 Booking and the TUI can run with simulated GPU count:
 
 ```bash
-BK_DATA_DIR=/tmp/gpubk-demo BK_GPU_COUNT=4 bk t
-BK_DATA_DIR=/tmp/gpubk-demo BK_GPU_COUNT=4 bk 1 30m
+BK_DATA_DIR=/tmp/gpubk-demo BK_GPU_COUNT=4 BK_MAX_SHARED_USERS=4 bk t
+BK_DATA_DIR=/tmp/gpubk-demo BK_GPU_COUNT=4 BK_MAX_SHARED_USERS=4 bk 1 30m --share 3/4
 ```
 
 The cards show unknown hardware metrics, but scheduling, shared capacity, the

@@ -182,6 +182,7 @@ class CliTests(unittest.TestCase):
             user_input = "\n".join(
                 [
                     "",       # shared
+                    "",       # default shared capacity
                     "many",   # invalid GPU count
                     "1",
                     "7m",     # invalid duration
@@ -208,7 +209,7 @@ class CliTests(unittest.TestCase):
 
     def test_guided_add_can_go_back_and_cancel_without_writing(self):
         with tempfile.TemporaryDirectory() as tmp:
-            user_input = "\n".join(["", "1", "back", "2", "cancel", ""])
+            user_input = "\n".join(["", "", "1", "back", "2", "cancel", ""])
 
             result = self.run_bk_with_input(["add"], Path(tmp), user_input)
 
@@ -339,7 +340,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("shared-capacity", result.stdout)
             self.assertIn("count=3", result.stdout)
-            self.assertIn("limit=2", result.stdout)
+            self.assertIn("units=3/2", result.stdout)
             self.assertIn("left", result.stdout)
             self.assertIn("right", result.stdout)
             self.assertIn("third", result.stdout)
@@ -487,6 +488,7 @@ class CliTests(unittest.TestCase):
             user_input = "\n".join(
                 [
                     "",      # keep mode
+                    "",      # keep share
                     "7m",    # invalid duration
                     "45m",
                     "hwo",   # invalid start
@@ -514,6 +516,70 @@ class CliTests(unittest.TestCase):
             )
             self.assertEqual(duration, timedelta(minutes=45))
 
+    def test_weighted_share_and_share_with_use_the_same_capacity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            env = {"BK_MAX_SHARED_USERS": "4"}
+
+            weighted = self.run_bk(
+                ["1", "30m", "--gpu", "0", "--share", "3/4", "-q"],
+                data_dir,
+                env,
+            )
+            remaining = self.run_bk(["1", "30m", "--gpu", "0", "-q"], data_dir, env)
+            queued = self.run_bk(["1", "30m", "--gpu", "0", "-q"], data_dir, env)
+
+            self.assertEqual(weighted.returncode, 0, weighted.stderr)
+            self.assertEqual(remaining.returncode, 0, remaining.stderr)
+            self.assertEqual(queued.returncode, 0, queued.stderr)
+            self.assertIn("share=3/4", weighted.stdout)
+            self.assertIn("share=1/4", remaining.stdout)
+            self.assertIn("queued:", queued.stdout)
+            ledger = json.loads((data_dir / "ledger.json").read_text(encoding="utf-8"))
+            self.assertEqual([item["share_units"] for item in ledger["reservations"]], [3, 1, 1])
+            self.assertEqual(ledger["reservations"][0]["start_at"], ledger["reservations"][1]["start_at"])
+            self.assertEqual(ledger["reservations"][0]["end_at"], ledger["reservations"][2]["start_at"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_bk(
+                ["1", "30m", "--share-with", "1", "--json"],
+                Path(tmp),
+                {"BK_MAX_SHARED_USERS": "4"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["reservation"]["share_units_per_gpu"], 3)
+            self.assertEqual(payload["reservation"]["share_fraction_per_gpu"], "3/4")
+
+    def test_direct_edit_can_change_shared_capacity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            env = {"BK_MAX_SHARED_USERS": "4"}
+            created = self.run_bk(
+                ["1", "30m", "--start", "2030-01-01T00:00:00Z"],
+                data_dir,
+                env,
+            )
+            edited = self.run_bk(["e", "1", "--share", "3/4"], data_dir, env)
+
+            self.assertEqual(created.returncode, 0, created.stderr)
+            self.assertEqual(edited.returncode, 0, edited.stderr)
+            self.assertIn("share=3/4", edited.stdout)
+            reservation = json.loads((data_dir / "ledger.json").read_text(encoding="utf-8"))["reservations"][0]
+            self.assertEqual(reservation["share_units"], 3)
+
+    def test_slots_preserves_share_in_copyable_booking_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_bk(
+                ["slots", "1", "30m", "--share-with", "1", "--limit", "1"],
+                Path(tmp),
+                {"BK_MAX_SHARED_USERS": "4"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("share 3/4", result.stdout)
+            self.assertIn("--share 3/4", result.stdout)
+
     def test_status_is_compact_and_timeline_is_a_separate_aligned_view(self):
         with tempfile.TemporaryDirectory() as tmp:
             status = self.run_bk(["status"], Path(tmp))
@@ -525,12 +591,47 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("Timeline |", status.stdout)
             self.assertEqual(timeline.returncode, 0, timeline.stderr)
             self.assertIn("5m/cell | 6 cells", timeline.stdout)
-            self.assertIn("Legend: ·· free, MM mine", timeline.stdout)
+            self.assertIn("M1-M9 total units, includes mine", timeline.stdout)
             minute_line = next(line for line in timeline.stdout.splitlines() if line.startswith("Min"))
             gpu_line = next(line for line in timeline.stdout.splitlines() if line.startswith("G0"))
             self.assertEqual(len(minute_line), len(gpu_line))
             self.assertEqual((len(minute_line[6:]) + 1) // 3, 6)
             self.assertEqual((len(gpu_line[6:]) + 1) // 3, 6)
+
+    def test_timeline_reports_total_shared_units_when_a_slice_includes_mine(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            env = {"BK_MAX_SHARED_USERS": "4"}
+            first = self.run_bk(
+                ["1", "30m", "--start", "2030-01-01T00:00:00Z", "--share", "3/4"],
+                data_dir,
+                env,
+            )
+            second = self.run_bk(
+                ["1", "30m", "--start", "2030-01-01T00:00:00Z", "--share", "1/4"],
+                data_dir,
+                env,
+            )
+            timeline = self.run_bk(
+                [
+                    "tl",
+                    "--from",
+                    "2030-01-01T00:00:00Z",
+                    "--window",
+                    "30m",
+                    "--step",
+                    "5m",
+                ],
+                data_dir,
+                env,
+            )
+
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(timeline.returncode, 0, timeline.stderr)
+            gpu_line = next(line for line in timeline.stdout.splitlines() if line.startswith("G0"))
+            self.assertIn("M4", gpu_line)
+            self.assertNotIn("M3", gpu_line)
 
     def test_status_ignores_system_gpu_contexts_when_deciding_busy_state(self):
         with tempfile.TemporaryDirectory() as tmp:

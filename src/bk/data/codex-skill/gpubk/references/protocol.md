@@ -6,9 +6,9 @@ All machine responses use `schema_version: "bk.agent.v1"`.
 
 ```bash
 bk agent context --compact
-bk agent recommend COUNT DURATION [--mode s|x] [--start ISO] [--gpu 0,1] [--mem 12g] --compact
-bk COUNT DURATION [--mem 12g] --op-id ID --json
-bk agent edit RESERVATION --duration 2h --op-id ID --compact
+bk agent recommend COUNT DURATION [--mode s|x] [--start ISO] [--gpu 0,1] [--mem 12g] [--share 1/2] --compact
+bk COUNT DURATION [--mem 12g] [--share 1/2] --op-id ID --json
+bk agent edit RESERVATION --duration 2h [--share 1/2] --op-id ID --compact
 bk agent cancel RESERVATION --compact
 bk l --json
 bk j --json
@@ -26,12 +26,15 @@ Recommendation fields:
 - Context GPU entries include model name, temperature, live status, physical VRAM, and recent load history.
 - `gpu_details`: live status, predicted recent load, reservation pressure, physical free VRAM, and projected reservation headroom.
 - `nearest_available`: suggestion only when an exact request is unavailable.
+- `share_units_per_gpu` and `share_fraction_per_gpu`: admission capacity requested on each GPU. Context policy supplies `shared_capacity_units_per_gpu`. Missing fields on legacy reservations mean one unit.
 - `warnings`: incomplete history, live-busy device, memory assumption, or allocator fallback.
 - Scheduled job objects may include `launch_guard_state=waiting`, `waiting_since`, and a
   privacy-safe `message`; exit status `3` from `bk worker --once` means due work is waiting for
   a safe live GPU state, not that the command ran.
 
 Create and edit return the same `kind=booking_result` shape through JSON CLI and MCP: `status`, a privacy-safe `reservation`, per-GPU `allocation.selected` explanations, allocator source/reason, and warnings. Status is `created`, `updated`, `queued`, or retry-safe `exists`.
+
+`share` accepts whole units, an exactly representable fraction, or a percentage. `share_with=N` reserves all but `N` minimum units. These values control scheduling admission and inferred VRAM, not hardware-enforced compute bandwidth. Explicit `expected_memory` remains the actual per-GPU estimate and is not multiplied by share units.
 
 ## MCP Tools
 

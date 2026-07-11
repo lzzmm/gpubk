@@ -19,7 +19,13 @@ class JobLaunchGuardTests(unittest.TestCase):
             shared_memory_reserve_mb=512,
         )
 
-    def reservation(self, uid=1001, mode=MODE_SHARED, expected_memory_mb=None):
+    def reservation(
+        self,
+        uid=1001,
+        mode=MODE_SHARED,
+        expected_memory_mb=None,
+        share_units=None,
+    ):
         item = {
             "id": f"booking-{uid}",
             "uid": uid,
@@ -32,6 +38,8 @@ class JobLaunchGuardTests(unittest.TestCase):
         }
         if expected_memory_mb is not None:
             item["expected_memory_mb"] = expected_memory_mb
+        if share_units is not None:
+            item["share_units"] = share_units
         return item
 
     def gpu(self, *, used=0, processes=(), source="nvml", utilization=0):
@@ -117,6 +125,26 @@ class JobLaunchGuardTests(unittest.TestCase):
 
         self.assertFalse(decision.ready)
         self.assertIn("telemetry is unavailable", decision.reason)
+
+    def test_omitted_memory_uses_weighted_share_at_launch_time(self):
+        config = Config(
+            data_dir=Path("unused"),
+            gpu_count=1,
+            max_shared_users=4,
+            shared_memory_reserve_mb=0,
+        )
+        target = self.reservation(share_units=3)
+
+        decision = assess_job_launch(
+            config,
+            target,
+            [self.gpu(used=7000)],
+            [target],
+            at=self.now,
+        )
+
+        self.assertFalse(decision.ready)
+        self.assertIn("18000MiB is required", decision.reason)
 
 
 if __name__ == "__main__":

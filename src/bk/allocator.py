@@ -14,6 +14,7 @@ from .advisor import GpuAdvice
 from .config import Config
 from .models import Actor
 from .scheduler import list_active
+from .sharing import reservation_share_units
 from .storage import LedgerStore
 from .timeparse import to_iso
 
@@ -44,6 +45,7 @@ def apply_external_allocator(
     start_at: datetime,
     mode: str,
     expected_memory_mb: Optional[int],
+    share_units: int = 1,
 ) -> AllocatorDecision:
     if not config.allocator_command:
         return AllocatorDecision(list(advice.order), dict(advice.scores), "builtin")
@@ -57,6 +59,7 @@ def apply_external_allocator(
         start_at=start_at,
         mode=mode,
         expected_memory_mb=expected_memory_mb,
+        share_units=share_units,
     )
     try:
         returncode, stdout, stderr = _run_allocator_process(
@@ -207,6 +210,7 @@ def _allocator_payload(
     start_at: datetime,
     mode: str,
     expected_memory_mb: Optional[int],
+    share_units: int,
 ) -> dict:
     reservations = list_active(store.load(), start_at)
     return {
@@ -220,10 +224,12 @@ def _allocator_payload(
             "start_at": to_iso(start_at),
             "mode": mode,
             "expected_memory_mb_per_gpu": expected_memory_mb,
+            "share_units_per_gpu": share_units if mode == "shared" else None,
         },
         "policy": {
             "gpu_count": config.gpu_count,
             "max_shared_reservations_per_gpu": config.max_shared_users,
+            "shared_capacity_units_per_gpu": config.max_shared_users,
             "shared_memory_reserve_mb": config.shared_memory_reserve_mb,
             "local_score_is_authoritative_for_safety": True,
             "allocator_weight": config.allocator_weight,
@@ -237,6 +243,11 @@ def _allocator_payload(
                 "start_at": item.get("start_at"),
                 "end_at": item.get("end_at"),
                 "expected_memory_mb_per_gpu": item.get("expected_memory_mb"),
+                "share_units_per_gpu": (
+                    reservation_share_units(item, config.max_shared_users)
+                    if item.get("mode") == "shared"
+                    else None
+                ),
             }
             for item in reservations
         ],

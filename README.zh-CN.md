@@ -46,6 +46,8 @@ bk --help
 ```bash
 bk 1 30m                         # 预约 1 张 GPU，持续 30 分钟
 bk 2 1h30m --mem 12g            # 每张卡预计使用 12 GiB 显存
+bk 1 1h --share 1/2             # 占用 shared 总容量的一半
+bk 1 1h --share-with 1          # 最多给另一条最小份额预约留空间
 bk s 1 2h --gpu 3               # 显式 shared，固定 GPU 3
 bk x 2 4h                        # exclusive 排他预约
 bk 1 1h --at +30m               # 30 分钟后，当地时间
@@ -70,7 +72,12 @@ bk doctor                         # 只读检查台账
   若必须延后才会显示 `queued:`。
 - `--at` 支持 `+30m`、`20:00`、`tomorrow 09:00` 和 `07-13 20:00`；
   `--start` 为脚本和 Agent 保留精确 ISO 8601。两者都不会在冲突时自动挪动。
-- shared 容量按重叠预约条数计算；exclusive 不能与任何预约重叠。
+- 每张 GPU 有 `max_shared_users` 个容量单位。shared 默认占 1 单位；
+  `--share 3/4`、`--share 3` 或可精确换算的百分比可以申请更大份额，
+  `--share-with 1` 表示保留除 1 单位以外的容量。每个重叠的 5 分钟片都会独立校验。
+- 份额用于预约准入和默认显存估算，不会自动把 GPU SM 算力硬切成 75/25；
+  需要物理隔离时仍应配置 MIG、MPS 或设备权限。
+- exclusive 不能与任何预约重叠。
 - `--mem` 表示**每张 GPU**预计使用的显存，管理员可将其设为 shared 必填项。
 - 用户看到的是本地时间，台账内部保存 UTC。
 
@@ -92,8 +99,9 @@ bk slots 2 1h --mem 12g            # 只读查找多个可预约方案
 bk slots x 1 30m --limit 3
 ```
 
-时间轴使用固定宽度单元：`··` 表示空闲，`MM` 表示自己的预约，`XX` 表示
-exclusive，`S1`-`S9` 表示 shared 预约条数。窄终端会按整小时分块换行，
+时间轴使用固定宽度单元：`··` 表示空闲；`M1`-`M9` 表示该时间片的 shared
+总占用，并且其中包含自己的预约；`S1`-`S9` 表示仅由他人占用的 shared 总容量；
+`MX`/`XX` 表示自己的/他人的 exclusive。窄终端会按整小时分块换行，
 不会偷偷降低指定粒度。
 
 `bk add` 和不带修改参数的 `bk edit ID` 都是可恢复的引导流程，支持上述自然时间；
@@ -124,6 +132,7 @@ bk t
 | `Shift` + 调节键 | 终端支持时使用更大的步长 |
 | `1`-`9` | 选择 GPU 数量并跳到最近合法时段 |
 | `s`、`x` | 在 Add/Edit 中切换 shared/exclusive |
+| `u` | 用单位、分数或百分比设置 shared 份额 |
 | `f`、`g` | 查找任意可用卡，或固定当前已选卡查找 |
 | `n` | 回到带 `NOW` 标记的实时窗口 |
 | `c` | 切换深色/浅色主题 |
@@ -134,6 +143,7 @@ bk t
 再次校验所选时段。预约焦点默认停在标题栏，按下方向键后才选中并闪烁某条预约。
 不超过 10 张 GPU 时，预约表的 `GPU` 列为每张卡保留固定位置，只在预约使用的
 位置显示对应数字，未使用位置留空。
+预约 ID 默认统一显示可区分的最短 6 位前缀；发生前缀碰撞时自动增加位数。
 
 ## 到点运行命令
 
@@ -254,7 +264,7 @@ export BK_DATA_DIR=/data2/shared/bk
 ```json
 {
   "gpu_count": 8,
-  "max_shared_users": 2,
+  "max_shared_users": 4,
   "queue_search_hours": 168,
   "ledger_retention_days": 90,
   "usage_load_window_minutes": 120,
@@ -276,6 +286,9 @@ export BK_DATA_DIR=/data2/shared/bk
 sudo chown root:gpuusers /data2/shared/bk/config.json
 sudo chmod 0644 /data2/shared/bk/config.json
 ```
+
+`max_shared_users` 为兼容旧配置保留，现表示每张 GPU 的 shared 容量单位数；
+旧预约没有 `share_units` 字段时按 1 单位读取。
 
 所有用户和用户服务必须使用同一个 `BK_DATA_DIR`。第一次写入会把调度与存储策略
 绑定到台账，配置冲突的客户端会直接拒绝操作。启用服务前运行部署预检：
@@ -301,8 +314,8 @@ BK_DATA_DIR=/data2/shared/bk bk doctor --probe --json --strict
 指定模拟卡数即可体验预约和 TUI：
 
 ```bash
-BK_DATA_DIR=/tmp/gpubk-demo BK_GPU_COUNT=4 bk t
-BK_DATA_DIR=/tmp/gpubk-demo BK_GPU_COUNT=4 bk 1 30m
+BK_DATA_DIR=/tmp/gpubk-demo BK_GPU_COUNT=4 BK_MAX_SHARED_USERS=4 bk t
+BK_DATA_DIR=/tmp/gpubk-demo BK_GPU_COUNT=4 BK_MAX_SHARED_USERS=4 bk 1 30m --share 3/4
 ```
 
 此时硬件指标显示为 unknown，但调度、shared 容量、时间轴、Add/Edit、日志和 Agent

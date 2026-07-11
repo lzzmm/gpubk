@@ -27,6 +27,14 @@ from .scheduler import (
     list_active,
     shared_memory_headroom_for_reservation,
 )
+from .sharing import (
+    inferred_share_memory_mb,
+    parse_share_units,
+    reservation_share_units,
+    share_example,
+    share_text,
+    share_units_for_peer_limit,
+)
 from .service import (
     AGENT_SCHEMA_VERSION,
     booking_result_payload,
@@ -130,7 +138,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if head in {"doctor", "dr"}:
             return _doctor_command(argv[1:], config, store)
         if head in {"list", "ls", "l"}:
-            return _list_command(argv[1:], store)
+            return _list_command(argv[1:], config, store)
         if head in {"-h", "--help", "help"}:
             _print_help()
             return 0
@@ -168,7 +176,7 @@ def _looks_like_auto_request(argv: List[str]) -> bool:
 def _interactive_shell(config: Config, store: LedgerStore) -> int:
     print("GPUbk booking")
     print(f"data: {config.data_dir}")
-    print(f"shared limit: {config.max_shared_users}")
+    print(f"shared capacity: {config.max_shared_users} units per GPU (default booking: 1 unit)")
     print("Type 'help' for commands. Type 'quit' to exit.")
     print()
     _print_status(config, store)
@@ -222,7 +230,7 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
         _slots_command(args[1:], config, store)
         return True
     if head in {"list", "ls", "l"}:
-        _list_command(args[1:], store)
+        _list_command(args[1:], config, store)
         return True
     if head in {"log", "logs", "lg"}:
         _log_command(config, store)
@@ -296,6 +304,7 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
     )
     parser.add_argument("--gpu", help="comma separated GPU indexes, for example 0,1")
     parser.add_argument("--mem", help="expected memory on each GPU, for example 12g or 4096m")
+    _add_share_arguments(parser, config)
     parser.add_argument("--op-id", help="idempotency key for agents and retry-safe scripts")
     parser.add_argument("--json", action="store_true", help="emit a stable machine-readable result")
     parser.add_argument("-v", "--verbose", action="store_true", help="show placement scores and load history")
@@ -304,6 +313,7 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
 
     preferred = _parse_gpu_list(args.gpu) if args.gpu else None
     expected_memory_mb = parse_memory_mb(args.mem) if args.mem else None
+    share_units = _share_units_from_args(args, config, mode)
     duration_seconds = parse_duration_seconds(args.duration)
     if args.at is not None:
         start_at = parse_friendly_start(args.at)
@@ -326,6 +336,7 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
         command_argv=command_argv,
         working_directory=os.getcwd() if command_argv is not None else None,
         expected_memory_mb=expected_memory_mb,
+        share_units=share_units,
     )
     result = submission.result
     advice = submission.advice
@@ -349,9 +360,16 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
     gpus = ",".join(str(item) for item in reservation["gpus"])
     print(
         f"{status}: {_short_id(reservation)} mode={reservation['mode']} "
+        f"{_reservation_share_label(reservation, config)}"
         f"gpu={gpus} {format_local_range(reservation['start_at'], reservation['end_at'])}"
     )
     if not args.quiet:
+        if args.share_with is not None:
+            print(
+                f"share: --share-with {args.share_with} reserved "
+                f"{share_text(share_units or 1, config.max_shared_users)} per GPU; "
+                "this is admission weight, not enforced compute bandwidth"
+            )
         _print_booking_advice(
             config,
             store,
@@ -390,6 +408,7 @@ def _slots_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     )
     parser.add_argument("--gpu", help="restrict the search to one exact GPU set, e.g. 0,1")
     parser.add_argument("--mem", help="expected VRAM on each GPU, e.g. 12g")
+    _add_share_arguments(parser, config)
     parser.add_argument("--limit", type=int, default=5, help="number of alternatives to show (default: 5)")
     args = parser.parse_args(argv)
 
@@ -404,6 +423,7 @@ def _slots_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     mode = MODE_EXCLUSIVE if mode_value in {"x", "exclusive"} else MODE_SHARED
     start = parse_friendly_start(args.start)
     expected_memory_mb = parse_memory_mb(args.mem) if args.mem else None
+    share_units = _share_units_from_args(args, config, mode)
     preferred = _parse_gpu_list(args.gpu) if args.gpu else None
     if preferred is not None:
         if len(preferred) != args.count:
@@ -443,6 +463,7 @@ def _slots_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             gpu_scores=advice.scores,
             expected_memory_mb=expected_memory_mb,
             gpu_memory_capacity_mb=advice.memory_capacities_mb,
+            share_units=share_units or 1,
         )
         if slot is None:
             continue
@@ -458,6 +479,7 @@ def _slots_command(argv: List[str], config: Config, store: LedgerStore) -> int:
 
     print(
         f"Earliest {mode} options | {args.count} GPU | {_duration_compact(duration_seconds)} "
+        f"{f'| share {share_text(share_units or 1, config.max_shared_users)} ' if mode == MODE_SHARED else ''}"
         f"| local time | read-only"
     )
     wide_slots = shutil.get_terminal_size(fallback=(100, 24)).columns >= 88
@@ -495,9 +517,14 @@ def _slots_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     first_gpu_text = ",".join(map(str, first_gpus))
     first_at = first_start.astimezone().strftime("%m-%d %H:%M")
     memory_arg = f" --mem {args.mem}" if args.mem else ""
+    share_arg = (
+        f" --share {share_text(share_units, config.max_shared_users)}"
+        if mode == MODE_SHARED and share_units is not None
+        else ""
+    )
     print(
         f"Book option 1: bk {mode_prefix}{args.count} {_duration_compact(duration_seconds)} "
-        f"--gpu {first_gpu_text} --at \"{first_at}\"{memory_arg}"
+        f"--gpu {first_gpu_text} --at \"{first_at}\"{memory_arg}{share_arg}"
     )
     return 0
 
@@ -639,6 +666,7 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     )
     recommend_parser.add_argument("--gpu", help="fixed comma-separated GPU indexes")
     recommend_parser.add_argument("--mem", help="expected memory per GPU, e.g. 12g")
+    _add_share_arguments(recommend_parser, config)
     recommend_parser.add_argument("--compact", action="store_true")
     edit_parser = subparsers.add_parser("edit", aliases=["e"], help="idempotently edit this UID's reservation")
     edit_parser.add_argument("reservation_id", help="reservation number or unique ID prefix")
@@ -652,6 +680,7 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     edit_parser.add_argument("--count", type=int, help="new GPU count with automatic selection")
     edit_parser.add_argument("--mode", choices=["s", "shared", "x", "exclusive"])
     edit_parser.add_argument("--mem", help="new expected memory per GPU; use - to clear")
+    _add_share_arguments(edit_parser, config)
     edit_parser.add_argument("--queue", action="store_true", help="allow moving to the next legal slot")
     edit_parser.add_argument("--compact", action="store_true")
     cancel_parser = subparsers.add_parser("cancel", aliases=["del"], help="cancel this UID's reservation")
@@ -676,6 +705,7 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
                 mode=mode,
                 preferred_gpus=_parse_gpu_list(args.gpu) if args.gpu else None,
                 expected_memory_mb=parse_memory_mb(args.mem) if args.mem else None,
+                share_units=_share_units_from_args(args, config, mode),
                 allow_queue=args.start is None,
             )
             compact = args.compact
@@ -683,7 +713,18 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         elif args.action in {"edit", "e"}:
             if not args.op_id:
                 raise BookingError("operation ID is required for retry-safe Agent edits")
-            if not any([args.duration, args.start, args.gpu, args.count, args.mode, args.mem]):
+            if not any(
+                [
+                    args.duration,
+                    args.start,
+                    args.gpu,
+                    args.count,
+                    args.mode,
+                    args.mem,
+                    args.share,
+                    args.share_with,
+                ]
+            ):
                 raise BookingError("edit requires at least one changed field")
             reservation_id = _resolve_own_retained_reservation_id(store, args.reservation_id, actor)
             edit_mode = None
@@ -691,6 +732,7 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
                 edit_mode = MODE_EXCLUSIVE
             elif args.mode in {"s", "shared"}:
                 edit_mode = MODE_SHARED
+            share_units = _share_units_from_args(args, config, edit_mode)
             expected_memory_mb = None
             if args.mem not in {None, "-"}:
                 expected_memory_mb = parse_memory_mb(args.mem)
@@ -706,6 +748,8 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
                 count=args.count,
                 expected_memory_mb=expected_memory_mb,
                 update_expected_memory=args.mem is not None,
+                share_units=share_units,
+                update_share_units=args.share is not None or args.share_with is not None,
                 allow_queue=args.queue,
                 operation_id=args.op_id,
             )
@@ -725,7 +769,9 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             payload = {
                 "schema_version": AGENT_SCHEMA_VERSION,
                 "kind": "cancellation_result",
-                "reservation": public_reservation(reservation, actor),
+                "reservation": public_reservation(
+                    reservation, actor, config.max_shared_users
+                ),
             }
             compact = args.compact
             exit_code = 0
@@ -819,13 +865,16 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
     start, allow_queue = values["start"]
     preferred = values["gpus"]
     expected_memory_mb = values["memory"]
+    share_units = values["share"]
     command_argv = values["command"]
 
     start_text = "current 5-minute interval, then earliest queueable slot" if allow_queue else format_local(start)
     gpu_text = "automatic" if preferred is None else ",".join(map(str, preferred))
-    memory_text = "equal-share estimate" if expected_memory_mb is None else _format_memory_mb(expected_memory_mb)
+    memory_text = "share-weighted estimate" if expected_memory_mb is None else _format_memory_mb(expected_memory_mb)
     print("Review")
     print(f"  mode={mode_raw} GPUs={count} ({gpu_text}) duration={_duration_compact(duration)}")
+    if mode_raw == MODE_SHARED:
+        print(f"  share={share_text(share_units, config.max_shared_users)} per GPU")
     print(f"  start={start_text}")
     print(f"  expected VRAM/GPU={memory_text}")
     if command_argv:
@@ -849,6 +898,7 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
         mode=mode_raw,
         preferred_gpus=preferred,
         expected_memory_mb=expected_memory_mb,
+        share_units=share_units if mode_raw == MODE_SHARED else None,
         allow_queue=allow_queue,
         command_argv=command_argv,
         working_directory=os.getcwd() if command_argv is not None else None,
@@ -870,6 +920,16 @@ def _guided_booking_fields(config: Config) -> Optional[dict]:
             "mode",
             lambda _values: "mode [s shared / x exclusive] (s): ",
             lambda raw, _values: _guided_mode(raw),
+        ),
+        (
+            "share",
+            lambda values: (
+                f"share per GPU [1-{config.max_shared_users}, {share_example(config.max_shared_users)}] "
+                f"(1/{config.max_shared_users}): "
+                if values["mode"] == MODE_SHARED
+                else "share [not used by exclusive] (Enter): "
+            ),
+            lambda raw, values: _guided_share(raw, values["mode"], config.max_shared_users),
         ),
         (
             "count",
@@ -909,11 +969,26 @@ def _guided_edit_fields(config: Config, reservation: dict) -> Optional[dict]:
     current_gpus = ",".join(map(str, reservation.get("gpus", [])))
     current_memory = reservation.get("expected_memory_mb")
     memory_text = _format_memory_mb(int(current_memory)) if current_memory is not None else "automatic"
+    current_share = reservation_share_units(reservation, config.max_shared_users)
     fields = [
         (
             "mode",
             lambda _values: f"mode [keep {reservation['mode']} | s shared | x exclusive] (keep): ",
             lambda raw, _values: None if not raw else _guided_mode(raw),
+        ),
+        (
+            "share",
+            lambda values: (
+                f"share/GPU [keep {current_share}/{config.max_shared_users} | "
+                f"{share_example(config.max_shared_users)}] (keep): "
+                if (values.get("mode") or reservation["mode"]) == MODE_SHARED
+                else "share [not used by exclusive] (keep): "
+            ),
+            lambda raw, values: _guided_edit_share(
+                raw,
+                values.get("mode") or reservation["mode"],
+                config.max_shared_users,
+            ),
         ),
         (
             "duration",
@@ -990,6 +1065,28 @@ def _guided_mode(raw: str) -> str:
     if value in {"x", MODE_EXCLUSIVE}:
         return MODE_EXCLUSIVE
     raise ValueError("use s/shared or x/exclusive")
+
+
+def _guided_share(raw: str, mode: str, capacity_units: int) -> Optional[int]:
+    if mode == MODE_EXCLUSIVE:
+        if raw:
+            raise ValueError("share applies only to shared reservations")
+        return None
+    if not raw:
+        return 1
+    return parse_share_units(raw, capacity_units)
+
+
+def _guided_edit_share(
+    raw: str, mode: str, capacity_units: int
+) -> tuple[Optional[int], bool]:
+    if not raw:
+        return None, False
+    if mode == MODE_EXCLUSIVE:
+        raise ValueError("share applies only to shared reservations")
+    if raw.lower() in {"default", "auto", "-"}:
+        return 1, True
+    return parse_share_units(raw, capacity_units), True
 
 
 def _guided_gpu_count(raw: str, gpu_count: int) -> int:
@@ -1142,19 +1239,34 @@ def _edit_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     parser.add_argument("--count", type=int)
     parser.add_argument("--mode", choices=["s", MODE_SHARED, "x", MODE_EXCLUSIVE])
     parser.add_argument("--mem", help="expected memory per GPU; use - to clear")
+    _add_share_arguments(parser, config)
     parser.add_argument("--queue", action="store_true", help="allow moving to the next available slot")
     args = parser.parse_args(argv)
 
     actor = _current_actor()
     token = args.reservation_id or _prompt_reservation_token(store, actor, "edit")
     reservation_id = _resolve_own_reservation_id(store, token, actor)
-    if not any([args.duration, args.start, args.at, args.gpu, args.count, args.mode, args.mem, args.queue]):
+    if not any(
+        [
+            args.duration,
+            args.start,
+            args.at,
+            args.gpu,
+            args.count,
+            args.mode,
+            args.mem,
+            args.share,
+            args.share_with,
+            args.queue,
+        ]
+    ):
         return _edit_interactive(config, store, reservation_id, actor)
 
     preferred = _parse_gpu_list(args.gpu) if args.gpu else None
     advice = build_gpu_advice(config)
     expected_memory_mb = None if args.mem == "-" else (parse_memory_mb(args.mem) if args.mem else None)
     edit_mode = MODE_EXCLUSIVE if args.mode == "x" else (MODE_SHARED if args.mode == "s" else args.mode)
+    share_units = _share_units_from_args(args, config, edit_mode)
     start_at = parse_friendly_start(args.at) if args.at else (parse_start(args.start) if args.start else None)
     result = edit_booking(
         store,
@@ -1173,9 +1285,11 @@ def _edit_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             expected_memory_mb=expected_memory_mb,
             update_expected_memory=args.mem is not None,
             gpu_memory_capacity_mb=advice.memory_capacities_mb,
+            share_units=share_units,
+            update_share_units=args.share is not None or args.share_with is not None,
         ),
     )
-    _print_edit_result(result.reservation, result)
+    _print_edit_result(config, result.reservation, result)
     return 0
 
 
@@ -1201,6 +1315,7 @@ def _edit_interactive(config: Config, store: LedgerStore, reservation_id: str, a
     preferred = values["gpus"]
     count = values["count"]
     expected_memory_mb, update_expected_memory = values["memory"]
+    share_units, update_share_units = values["share"]
     allow_queue = values["queue"]
     changes = []
     if mode is not None:
@@ -1216,6 +1331,8 @@ def _edit_interactive(config: Config, store: LedgerStore, reservation_id: str, a
     if update_expected_memory:
         memory_text = "automatic estimate" if expected_memory_mb is None else _format_memory_mb(expected_memory_mb)
         changes.append(f"expected VRAM/GPU={memory_text}")
+    if update_share_units:
+        changes.append(f"share={share_text(share_units, config.max_shared_users)} per GPU")
     if allow_queue:
         changes.append("queue on conflict=yes")
     if not changes:
@@ -1252,16 +1369,19 @@ def _edit_interactive(config: Config, store: LedgerStore, reservation_id: str, a
             expected_memory_mb=expected_memory_mb,
             update_expected_memory=update_expected_memory,
             gpu_memory_capacity_mb=advice.memory_capacities_mb,
+            share_units=share_units,
+            update_share_units=update_share_units,
         ),
     )
-    _print_edit_result(result.reservation, result)
+    _print_edit_result(config, result.reservation, result)
     return 0
 
 
-def _print_edit_result(reservation: dict, result) -> None:
+def _print_edit_result(config: Config, reservation: dict, result) -> None:
     status = "queued" if result.queued else "updated"
     print(
         f"{status}: {_short_id(reservation)} mode={reservation['mode']} "
+        f"{_reservation_share_label(reservation, config)}"
         f"gpu={','.join(map(str, reservation.get('gpus', [])))} "
         f"{format_local_range(reservation['start_at'], reservation['end_at'])}"
     )
@@ -1283,12 +1403,14 @@ def _log_command(config: Config, store: LedgerStore) -> int:
                 time_range = f" {format_local_range(item['start_at'], item['end_at'])}"
             print(
                 f"{when} {item['action']} {item['result']} "
-                f"{str(item.get('reservation_id', ''))[:8]} mode={item.get('mode')} gpu={','.join(map(str, item.get('gpus', [])))}{time_range}"
+                f"{str(item.get('reservation_id', ''))[:8]} mode={item.get('mode')} "
+                f"share={item.get('share_units', '-') or '-'} "
+                f"gpu={','.join(map(str, item.get('gpus', [])))}{time_range}"
             )
     return 0
 
 
-def _list_command(argv: List[str], store: LedgerStore) -> int:
+def _list_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     parser = argparse.ArgumentParser(prog="bk list")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
@@ -1300,7 +1422,10 @@ def _list_command(argv: List[str], store: LedgerStore) -> int:
                 {
                     "schema_version": AGENT_SCHEMA_VERSION,
                     "kind": "reservations",
-                    "reservations": [public_reservation(item, actor) for item in active],
+                    "reservations": [
+                        public_reservation(item, actor, config.max_shared_users)
+                        for item in active
+                    ],
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -1319,6 +1444,7 @@ def _list_command(argv: List[str], store: LedgerStore) -> int:
         print(
             f"{index:>2} {_short_id(reservation)} {reservation['mode']} uid={reservation['uid']} "
             f"user={reservation['username']} gpu={gpus} "
+            f"{_reservation_share_label(reservation, config)}"
             f"job={reservation.get('job', {}).get('status', '-')} "
             f"dur={_duration_detail(duration_seconds)} "
             f"{format_local_range(reservation['start_at'], reservation['end_at'])}"
@@ -1412,7 +1538,8 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         if issue["type"] == "shared-capacity":
             print(
                 "shared-capacity "
-                f"gpu={issue['gpu']} count={issue['count']} limit={issue['limit']} "
+                f"gpu={issue['gpu']} units={issue.get('used_units', issue['count'])}/{issue['limit']} "
+                f"count={issue['count']} "
                 f"{format_local_range(issue['start_at'], issue['end_at'])} "
                 f"ids={','.join(str(item)[:8] for item in issue['reservation_ids'])}"
             )
@@ -1422,6 +1549,11 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
                 f"gpu={issue['gpu']} "
                 f"{str(issue['left_id'])[:8]}[{format_local_range(issue['left_start_at'], issue['left_end_at'])}] "
                 f"overlaps {str(issue['right_id'])[:8]}[{format_local_range(issue['right_start_at'], issue['right_end_at'])}]"
+            )
+        elif issue["type"] == "invalid-share-units":
+            print(
+                f"invalid-share-units id={str(issue['reservation_id'])[:8]} "
+                f"value={issue.get('share_units')!r} {issue.get('message', '')}"
             )
     return 0 if not args.strict or strict_ok else 2
 
@@ -1463,6 +1595,49 @@ def _parse_gpu_list(value: str) -> List[int]:
     if not gpus:
         raise ValueError("--gpu must contain at least one GPU index")
     return gpus
+
+
+def _add_share_arguments(parser: argparse.ArgumentParser, config: Config) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--share",
+        metavar="PORTION",
+        help=(
+            f"shared capacity per GPU: units 1-{config.max_shared_users}, "
+            f"a fraction such as {share_example(config.max_shared_users)}, or an exact percentage"
+        ),
+    )
+    group.add_argument(
+        "--share-with",
+        type=int,
+        metavar="PEERS",
+        help="reserve enough capacity to leave room for at most this many minimum-share bookings",
+    )
+
+
+def _share_units_from_args(
+    args: argparse.Namespace,
+    config: Config,
+    mode: Optional[str],
+) -> Optional[int]:
+    raw_share = getattr(args, "share", None)
+    peer_count = getattr(args, "share_with", None)
+    if raw_share is None and peer_count is None:
+        return None
+    if mode in {"x", MODE_EXCLUSIVE}:
+        raise ValueError("--share and --share-with apply only to shared reservations")
+    if raw_share is not None:
+        if str(raw_share).strip().lower() in {"default", "auto", "-"}:
+            return 1
+        return parse_share_units(raw_share, config.max_shared_users)
+    return share_units_for_peer_limit(peer_count, config.max_shared_users)
+
+
+def _reservation_share_label(reservation: dict, config: Config) -> str:
+    if reservation.get("mode") != MODE_SHARED:
+        return ""
+    units = reservation_share_units(reservation, config.max_shared_users)
+    return f"share={share_text(units, config.max_shared_users)} "
 
 
 def _split_job_command(argv: List[str]) -> tuple[List[str], Optional[List[str]]]:
@@ -1517,7 +1692,7 @@ def _print_booking_advice(
     capacities = advice.memory_capacities_mb
     if not capacities:
         if reservation.get("mode") == MODE_SHARED and expected_memory_mb is None:
-            print("note: GPU memory telemetry unavailable; shared memory admission used record limit only")
+            print("note: GPU memory telemetry unavailable; shared admission used capacity units only")
         return
 
     snapshots = {item.index: item for item in advice.snapshots}
@@ -1542,8 +1717,13 @@ def _print_booking_advice(
     if memory_parts:
         print("VRAM: " + "; ".join(memory_parts))
     if reservation.get("mode") == MODE_SHARED and expected_memory_mb is None:
+        units = reservation_share_units(reservation, config.max_shared_users)
         assumptions = [
-            max(1, (capacities[gpu] - config.shared_memory_reserve_mb) // config.max_shared_users)
+            inferred_share_memory_mb(
+                max(0, capacities[gpu] - config.shared_memory_reserve_mb),
+                config.max_shared_users,
+                units,
+            )
             for gpu in selected
             if gpu in capacities
         ]
@@ -1551,7 +1731,7 @@ def _print_booking_advice(
             print(
                 f"assumption: --mem omitted; budgeted this reservation at "
                 f"{_format_memory_mb(min(assumptions))}/GPU "
-                f"(1/{config.max_shared_users} of usable VRAM)"
+                f"({share_text(units, config.max_shared_users)} of usable VRAM)"
             )
 
 
@@ -1662,6 +1842,8 @@ BOOK
   bk 2 1h30m                     earliest shared slot
   bk x 1 30m                     earliest exclusive slot
   bk 1 1h --gpu 3 --mem 12g      choose GPU and expected VRAM
+  bk 1 1h --share 1/2            reserve half of shared capacity
+  bk 1 1h --share-with 1         leave one minimum-share place
   bk 1 1h --at +30m              exact friendly local time
   bk 1 1h -- command args...     book and schedule a command
   bk a                            guided booking with input recovery
@@ -1701,6 +1883,8 @@ TIME AND POLICY
   No time option: use the active slice, then queue to the earliest slot.
   Explicit --at/--start is exact. For edits, --queue allows a move.
   Shared is the default; s/shared and x/exclusive are accepted aliases.
+  Share units control admission and inferred VRAM.
+  They do not enforce GPU compute bandwidth.
 
 Run `bk COMMAND --help` for more options.
 Plain `bk` opens the prompt; `bk t` opens the full-screen TUI.
@@ -1716,6 +1900,7 @@ def _print_shell_help() -> None:
   tl | timeline [2h]        aligned timeline; --from/--window/--step/--gpu
   slots 2 1h               show read-only earliest booking alternatives
   1 4h [--gpu 0]            shared booking, default mode
+  1 4h --share 3/4          weighted shared capacity (when server capacity is 4)
   s 1 4h [--gpu 0]          shared booking
   x 1 4h [--gpu 0]          exclusive booking
   a | add                   guided booking prompts
@@ -1873,7 +2058,12 @@ def _print_status(
         if any(item.get("mode") == MODE_EXCLUSIVE for item in overlapping_now):
             share = "X"
         else:
-            share = f"{sum(1 for item in overlapping_now if item.get('mode') == MODE_SHARED)}/{config.max_shared_users}"
+            used_units = sum(
+                reservation_share_units(item, config.max_shared_users)
+                for item in overlapping_now
+                if item.get("mode") == MODE_SHARED
+            )
+            share = share_text(used_units, config.max_shared_users)
         x_free = _compact_local_time(_next_exclusive_free(active, gpu.index, now), now)
         if wide_status:
             print(
@@ -1904,6 +2094,7 @@ def _print_status(
             if wide_status:
                 print(
                     f"  {index:>2} {_short_id(reservation)} {reservation['mode']:<9} "
+                    f"{_reservation_share_label(reservation, config)}"
                     f"GPU={gpus:<7} {reservation['username']} "
                     f"job={reservation.get('job', {}).get('status', '-'):<10} "
                     f"{format_local_range(reservation['start_at'], reservation['end_at'])}"
@@ -1911,6 +2102,7 @@ def _print_status(
             else:
                 print(
                     f"  {index:>2} {_short_id(reservation)} {reservation['mode']:<9} "
+                    f"{_reservation_share_label(reservation, config)}"
                     f"G={_clip_text(gpus, 8):<8} {_compact_local_range(reservation['start_at'], reservation['end_at'])}"
                 )
     if verbose and active:
@@ -1920,6 +2112,7 @@ def _print_status(
             for reservation in others:
                 print(
                     f"  {_short_id(reservation)} {reservation['mode']:<9} "
+                    f"{_reservation_share_label(reservation, config)}"
                     f"GPU={','.join(map(str, reservation.get('gpus', []))):<7} "
                     f"{reservation.get('username', '?')} "
                     f"{format_local_range(reservation['start_at'], reservation['end_at'])}"
@@ -1978,15 +2171,32 @@ def _print_timeline(
                 ]
                 if not overlapping:
                     cells.append("··")
-                elif any(int(item.get("uid")) == actor.uid for item in overlapping):
-                    cells.append("MM")
-                elif any(item.get("mode") == MODE_EXCLUSIVE for item in overlapping):
-                    cells.append("XX")
                 else:
-                    records = [item for item in overlapping if item.get("mode") == MODE_SHARED]
-                    cells.append(f"S{min(len(records), 9)}")
+                    exclusive = [item for item in overlapping if item.get("mode") == MODE_EXCLUSIVE]
+                    if exclusive:
+                        cells.append(
+                            "MX"
+                            if any(int(item.get("uid", -1)) == actor.uid for item in exclusive)
+                            else "XX"
+                        )
+                        continue
+                    shared = [item for item in overlapping if item.get("mode") == MODE_SHARED]
+                    mine_units = sum(
+                        reservation_share_units(item, config.max_shared_users)
+                        for item in shared
+                        if int(item.get("uid", -1)) == actor.uid
+                    )
+                    used_units = sum(
+                        reservation_share_units(item, config.max_shared_users)
+                        for item in shared
+                    )
+                    prefix = "M" if mine_units else "S"
+                    cells.append(
+                        f"{prefix}{used_units}" if used_units < 10 else f"{prefix}+"
+                    )
             print(_timeline_cells(f"G{gpu}", cells))
-    print("Legend: ·· free, MM mine, XX exclusive, S1-S9 shared reservation count")
+    print("Legend: ·· free | M1-M9 total units, includes mine")
+    print("        S1-S9 total units, others only | MX/XX exclusive")
     print("Control: --from 20:00 --window 8h --step 15m | --step auto")
     print()
 

@@ -48,6 +48,17 @@ class McpBackendTests(unittest.TestCase):
         self.assertEqual(first["reservation"]["id"], second["reservation"]["id"])
         self.assertEqual(len(self.store.load()["reservations"]), 1)
 
+    def test_weighted_share_is_available_to_mcp_clients(self):
+        first = self.backend.book(1, "30m", "mcp-weighted-1", gpus=[0], share="2")
+        second = self.backend.book(1, "30m", "mcp-weighted-2", gpus=[0])
+
+        self.assertEqual(first["reservation"]["share_units_per_gpu"], 2)
+        self.assertEqual(first["reservation"]["share_fraction_per_gpu"], "2/2")
+        self.assertEqual(second["status"], "queued")
+        self.assertNotEqual(
+            first["reservation"]["start_at"], second["reservation"]["start_at"]
+        )
+
     def test_edit_requires_operation_id_and_retries_are_idempotent(self):
         created = self.backend.book(
             1,

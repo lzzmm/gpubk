@@ -11,6 +11,7 @@ from .fileio import open_existing_regular
 from .identity import current_actor
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError
 from .scheduler import cancel_booking, list_active
+from .sharing import parse_share_units, share_units_for_peer_limit
 from .service import (
     booking_result_payload,
     build_agent_context,
@@ -53,6 +54,8 @@ class BkMcpBackend:
         start: Optional[str] = None,
         gpus: Optional[List[int]] = None,
         expected_memory: Optional[str] = None,
+        share: Optional[str] = None,
+        share_with: Optional[int] = None,
     ) -> dict:
         normalized_mode = _normalize_mode(mode)
         return recommend_booking(
@@ -65,6 +68,9 @@ class BkMcpBackend:
             mode=normalized_mode,
             preferred_gpus=gpus,
             expected_memory_mb=parse_memory_mb(expected_memory) if expected_memory else None,
+            share_units=_mcp_share_units(
+                self.config, normalized_mode, share, share_with
+            ),
             allow_queue=start is None,
         )
 
@@ -79,6 +85,8 @@ class BkMcpBackend:
         expected_memory: Optional[str] = None,
         command: Optional[List[str]] = None,
         working_directory: Optional[str] = None,
+        share: Optional[str] = None,
+        share_with: Optional[int] = None,
     ) -> dict:
         if not operation_id:
             raise BookingError("operation_id is required for retry-safe MCP writes")
@@ -93,6 +101,9 @@ class BkMcpBackend:
             mode=normalized_mode,
             preferred_gpus=gpus,
             expected_memory_mb=parse_memory_mb(expected_memory) if expected_memory else None,
+            share_units=_mcp_share_units(
+                self.config, normalized_mode, share, share_with
+            ),
             allow_queue=start is None,
             operation_id=operation_id,
             command_argv=command,
@@ -109,7 +120,10 @@ class BkMcpBackend:
         return {
             "schema_version": "bk.agent.v1",
             "kind": "reservations",
-            "reservations": [public_reservation(item, self.actor) for item in active],
+            "reservations": [
+                public_reservation(item, self.actor, self.config.max_shared_users)
+                for item in active
+            ],
         }
 
     def usage(
@@ -162,10 +176,24 @@ class BkMcpBackend:
         count: Optional[int] = None,
         expected_memory: Optional[str] = None,
         allow_queue: bool = False,
+        share: Optional[str] = None,
+        share_with: Optional[int] = None,
     ) -> dict:
         if not operation_id:
             raise BookingError("operation_id is required for retry-safe MCP writes")
-        if all(value is None for value in (duration, mode, start, gpus, count, expected_memory)):
+        if all(
+            value is None
+            for value in (
+                duration,
+                mode,
+                start,
+                gpus,
+                count,
+                expected_memory,
+                share,
+                share_with,
+            )
+        ):
             raise BookingError("edit requires at least one changed field")
         reservation = self._resolve_own_reservation(reservation_id)
         normalized_mode = _normalize_mode(mode) if mode is not None else None
@@ -173,6 +201,9 @@ class BkMcpBackend:
         memory_mb = None
         if expected_memory not in {None, "-"}:
             memory_mb = parse_memory_mb(expected_memory)
+        share_units = _mcp_share_units(
+            self.config, normalized_mode, share, share_with
+        )
         submission = submit_edit(
             self.config,
             self.store,
@@ -185,6 +216,8 @@ class BkMcpBackend:
             count=count,
             expected_memory_mb=memory_mb,
             update_expected_memory=update_memory,
+            share_units=share_units,
+            update_share_units=share is not None or share_with is not None,
             allow_queue=allow_queue,
             operation_id=operation_id,
         )
@@ -198,7 +231,9 @@ class BkMcpBackend:
         return {
             "schema_version": "bk.agent.v1",
             "kind": "cancellation_result",
-            "reservation": public_reservation(cancelled, self.actor),
+            "reservation": public_reservation(
+                cancelled, self.actor, self.config.max_shared_users
+            ),
         }
 
     def read_job_log(self, reservation_id: str, max_chars: int = 32000) -> dict:
@@ -294,9 +329,20 @@ def create_mcp_server(backend: Optional[BkMcpBackend] = None):
         start: Optional[str] = None,
         gpus: Optional[List[int]] = None,
         expected_memory: Optional[str] = None,
+        share: Optional[str] = None,
+        share_with: Optional[int] = None,
     ) -> dict[str, object]:
         """Read-only recommendation. Omit start to allow earliest-slot queueing; explicit start is exact."""
-        return api.recommend(count, duration, mode, start, gpus, expected_memory)
+        return api.recommend(
+            count=count,
+            duration=duration,
+            mode=mode,
+            start=start,
+            gpus=gpus,
+            expected_memory=expected_memory,
+            share=share,
+            share_with=share_with,
+        )
 
     @mcp.tool(annotations=idempotent_write, structured_output=True)
     def create_gpu_booking(
@@ -309,18 +355,22 @@ def create_mcp_server(backend: Optional[BkMcpBackend] = None):
         expected_memory: Optional[str] = None,
         command: Optional[List[str]] = None,
         working_directory: Optional[str] = None,
+        share: Optional[str] = None,
+        share_with: Optional[int] = None,
     ) -> dict[str, object]:
         """Create an idempotent booking as this MCP process UID; optionally attach an argv command."""
         return api.book(
-            count,
-            duration,
-            operation_id,
-            mode,
-            start,
-            gpus,
-            expected_memory,
-            command,
-            working_directory,
+            count=count,
+            duration=duration,
+            operation_id=operation_id,
+            mode=mode,
+            start=start,
+            gpus=gpus,
+            expected_memory=expected_memory,
+            command=command,
+            working_directory=working_directory,
+            share=share,
+            share_with=share_with,
         )
 
     @mcp.tool(annotations=read_only, structured_output=True)
@@ -349,18 +399,22 @@ def create_mcp_server(backend: Optional[BkMcpBackend] = None):
         count: Optional[int] = None,
         expected_memory: Optional[str] = None,
         allow_queue: bool = False,
+        share: Optional[str] = None,
+        share_with: Optional[int] = None,
     ) -> dict[str, object]:
         """Idempotently edit this UID's booking; exact starts never move unless allow_queue is true."""
         return api.edit(
-            reservation_id,
-            operation_id,
-            duration,
-            mode,
-            start,
-            gpus,
-            count,
-            expected_memory,
-            allow_queue,
+            reservation_id=reservation_id,
+            operation_id=operation_id,
+            duration=duration,
+            mode=mode,
+            start=start,
+            gpus=gpus,
+            count=count,
+            expected_memory=expected_memory,
+            allow_queue=allow_queue,
+            share=share,
+            share_with=share_with,
         )
 
     @mcp.tool(annotations=destructive_write, structured_output=True)
@@ -399,6 +453,28 @@ def _normalize_mode(value: str) -> str:
     if normalized in {"x", MODE_EXCLUSIVE}:
         return MODE_EXCLUSIVE
     raise BookingError("mode must be s/shared or x/exclusive")
+
+
+def _mcp_share_units(
+    config: Config,
+    mode: Optional[str],
+    share: Optional[str],
+    share_with: Optional[int],
+) -> Optional[int]:
+    if share is not None and share_with is not None:
+        raise BookingError("share and share_with are mutually exclusive")
+    if share is None and share_with is None:
+        return None
+    if mode == MODE_EXCLUSIVE:
+        raise BookingError("share applies only to shared reservations")
+    try:
+        if share is not None:
+            if share.strip().lower() in {"default", "auto", "-"}:
+                return 1
+            return parse_share_units(share, config.max_shared_users)
+        return share_units_for_peer_limit(int(share_with), config.max_shared_users)
+    except (TypeError, ValueError) as exc:
+        raise BookingError(str(exc)) from exc
 
 
 def _resolve_token(reservations: List[dict], token: str) -> dict:

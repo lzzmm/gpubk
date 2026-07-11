@@ -28,6 +28,7 @@ from .models import (
 )
 from .policy import BOOKING_GRANULARITY_SECONDS, bind_ledger_policy, validate_ledger_policy
 from .schedule_index import ReservationIndex, ReservationSpan
+from .sharing import inferred_share_memory_mb, normalize_share_units, reservation_share_units
 from .storage import LedgerStore
 from .timeparse import normalize_queue_start, parse_iso, to_iso, utc_now
 
@@ -46,6 +47,7 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
     job_metadata = _normalize_job_metadata(request.job_spec_id, request.job_digest, request.job_summary)
     op_id = _normalize_operation_id(request.op_id)
     expected_memory_mb = _normalize_expected_memory(request.expected_memory_mb)
+    share_units = _request_share_units(request.mode, request.share_units, config.max_shared_users)
     if request.mode == MODE_SHARED and config.require_shared_memory and expected_memory_mb is None:
         raise BookingError("shared reservations must declare expected memory with --mem")
     memory_capacities = _normalize_memory_capacities(request.gpu_memory_capacity_mb, config)
@@ -72,6 +74,7 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
             preferred,
             expected_memory_mb,
             job_metadata,
+            share_units,
         )
         if op_id:
             applied = _find_applied_operation(ledger, request.actor.uid, op_id)
@@ -94,6 +97,7 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
                     request.mode,
                     expected_memory_mb,
                     job_metadata,
+                    share_units,
                 )
                 if duplicate is not None:
                     return ledger, BookingResult(duplicate, False, "duplicate request ignored"), [], changed
@@ -108,6 +112,7 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
                     request.mode,
                     expected_memory_mb,
                     job_metadata,
+                    share_units,
                 )
                 if duplicate is not None:
                     return ledger, BookingResult(duplicate, False, "duplicate request ignored"), [], changed
@@ -126,6 +131,7 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
             gpu_scores,
             expected_memory_mb,
             memory_capacities,
+            share_units,
         )
         if slot is None:
             reason = _availability_failure_message(ledger, config, request, start, end, preferred)
@@ -152,6 +158,8 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
         }
         if expected_memory_mb is not None:
             reservation["expected_memory_mb"] = expected_memory_mb
+        if request.mode == MODE_SHARED:
+            reservation["share_units"] = share_units
         if op_id is not None:
             reservation["operation_signature"] = operation_signature
         if job_metadata is not None:
@@ -240,6 +248,23 @@ def edit_booking(store: LedgerStore, config: Config, request: EditRequest) -> Bo
             if request.update_expected_memory
             else reservation.get("expected_memory_mb")
         )
+        if mode == MODE_SHARED:
+            stored_share_units = (
+                reservation_share_units(reservation, config.max_shared_users)
+                if reservation.get("mode") == MODE_SHARED
+                else None
+            )
+            share_units = _request_share_units(
+                mode,
+                request.share_units if request.update_share_units else stored_share_units,
+                config.max_shared_users,
+            )
+        else:
+            share_units = _request_share_units(
+                mode,
+                request.share_units if request.update_share_units else None,
+                config.max_shared_users,
+            )
         if mode == MODE_SHARED and config.require_shared_memory and expected_memory_mb is None:
             raise BookingError("shared reservations must declare expected memory with --mem")
         memory_capacities = _normalize_memory_capacities(request.gpu_memory_capacity_mb, config)
@@ -295,6 +320,7 @@ def edit_booking(store: LedgerStore, config: Config, request: EditRequest) -> Bo
             gpu_scores,
             expected_memory_mb,
             memory_capacities,
+            share_units,
         )
         if slot is None:
             reason_request = BookingRequest(
@@ -309,6 +335,7 @@ def edit_booking(store: LedgerStore, config: Config, request: EditRequest) -> Bo
                 allow_queue=request.allow_queue,
                 expected_memory_mb=expected_memory_mb,
                 gpu_memory_capacity_mb=memory_capacities,
+                share_units=share_units if mode == MODE_SHARED else None,
             )
             reason = _availability_failure_message(shadow_ledger, config, reason_request, start, end, preferred)
             raise BookingError(reason)
@@ -327,6 +354,10 @@ def edit_booking(store: LedgerStore, config: Config, request: EditRequest) -> Bo
             reservation.pop("expected_memory_mb", None)
         else:
             reservation["expected_memory_mb"] = expected_memory_mb
+        if mode == MODE_SHARED:
+            reservation["share_units"] = share_units
+        else:
+            reservation.pop("share_units", None)
         if op_id:
             history = reservation.get("edit_operations", [])
             if not isinstance(history, list):
@@ -369,6 +400,7 @@ def find_available_gpus(
     gpu_scores: Optional[Dict[int, float]] = None,
     expected_memory_mb: Optional[int] = None,
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None,
+    share_units: int = 1,
 ) -> List[int]:
     gpus, _reason = find_available_gpus_with_reason(
         ledger,
@@ -382,6 +414,7 @@ def find_available_gpus(
         gpu_scores,
         expected_memory_mb,
         gpu_memory_capacity_mb,
+        share_units,
     )
     return gpus
 
@@ -398,6 +431,7 @@ def find_available_gpus_with_reason(
     gpu_scores: Optional[Dict[int, float]] = None,
     expected_memory_mb: Optional[int] = None,
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None,
+    share_units: int = 1,
 ) -> Tuple[List[int], str]:
     validate_ledger_policy(ledger, config)
     index = ReservationIndex.from_ledger(ledger, start)
@@ -412,6 +446,7 @@ def find_available_gpus_with_reason(
         gpu_scores,
         expected_memory_mb,
         gpu_memory_capacity_mb,
+        share_units,
     )
 
 
@@ -426,6 +461,7 @@ def _find_available_gpus_with_reason(
     gpu_scores: Optional[Dict[int, float]] = None,
     expected_memory_mb: Optional[int] = None,
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None,
+    share_units: int = 1,
 ) -> Tuple[List[int], str]:
     available = []
     reasons = []
@@ -442,6 +478,7 @@ def _find_available_gpus_with_reason(
             expected_memory_mb,
             gpu_memory_capacity_mb,
             config.shared_memory_reserve_mb,
+            share_units,
         )
         if ok:
             pressure = _reservation_pressure_score_indexed(index, gpu, start, end, config.max_shared_users)
@@ -470,6 +507,7 @@ def find_earliest_slot(
     gpu_scores: Optional[Dict[int, float]] = None,
     expected_memory_mb: Optional[int] = None,
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None,
+    share_units: int = 1,
 ) -> Optional[Tuple[datetime, List[int]]]:
     validate_ledger_policy(ledger, config)
     now = utc_now()
@@ -495,6 +533,7 @@ def find_earliest_slot(
                     expected_memory_mb,
                     gpu_memory_capacity_mb,
                     config.shared_memory_reserve_mb,
+                    share_units,
                 )
                 if not ok:
                     reasons.append(reason)
@@ -513,6 +552,7 @@ def find_earliest_slot(
             gpu_scores,
             expected_memory_mb,
             gpu_memory_capacity_mb,
+            share_units,
         )
         if len(gpus) == count:
             return candidate_start, gpus
@@ -527,8 +567,11 @@ def can_place_gpu(
     mode: str,
     uid: int,
     max_shared_users: int,
+    share_units: int = 1,
 ) -> bool:
-    ok, _reason = availability_detail(ledger, gpu, start, end, mode, uid, max_shared_users)
+    ok, _reason = availability_detail(
+        ledger, gpu, start, end, mode, uid, max_shared_users, share_units=share_units
+    )
     return ok
 
 
@@ -543,6 +586,7 @@ def availability_detail(
     expected_memory_mb: Optional[int] = None,
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None,
     shared_memory_reserve_mb: int = 0,
+    share_units: int = 1,
 ) -> Tuple[bool, str]:
     index = ReservationIndex.from_ledger(ledger, start)
     return _availability_detail_indexed(
@@ -555,6 +599,7 @@ def availability_detail(
         expected_memory_mb,
         gpu_memory_capacity_mb,
         shared_memory_reserve_mb,
+        share_units,
     )
 
 
@@ -568,6 +613,7 @@ def _availability_detail_indexed(
     expected_memory_mb: Optional[int] = None,
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None,
     shared_memory_reserve_mb: int = 0,
+    share_units: int = 1,
 ) -> Tuple[bool, str]:
     relevant = index.overlapping(gpu, start, end)
     if mode == MODE_EXCLUSIVE:
@@ -578,6 +624,10 @@ def _availability_detail_indexed(
         return True, ""
     if mode != MODE_SHARED:
         return False, f"unsupported booking mode: {mode}"
+    try:
+        share_units = normalize_share_units(share_units, max_shared_users)
+    except (TypeError, ValueError) as exc:
+        return False, str(exc)
     if any(item.mode == MODE_EXCLUSIVE for item in relevant):
         return False, f"exclusive conflict on GPU {gpu}"
 
@@ -589,13 +639,20 @@ def _availability_detail_indexed(
     for left, right in zip(ordered, ordered[1:]):
         if left >= right:
             continue
-        segment_count = _shared_record_count_in_spans(relevant, left, right)
-        if segment_count + 1 > max_shared_users:
-            return False, f"shared capacity full on GPU {gpu}"
+        used_units = _shared_capacity_units_in_spans(relevant, left, right, max_shared_users)
+        if used_units + share_units > max_shared_users:
+            return (
+                False,
+                f"shared capacity full on GPU {gpu} "
+                f"(need {share_units}/{max_shared_users}, projected "
+                f"{used_units + share_units}/{max_shared_users})",
+            )
         capacity = (gpu_memory_capacity_mb or {}).get(gpu)
         if capacity:
             usable = max(0, capacity - shared_memory_reserve_mb)
-            requested = expected_memory_mb or max(1, usable // max_shared_users)
+            requested = expected_memory_mb or inferred_share_memory_mb(
+                usable, max_shared_users, share_units
+            )
             committed = _shared_memory_in_spans(relevant, left, right, usable, max_shared_users)
             if requested > usable or committed + requested > usable:
                 return (
@@ -615,6 +672,21 @@ def shared_record_count_for_gpu(reservations: Sequence[dict], gpu: int, start: d
         ],
         start,
         end,
+    )
+
+
+def shared_capacity_units_for_gpu(
+    reservations: Sequence[dict],
+    gpu: int,
+    start: datetime,
+    end: datetime,
+    max_shared_users: int,
+) -> int:
+    return _shared_capacity_units_in_segment(
+        [item for item in reservations if gpu in item.get("gpus", [])],
+        start,
+        end,
+        max_shared_users,
     )
 
 
@@ -643,6 +715,41 @@ def max_shared_record_count_for_reservation(reservations: Sequence[dict], reserv
             continue
         for gpu in reservation.get("gpus", []):
             peak = max(peak, shared_record_count_for_gpu(reservations, gpu, left, right))
+    return peak
+
+
+def max_shared_capacity_units_for_reservation(
+    reservations: Sequence[dict], reservation: dict, max_shared_users: int
+) -> int:
+    if reservation.get("mode") != MODE_SHARED:
+        return 0
+    start = parse_iso(reservation["start_at"])
+    end = parse_iso(reservation["end_at"])
+    points = {start, end}
+    for item in reservations:
+        if item.get("mode") != MODE_SHARED:
+            continue
+        if not set(item.get("gpus", [])) & set(reservation.get("gpus", [])):
+            continue
+        item_start = parse_iso(item["start_at"])
+        item_end = parse_iso(item["end_at"])
+        if not _overlaps(start, end, item_start, item_end):
+            continue
+        points.add(max(start, item_start))
+        points.add(min(end, item_end))
+
+    peak = 0
+    ordered = sorted(points)
+    for left, right in zip(ordered, ordered[1:]):
+        if left >= right:
+            continue
+        for gpu in reservation.get("gpus", []):
+            peak = max(
+                peak,
+                shared_capacity_units_for_gpu(
+                    reservations, gpu, left, right, max_shared_users
+                ),
+            )
     return peak
 
 
@@ -696,6 +803,20 @@ def _shared_record_count_in_segment(reservations: Sequence[dict], start: datetim
     return count
 
 
+def _shared_capacity_units_in_segment(
+    reservations: Sequence[dict],
+    start: datetime,
+    end: datetime,
+    max_shared_users: int,
+) -> int:
+    return sum(
+        reservation_share_units(item, max_shared_users)
+        for item in reservations
+        if item.get("mode") == MODE_SHARED
+        and _overlaps(start, end, parse_iso(item["start_at"]), parse_iso(item["end_at"]))
+    )
+
+
 def _shared_memory_in_segment(
     reservations: Sequence[dict],
     start: datetime,
@@ -703,7 +824,6 @@ def _shared_memory_in_segment(
     usable_memory_mb: int,
     max_shared_users: int,
 ) -> int:
-    default_memory = max(1, usable_memory_mb // max_shared_users)
     total = 0
     for item in reservations:
         if item.get("mode") != MODE_SHARED:
@@ -711,6 +831,11 @@ def _shared_memory_in_segment(
         if not _overlaps(start, end, parse_iso(item["start_at"]), parse_iso(item["end_at"])):
             continue
         try:
+            default_memory = inferred_share_memory_mb(
+                usable_memory_mb,
+                max_shared_users,
+                reservation_share_units(item, max_shared_users),
+            )
             expected = int(item.get("expected_memory_mb") or default_memory)
         except (TypeError, ValueError):
             expected = default_memory
@@ -730,6 +855,19 @@ def _shared_record_count_in_spans(
     )
 
 
+def _shared_capacity_units_in_spans(
+    reservations: Sequence[ReservationSpan],
+    start: datetime,
+    end: datetime,
+    max_shared_users: int,
+) -> int:
+    return sum(
+        reservation_share_units(item.record, max_shared_users)
+        for item in reservations
+        if item.mode == MODE_SHARED and _overlaps(start, end, item.start, item.end)
+    )
+
+
 def _shared_memory_in_spans(
     reservations: Sequence[ReservationSpan],
     start: datetime,
@@ -737,12 +875,16 @@ def _shared_memory_in_spans(
     usable_memory_mb: int,
     max_shared_users: int,
 ) -> int:
-    default_memory = max(1, usable_memory_mb // max_shared_users)
     total = 0
     for item in reservations:
         if item.mode != MODE_SHARED or not _overlaps(start, end, item.start, item.end):
             continue
         try:
+            default_memory = inferred_share_memory_mb(
+                usable_memory_mb,
+                max_shared_users,
+                reservation_share_units(item.record, max_shared_users),
+            )
             expected = int(item.record.get("expected_memory_mb") or default_memory)
         except (TypeError, ValueError):
             expected = default_memory
@@ -759,6 +901,7 @@ def _find_exact_duplicate(
     mode: str,
     expected_memory_mb: Optional[int],
     job_metadata: Optional[dict],
+    share_units: int,
 ) -> Optional[dict]:
     normalized_gpus = sorted(gpus)
     for item in list_active(ledger, start):
@@ -768,7 +911,7 @@ def _find_exact_duplicate(
             continue
         if sorted(item.get("gpus", [])) != normalized_gpus:
             continue
-        if not _same_request_metadata(item, expected_memory_mb, job_metadata):
+        if not _same_request_metadata(item, expected_memory_mb, job_metadata, share_units):
             continue
         if parse_iso(item["start_at"]) == start and parse_iso(item["end_at"]) == end:
             return item
@@ -784,6 +927,7 @@ def _find_auto_duplicate(
     mode: str,
     expected_memory_mb: Optional[int],
     job_metadata: Optional[dict],
+    share_units: int,
 ) -> Optional[dict]:
     for item in list_active(ledger, start):
         if int(item.get("uid")) != uid:
@@ -792,7 +936,7 @@ def _find_auto_duplicate(
             continue
         if len(item.get("gpus", [])) != count:
             continue
-        if not _same_request_metadata(item, expected_memory_mb, job_metadata):
+        if not _same_request_metadata(item, expected_memory_mb, job_metadata, share_units):
             continue
         if parse_iso(item["start_at"]) == start and parse_iso(item["end_at"]) == end:
             return item
@@ -803,6 +947,7 @@ def _same_request_metadata(
     reservation: dict,
     expected_memory_mb: Optional[int],
     job_metadata: Optional[dict],
+    share_units: int,
 ) -> bool:
     stored_memory = reservation.get("expected_memory_mb")
     try:
@@ -811,6 +956,13 @@ def _same_request_metadata(
         return False
     if normalized_stored_memory != expected_memory_mb:
         return False
+    if reservation.get("mode") == MODE_SHARED:
+        try:
+            stored_share_units = int(reservation.get("share_units", 1))
+        except (TypeError, ValueError):
+            return False
+        if stored_share_units != share_units:
+            return False
     job = reservation.get("job")
     if job_metadata is None:
         return not isinstance(job, dict)
@@ -829,9 +981,33 @@ def _find_reservation(ledger: dict, reservation_id: str) -> Optional[dict]:
 def find_policy_violations(ledger: dict, max_shared_users: int, now: Optional[datetime] = None) -> List[dict]:
     active = list_active(ledger, now)
     issues: List[dict] = []
+    issues.extend(_find_invalid_share_unit_violations(active, max_shared_users))
     issues.extend(_find_exclusive_overlap_violations(active))
     issues.extend(_find_shared_capacity_violations(active, max_shared_users))
     return sorted(issues, key=lambda item: (item.get("start_at", ""), item.get("gpu", -1), item.get("type", "")))
+
+
+def _find_invalid_share_unit_violations(
+    active: Sequence[dict], max_shared_users: int
+) -> List[dict]:
+    issues = []
+    for item in active:
+        if item.get("mode") != MODE_SHARED or "share_units" not in item:
+            continue
+        try:
+            normalize_share_units(item.get("share_units"), max_shared_users)
+        except (TypeError, ValueError) as exc:
+            issues.append(
+                {
+                    "type": "invalid-share-units",
+                    "reservation_id": item.get("id"),
+                    "share_units": item.get("share_units"),
+                    "start_at": item.get("start_at"),
+                    "end_at": item.get("end_at"),
+                    "message": str(exc),
+                }
+            )
+    return issues
 
 
 def _find_exclusive_overlap_violations(active: Sequence[dict]) -> List[dict]:
@@ -877,13 +1053,17 @@ def _find_shared_capacity_violations(active: Sequence[dict], max_shared_users: i
             if left >= right:
                 continue
             overlapping = [item for item in shared if _overlaps(left, right, parse_iso(item["start_at"]), parse_iso(item["end_at"]))]
-            if len(overlapping) <= max_shared_users:
+            used_units = sum(
+                reservation_share_units(item, max_shared_users) for item in overlapping
+            )
+            if used_units <= max_shared_users:
                 continue
             issues.append(
                 {
                     "type": "shared-capacity",
                     "gpu": gpu,
                     "count": len(overlapping),
+                    "used_units": used_units,
                     "limit": max_shared_users,
                     "reservation_ids": [item.get("id") for item in overlapping],
                     "start_at": to_iso(left),
@@ -990,6 +1170,17 @@ def _normalize_expected_memory(value: Optional[int]) -> Optional[int]:
     return parsed
 
 
+def _request_share_units(mode: str, value: Optional[int], capacity_units: int) -> int:
+    if mode == MODE_EXCLUSIVE:
+        if value is not None:
+            raise BookingError("share units apply only to shared reservations")
+        return capacity_units
+    try:
+        return normalize_share_units(value, capacity_units)
+    except (TypeError, ValueError) as exc:
+        raise BookingError(str(exc)) from exc
+
+
 def _normalize_job_metadata(
     spec_id: Optional[str],
     digest: Optional[str],
@@ -1036,6 +1227,7 @@ def _create_operation_signature(
     preferred_gpus: Optional[Sequence[int]],
     expected_memory_mb: Optional[int],
     job_metadata: Optional[dict],
+    share_units: int,
 ) -> str:
     return _operation_signature(
         "create",
@@ -1047,6 +1239,7 @@ def _create_operation_signature(
             "preferred_gpus": list(preferred_gpus) if preferred_gpus is not None else None,
             "allow_queue": request.allow_queue,
             "expected_memory_mb": expected_memory_mb,
+            "share_units": share_units if request.mode == MODE_SHARED else None,
             "job_summary": job_metadata.get("summary") if job_metadata is not None else None,
         },
     )
@@ -1066,6 +1259,8 @@ def _edit_operation_signature(request: EditRequest) -> str:
             "allow_queue": request.allow_queue,
             "expected_memory_mb": request.expected_memory_mb,
             "update_expected_memory": request.update_expected_memory,
+            "share_units": request.share_units,
+            "update_share_units": request.update_share_units,
         },
     )
 
@@ -1120,7 +1315,7 @@ def _reservation_pressure_score_indexed(
         if item.mode != MODE_SHARED:
             continue
         overlap = max(0.0, (min(end, item.end) - max(start, item.start)).total_seconds())
-        overlap_total += overlap
+        overlap_total += overlap * reservation_share_units(item.record, max_shared_users)
     return round(100.0 * overlap_total / duration / max(1, max_shared_users), 3)
 
 
@@ -1228,6 +1423,7 @@ def _availability_failure_message(
                 request.expected_memory_mb,
                 request.gpu_memory_capacity_mb,
                 config.shared_memory_reserve_mb,
+                request.share_units or 1,
             )
             if not ok:
                 reasons.append(reason)
@@ -1245,6 +1441,7 @@ def _availability_failure_message(
             request.gpu_scores,
             request.expected_memory_mb,
             request.gpu_memory_capacity_mb,
+            request.share_units or 1,
         )
         reason = reason or "not enough GPUs available for this request"
 
@@ -1275,6 +1472,7 @@ def _nearest_available_hint(
         request.gpu_scores,
         request.expected_memory_mb,
         request.gpu_memory_capacity_mb,
+        request.share_units or 1,
     )
     if slot is None:
         return ""
@@ -1309,6 +1507,7 @@ def _log_item(
         "op_id": operation_id or reservation.get("op_id"),
         "gpus": reservation.get("gpus", []),
         "mode": reservation.get("mode"),
+        "share_units": reservation.get("share_units"),
         "start_at": reservation.get("start_at"),
         "end_at": reservation.get("end_at"),
         "result": result,

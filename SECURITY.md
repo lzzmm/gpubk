@@ -12,6 +12,9 @@ Supported security boundaries:
 - Scheduled command arguments live in UID-owned `0600` specs, not the shared ledger.
 - Scheduled jobs re-check live process authorization and physical VRAM immediately before
   launch; this reduces races but cannot replace kernel device access control.
+- Shared capacity units enforce ledger admission and inferred memory budgets only. They do
+  not enforce proportional SM time, memory isolation, or performance without MIG/MPS or
+  another administrator-controlled GPU partitioning mechanism.
 - External allocators can advise ordering but cannot bypass deterministic validation.
 - External allocator output is bounded and allocator timeouts terminate the isolated process group.
 - Telemetry stores only sanitized workload labels and keyed identities, not raw arguments,

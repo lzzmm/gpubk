@@ -7,6 +7,7 @@ from typing import Sequence
 from .config import Config
 from .gpu import GpuSnapshot
 from .models import MODE_EXCLUSIVE
+from .sharing import inferred_share_memory_mb, reservation_share_units
 from .timeparse import utc_now
 from .usage import (
     GPU_LIVE_BUSY,
@@ -80,7 +81,7 @@ def assess_job_launch(
 
         required_memory_mb = expected_memory_mb
         if mode != MODE_EXCLUSIVE and required_memory_mb is None:
-            required_memory_mb = _equal_share_memory(config, device)
+            required_memory_mb = _inferred_share_memory(config, reservation, device)
             if required_memory_mb is None:
                 return LaunchGuardDecision(
                     False,
@@ -119,11 +120,17 @@ def assess_job_launch(
     return LaunchGuardDecision(True)
 
 
-def _equal_share_memory(config: Config, device: GpuSnapshot) -> int | None:
+def _inferred_share_memory(
+    config: Config, reservation: dict, device: GpuSnapshot
+) -> int | None:
     if device.memory_total_mb <= 0:
         return None
     usable = max(0, device.memory_total_mb - config.shared_memory_reserve_mb)
-    return max(1, usable // max(1, config.max_shared_users))
+    return inferred_share_memory_mb(
+        usable,
+        config.max_shared_users,
+        reservation_share_units(reservation, config.max_shared_users),
+    )
 
 
 def _positive_int(value: object) -> int | None:
