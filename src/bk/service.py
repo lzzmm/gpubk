@@ -9,6 +9,7 @@ from .advisor import GpuAdvice, build_gpu_advice
 from .allocator import AllocatorDecision, apply_external_allocator
 from .config import Config
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest, BookingResult
+from .policy import validate_ledger_policy
 from .scheduler import (
     BOOKING_GRANULARITY_SECONDS,
     add_booking,
@@ -50,6 +51,7 @@ def submit_booking(
     advice: Optional[GpuAdvice] = None,
 ) -> BookingSubmission:
     _validate_recommendation_request(config, count, duration_seconds, start_at, mode, expected_memory_mb, allow_queue)
+    validate_ledger_policy(store.load(), config)
     gpu_advice = advice or build_gpu_advice(config)
     allocator = _allocation_decision(
         config,
@@ -113,6 +115,7 @@ def build_agent_context(
 ) -> dict:
     generated_at = at or utc_now()
     ledger = store.load()
+    validate_ledger_policy(ledger, config)
     active = list_active(ledger, generated_at)
     gpu_advice = advice or build_gpu_advice(config, at=generated_at)
     return {
@@ -159,6 +162,8 @@ def recommend_booking(
     advice: Optional[GpuAdvice] = None,
 ) -> dict:
     _validate_recommendation_request(config, count, duration_seconds, start_at, mode, expected_memory_mb, allow_queue)
+    ledger = store.load()
+    validate_ledger_policy(ledger, config)
     generated_at = utc_now()
     gpu_advice = advice or build_gpu_advice(config, at=generated_at)
     allocator = _allocation_decision(
@@ -173,7 +178,6 @@ def recommend_booking(
         preferred_gpus,
         expected_memory_mb,
     )
-    ledger = store.load()
     duration = timedelta(seconds=duration_seconds)
     slot = find_earliest_slot(
         ledger,

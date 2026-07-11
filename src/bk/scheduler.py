@@ -24,12 +24,10 @@ from .models import (
     BookingResult,
     EditRequest,
 )
+from .policy import BOOKING_GRANULARITY_SECONDS, bind_ledger_policy, validate_ledger_policy
 from .schedule_index import ReservationIndex, ReservationSpan
 from .storage import LedgerStore
 from .timeparse import parse_iso, to_iso, utc_now
-
-
-BOOKING_GRANULARITY_SECONDS = 5 * 60
 
 
 def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> BookingResult:
@@ -49,7 +47,8 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
 
     def mutate(ledger: dict):
         now = utc_now()
-        changed = _maintain_ledger(ledger, now, config.ledger_retention_days)
+        changed = bind_ledger_policy(ledger, config)
+        changed = _maintain_ledger(ledger, now, config.ledger_retention_days) or changed
         start = _normalize_start(request.start_at, request.allow_queue)
         duration = timedelta(seconds=request.duration_seconds)
         end = start + duration
@@ -185,6 +184,7 @@ def cancel_booking(store: LedgerStore, reservation_id: str, actor: Actor) -> dic
 def edit_booking(store: LedgerStore, config: Config, request: EditRequest) -> BookingResult:
     def mutate(ledger: dict):
         now = utc_now()
+        bind_ledger_policy(ledger, config)
         _maintain_ledger(ledger, now, config.ledger_retention_days)
         reservation = _find_reservation(ledger, request.reservation_id)
         if reservation is None:
@@ -337,6 +337,7 @@ def find_available_gpus_with_reason(
     expected_memory_mb: Optional[int] = None,
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None,
 ) -> Tuple[List[int], str]:
+    validate_ledger_policy(ledger, config)
     index = ReservationIndex.from_ledger(ledger, start)
     return _find_available_gpus_with_reason(
         index,
@@ -408,6 +409,7 @@ def find_earliest_slot(
     expected_memory_mb: Optional[int] = None,
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None,
 ) -> Optional[Tuple[datetime, List[int]]]:
+    validate_ledger_policy(ledger, config)
     search_until = earliest_start + timedelta(hours=config.queue_search_hours)
     now = utc_now()
     index = ReservationIndex.from_ledger(ledger, min(earliest_start, now))

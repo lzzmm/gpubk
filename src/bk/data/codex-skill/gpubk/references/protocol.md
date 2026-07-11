@@ -13,6 +13,7 @@ bk j --json
 ```
 
 Omitting `--start` permits earliest-slot queueing. Providing `--start` means exact placement.
+The ledger binds its scheduling and storage policy on first write. Agents must surface policy-mismatch errors instead of retrying with altered local limits.
 
 Recommendation fields:
 

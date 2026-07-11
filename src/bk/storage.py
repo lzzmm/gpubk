@@ -12,12 +12,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple, TypeVar
 
+from .models import BookingError
+from .policy import ledger_storage_modes
+
 
 T = TypeVar("T")
 
 
 def _empty_ledger() -> dict:
     return {"version": 1, "reservations": []}
+
+
+class LedgerCorruptionError(OSError):
+    pass
 
 
 class FileLock:
@@ -205,16 +212,33 @@ class LedgerStore:
             with self.ledger_path.open("r", encoding="utf-8") as fh:
                 data = json.load(fh)
             self._validate_ledger(data)
-            return data
         except (json.JSONDecodeError, OSError, ValueError) as exc:
             restored = self._load_latest_backup()
             if restored is not None:
                 self.last_warning = f"ledger is invalid; loaded the latest valid backup: {exc}"
-                return restored
-            raise OSError(
-                errno.EIO,
-                f"ledger is invalid and no valid backup exists: {self.ledger_path}: {exc}",
-            ) from exc
+                data = restored
+            else:
+                raise LedgerCorruptionError(
+                    errno.EIO,
+                    f"ledger is invalid and no valid backup exists: {self.ledger_path}: {exc}",
+                ) from exc
+        self._validate_storage_modes(data)
+        return data
+
+    def _validate_storage_modes(self, ledger: dict) -> None:
+        try:
+            configured = ledger_storage_modes(ledger)
+        except BookingError as exc:
+            raise OSError(errno.EINVAL, str(exc)) from exc
+        if configured is None:
+            return
+        actual = (f"{self.file_mode:04o}", f"{self.dir_mode:04o}")
+        if configured != actual:
+            raise PermissionError(
+                errno.EPERM,
+                "local storage modes do not match ledger policy: "
+                f"ledger={configured[0]}/{configured[1]} local={actual[0]}/{actual[1]}",
+            )
 
     def _load_latest_backup(self) -> Optional[dict]:
         if not self.backup_dir.exists():
@@ -269,6 +293,7 @@ class LedgerStore:
         ledger = journal.get("ledger")
         if ledger is not None:
             self._validate_ledger(ledger)
+            self._validate_storage_modes(ledger)
             if ledger.get("last_transaction_id") != transaction_id:
                 raise ValueError("journal ledger transaction ID mismatch")
         logs = journal.get("logs")
@@ -280,7 +305,7 @@ class LedgerStore:
         if ledger is not None:
             try:
                 current = self._load_unlocked()
-            except OSError:
+            except LedgerCorruptionError:
                 current = _empty_ledger()
             if current.get("last_transaction_id") != journal["transaction_id"]:
                 self._atomic_write_ledger(ledger)
