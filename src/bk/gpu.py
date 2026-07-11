@@ -53,7 +53,7 @@ def snapshot(config: Config) -> List[GpuSnapshot]:
     simulation_path = os.environ.get("BK_GPU_SIM_FILE")
     if simulation_path:
         try:
-            return _simulation_snapshot(Path(simulation_path))
+            return _simulation_snapshot(Path(simulation_path))[: config.gpu_count]
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return _unknown_snapshots(config)
 
@@ -64,9 +64,37 @@ def snapshot(config: Config) -> List[GpuSnapshot]:
         except Exception:
             pass
     try:
-        return _nvidia_smi_snapshot()
+        return _nvidia_smi_snapshot()[: config.gpu_count]
     except Exception:
         return _unknown_snapshots(config)
+
+
+def detect_gpu_count() -> int:
+    simulation_path = os.environ.get("BK_GPU_SIM_FILE")
+    if simulation_path:
+        try:
+            return max(1, len(_simulation_snapshot(Path(simulation_path))))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return 1
+
+    procfs_count = _procfs_gpu_count()
+    if procfs_count:
+        return procfs_count
+
+    sampler = _nvml_sampler()
+    if sampler is not None:
+        return max(1, len(sampler.handles))
+    try:
+        return max(1, len(_nvidia_smi_snapshot()))
+    except Exception:
+        return 1
+
+
+def _procfs_gpu_count(path: Path = Path("/proc/driver/nvidia/gpus")) -> int:
+    try:
+        return sum(1 for item in path.iterdir() if item.is_dir())
+    except OSError:
+        return 0
 
 
 def _unknown_snapshots(config: Config) -> List[GpuSnapshot]:

@@ -118,6 +118,12 @@ def _default_data_dir() -> Path:
     return data_home / "bk"
 
 
+def _auto_gpu_count() -> int:
+    from .gpu import detect_gpu_count
+
+    return max(1, detect_gpu_count())
+
+
 def load_config() -> Config:
     data_dir = Path(os.environ["BK_DATA_DIR"]).expanduser() if "BK_DATA_DIR" in os.environ else _default_data_dir()
     raw = _read_config_file(data_dir)
@@ -149,10 +155,11 @@ def load_config() -> Config:
         job_log_dir = state_home / "bk" / "jobs"
     allocator_raw = os.environ.get("BK_ALLOCATOR_COMMAND", raw.get("allocator_command"))
     allocator_command = _command_value(allocator_raw)
+    gpu_count = _int_value(raw, "gpu_count", 1) if "gpu_count" in raw else _auto_gpu_count()
 
     return Config(
         data_dir=data_dir,
-        gpu_count=_int_value(raw, "gpu_count", 1),
+        gpu_count=gpu_count,
         max_shared_users=_int_value(raw, "max_shared_users", 2),
         queue_search_hours=_int_value(raw, "queue_search_hours", 168),
         ledger_retention_days=_nonnegative_int_value(raw, "ledger_retention_days", 90),

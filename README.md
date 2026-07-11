@@ -99,6 +99,8 @@ export BK_DIR_MODE=2770
 
 环境变量优先级高于 `config.json`。
 
+未设置 `gpu_count` 或 `BK_GPU_COUNT` 时，bk 会自动发现本机可见 GPU 数量；无 GPU 环境保持一张 unknown 卡，便于直接试用。多人共享服务器仍建议显式配置卡数，以固定调度边界，并避免容器可见设备变化影响策略。
+
 为避免热台账随多年历史无限膨胀，已结束或取消超过 `ledger_retention_days` 的预约会在后续写事务中从 `ledger.json` 移除；完整新增、取消和任务事件仍保留在只追加 `ops.log`。设为 `0` 可关闭清理，但长期共享部署不建议这样做。超过保留期后，同一个 operation ID 不再提供幂等重放保证。
 
 ## Agent 与 JSON 接口

@@ -13,3 +13,4 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Bind audit display names to the process UID and render user-level systemd units with the active Python installation.
 - Reuse a parsed per-GPU reservation index, tail-read audit logs, and bound the hot-ledger retention window.
 - Expose GPU model and temperature in privacy-safe Agent and MCP context.
+- Auto-detect visible GPUs when no administrator count is configured, while preserving explicit limits.

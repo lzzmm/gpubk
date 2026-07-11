@@ -22,6 +22,28 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.file_mode, 0o600)
             self.assertEqual(config.dir_mode, 0o700)
 
+    def test_gpu_count_is_auto_detected_when_not_configured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict("os.environ", {"BK_DATA_DIR": tmp}, clear=True):
+                with mock.patch("bk.config._auto_gpu_count", return_value=8) as detect:
+                    config = load_config()
+
+            self.assertEqual(config.gpu_count, 8)
+            detect.assert_called_once_with()
+
+    def test_explicit_gpu_count_skips_auto_detection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(
+                "os.environ",
+                {"BK_DATA_DIR": tmp, "BK_GPU_COUNT": "3"},
+                clear=True,
+            ):
+                with mock.patch("bk.config._auto_gpu_count") as detect:
+                    config = load_config()
+
+            self.assertEqual(config.gpu_count, 3)
+            detect.assert_not_called()
+
     def test_shared_modes_and_memory_policy_parse_from_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
