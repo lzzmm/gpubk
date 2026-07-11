@@ -29,7 +29,8 @@ class McpProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
             async with create_connected_server_and_client_session(app, raise_exceptions=True) as session:
                 tools = await session.list_tools()
-                names = {item.name for item in tools.tools}
+                by_name = {item.name: item for item in tools.tools}
+                names = set(by_name)
                 resources = await session.list_resources()
                 context_resource = await session.read_resource(AnyUrl("bk://context"))
                 prompts = await session.list_prompts()
@@ -78,6 +79,15 @@ class McpProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
             self.assertEqual(str(resources.resources[0].uri), "bk://context")
+            self.assertTrue(by_name["get_gpu_context"].annotations.readOnlyHint)
+            self.assertTrue(by_name["recommend_gpu_booking"].annotations.readOnlyHint)
+            self.assertTrue(by_name["list_gpu_reservations"].annotations.readOnlyHint)
+            self.assertTrue(by_name["read_my_job_log"].annotations.readOnlyHint)
+            self.assertTrue(by_name["create_gpu_booking"].annotations.idempotentHint)
+            self.assertFalse(by_name["create_gpu_booking"].annotations.destructiveHint)
+            self.assertTrue(by_name["cancel_my_gpu_booking"].annotations.destructiveHint)
+            self.assertFalse(by_name["cancel_my_gpu_booking"].annotations.idempotentHint)
+            self.assertTrue(all(tool.annotations.openWorldHint is False for tool in by_name.values()))
             self.assertIn('"schema_version": "bk.agent.v1"', context_resource.contents[0].text)
             self.assertEqual(prompts.prompts[0].name, "plan_gpu_experiment")
             self.assertIn("recommend_gpu_booking", prompt.messages[0].content.text)

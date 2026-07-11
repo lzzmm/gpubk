@@ -18,3 +18,4 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Keep TUI headers and keyboard hints complete on terminals as narrow as 72 columns.
 - Pin all third-party GitHub Actions to immutable commits and test that release invariant.
 - Fail closed on an unreadable ledger without a valid backup, while still allowing durable journal recovery.
+- Add machine-readable MCP risk annotations for read-only, idempotent, destructive, and closed-world tools.

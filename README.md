@@ -161,6 +161,8 @@ MCP 服务提供 `bk://context` resource、规划 prompt，以及以下结构化
 
 服务身份始终来自启动 `bk-mcp` 的系统 UID，tool schema 没有 UID 参数。默认只提供本地 stdio，不开放监听端口；每位用户应启动自己的 MCP 进程。当前 optional extra 固定在官方 Python SDK 稳定 v1 线 `<2`，避免预发布 v2 的破坏性变化。
 
+所有 MCP tools 都带标准风险注解：context/recommend/list/log 标记为 read-only，create 因强制 operation ID 标记为 idempotent write，cancel 标记为 destructive，且全部是本地 closed-world 操作。支持这些注解的 Agent 无需从文案猜测调用风险。
+
 wheel 内置 Skill：
 
 ```bash

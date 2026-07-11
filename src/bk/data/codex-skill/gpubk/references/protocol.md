@@ -33,6 +33,7 @@ Recommendation fields:
 - `read_my_job_log`: bounded current-UID private log tail.
 
 The MCP server runs over local stdio and inherits the launching user's UID. It never accepts UID as a tool argument.
+Tools expose standard MCP annotations: context, recommendation, listing, and log reads are read-only; create is an idempotent write because it requires an operation ID; cancel is destructive; all tools are closed-world local operations.
 
 ## External Allocator
 

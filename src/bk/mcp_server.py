@@ -155,6 +155,7 @@ class BkMcpBackend:
 def create_mcp_server(backend: Optional[BkMcpBackend] = None):
     try:
         from mcp.server.fastmcp import FastMCP
+        from mcp.types import ToolAnnotations
     except ImportError as exc:
         raise RuntimeError("MCP support is optional; install with: pip install 'gpubk[mcp]'") from exc
 
@@ -173,12 +174,26 @@ def create_mcp_server(backend: Optional[BkMcpBackend] = None):
         """Current privacy-safe GPU allocation context."""
         return json.dumps(api.context(), ensure_ascii=False, sort_keys=True)
 
-    @mcp.tool(structured_output=True)
+    read_only = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+    idempotent_write = ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+    destructive_write = ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+
+    @mcp.tool(annotations=read_only, structured_output=True)
     def get_gpu_context() -> dict[str, object]:
         """Read policy, live GPU state, memory, forecast load, and active reservations."""
         return api.context()
 
-    @mcp.tool(structured_output=True)
+    @mcp.tool(annotations=read_only, structured_output=True)
     def recommend_gpu_booking(
         count: int,
         duration: str,
@@ -190,7 +205,7 @@ def create_mcp_server(backend: Optional[BkMcpBackend] = None):
         """Read-only recommendation. Omit start to allow earliest-slot queueing; explicit start is exact."""
         return api.recommend(count, duration, mode, start, gpus, expected_memory)
 
-    @mcp.tool(structured_output=True)
+    @mcp.tool(annotations=idempotent_write, structured_output=True)
     def create_gpu_booking(
         count: int,
         duration: str,
@@ -215,17 +230,17 @@ def create_mcp_server(backend: Optional[BkMcpBackend] = None):
             working_directory,
         )
 
-    @mcp.tool(structured_output=True)
+    @mcp.tool(annotations=read_only, structured_output=True)
     def list_gpu_reservations(mine_only: bool = False) -> dict[str, object]:
         """List active reservations using the stable privacy-safe schema."""
         return api.list_reservations(mine_only)
 
-    @mcp.tool(structured_output=True)
+    @mcp.tool(annotations=destructive_write, structured_output=True)
     def cancel_my_gpu_booking(reservation_id: str) -> dict[str, object]:
         """Cancel only a reservation owned by this MCP process UID; short IDs are accepted when unique."""
         return api.cancel(reservation_id)
 
-    @mcp.tool(structured_output=True)
+    @mcp.tool(annotations=read_only, structured_output=True)
     def read_my_job_log(reservation_id: str, max_chars: int = 32000) -> dict[str, object]:
         """Read a bounded tail of this UID's private scheduled-job log."""
         return api.read_job_log(reservation_id, max_chars)
