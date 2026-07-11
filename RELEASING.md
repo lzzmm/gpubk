@@ -4,10 +4,10 @@
 
 GPUbk publishes without a stored PyPI API token. Before the first release:
 
-1. In GitHub, create environments named `testpypi` and `pypi`. Require a reviewer for `pypi` and restrict it to protected version tags. GitHub Free does not offer required reviewers on private repositories; make the repository public or upgrade before enabling production publishing.
+1. In GitHub, create environments named `testpypi` and `pypi`. Require the `lzzmm` reviewer for `pypi`, restrict it to `v*.*.*` tags, and keep `main` protected by the complete CI check set. The public repository currently enforces these rules for administrators too.
 2. In TestPyPI's trusted-publisher settings, add owner `lzzmm`, repository `gpubk`, workflow `release.yml`, and environment `testpypi`.
 3. In PyPI's pending trusted-publisher form, enter project `gpubk`, owner `lzzmm`, repository `gpubk`, workflow `release.yml`, and environment `pypi`.
-4. Protect `main` and version tags in GitHub, and enable private vulnerability reporting before making the repository public.
+4. Protect `main` with pull requests, strict GitHub Actions checks, linear history, resolved conversations, and force-push/deletion prevention. Enable private vulnerability reporting.
 5. Create repository Actions variables `TESTPYPI_RELEASE_ENABLED` and `PYPI_RELEASE_ENABLED`, initially set to `false`. Set each to `true` only after its trusted publisher and environment protection are verified.
 
 The publish jobs receive `id-token: write` only inside their protected environments. Both jobs also fail closed behind their corresponding release-enabled variable. Do not add `PYPI_API_TOKEN`, `TWINE_PASSWORD`, or a long-lived upload token to repository secrets.

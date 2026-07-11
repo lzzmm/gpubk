@@ -4,6 +4,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.1.0 - Unreleased
 
+- Publish `0.1.0rc1` to TestPyPI as the first public release candidate.
 - Adopt GPUbk as the public project brand and `gpubk` as the PyPI distribution while retaining the `bk` command and protocol namespace.
 - Add 5-minute shared/exclusive scheduling with atomic queueing and VRAM admission.
 - Add compact curses TUI, date/weekday timeline, shared lanes, and interactive Add/Edit.
