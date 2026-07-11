@@ -2,7 +2,7 @@
 
 All notable changes are documented here. The project follows Semantic Versioning once a public release is published.
 
-## 0.1.0 - Unreleased
+## 0.1.0rc1 - 2026-07-12
 
 - Adopt GPUbk as the public project brand and `gpubk` as the PyPI distribution while retaining the `bk` command and protocol namespace.
 - Add 5-minute shared/exclusive scheduling with atomic queueing and VRAM admission.
