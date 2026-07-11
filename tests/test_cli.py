@@ -485,6 +485,72 @@ class CliTests(unittest.TestCase):
             self.assertEqual((len(minute_line[6:]) + 1) // 3, 6)
             self.assertEqual((len(gpu_line[6:]) + 1) // 3, 6)
 
+    def test_status_ignores_system_gpu_contexts_when_deciding_busy_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            simulation = data_dir / "gpu-sim.json"
+            simulation.write_text(
+                json.dumps(
+                    {
+                        "gpus": [
+                            {
+                                "index": 0,
+                                "name": "RTX",
+                                "memory_used_mb": 512,
+                                "memory_total_mb": 32607,
+                                "utilization_percent": 0,
+                                "processes": [
+                                    {
+                                        "pid": 123,
+                                        "uid": 0,
+                                        "username": "root",
+                                        "command": "Xorg",
+                                        "gpu_memory_mb": 4,
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            status = self.run_bk(["st"], data_dir, {"BK_GPU_SIM_FILE": str(simulation)})
+            verbose = self.run_bk(["st", "-v"], data_dir, {"BK_GPU_SIM_FILE": str(simulation)})
+
+            self.assertEqual(status.returncode, 0, status.stderr)
+            gpu_row = next(line for line in status.stdout.splitlines() if line.startswith("0"))
+            self.assertIn("    0 idle", gpu_row)
+            self.assertNotIn("busy", gpu_row)
+            self.assertIn("state=system", verbose.stdout)
+
+    def test_status_uses_live_utilization_when_no_process_is_visible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            simulation = data_dir / "gpu-sim.json"
+            simulation.write_text(
+                json.dumps(
+                    {
+                        "gpus": [
+                            {
+                                "index": 0,
+                                "name": "RTX",
+                                "memory_used_mb": 512,
+                                "memory_total_mb": 32607,
+                                "utilization_percent": 80,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_bk(["st"], data_dir, {"BK_GPU_SIM_FILE": str(simulation)})
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            gpu_row = next(line for line in result.stdout.splitlines() if line.startswith("0"))
+            self.assertIn("busy", gpu_row)
+
     def test_timeline_controls_window_step_start_and_gpu_filter(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.run_bk(

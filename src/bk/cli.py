@@ -48,7 +48,7 @@ from .timeparse import (
     utc_now,
 )
 from .tui import run_tui
-from .usage import classify_process_usage, summarize_process_command
+from .usage import USAGE_SYSTEM, assess_gpu_live_states, classify_process_usage, summarize_process_command
 from .worker import job_log_path, retry_job, run_worker
 
 try:
@@ -1771,6 +1771,7 @@ def _print_status(
         selected_gpu_ids = set(timeline_gpus)
         gpu_snapshots = [gpu for gpu in gpu_snapshots if gpu.index in selected_gpu_ids]
     usage_by_gpu = classify_process_usage(gpu_snapshots, active, now)
+    live_states = assess_gpu_live_states(gpu_snapshots, config.gpu_count)
     print("GPU status")
     wide_status = shutil.get_terminal_size(fallback=(100, 24)).columns >= 88
     if wide_status:
@@ -1789,8 +1790,9 @@ def _print_status(
             mem = "-"
         util = f"{gpu.utilization_percent}%" if gpu.utilization_percent is not None else "-"
         rows = usage_by_gpu.get(gpu.index, [])
+        workload_rows = [item for item in rows if item.status != USAGE_SYSTEM]
         violations = sum(1 for item in rows if item.violation)
-        state = "unreserved" if violations else ("busy" if rows else ("idle" if gpu.source != "none" else "unknown"))
+        state = "unreserved" if violations else live_states[gpu.index].status
         overlapping_now = [
             item
             for item in active
@@ -1805,11 +1807,11 @@ def _print_status(
         if wide_status:
             print(
                 f"{gpu.index:<4} {_clip_text(gpu.name, 14):<14} {util:>5} {mem:>16} "
-                f"{len(rows):>4} {state:<10} {share:>6} {x_free:<11}"
+                f"{len(workload_rows):>4} {state:<10} {share:>6} {x_free:<11}"
             )
         else:
             print(
-                f"{gpu.index:<4} {util:>5} {mem:>16} {len(rows):>4} "
+                f"{gpu.index:<4} {util:>5} {mem:>16} {len(workload_rows):>4} "
                 f"{state:<10} {share:>6} {x_free:<11}"
             )
         if verbose:
