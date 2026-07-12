@@ -58,6 +58,7 @@ Shared mode is the default:
 
 ```bash
 bk 1 30m                         # one GPU for 30 minutes
+bk book 1 30m                    # equivalent explicit command form
 bk 2 1h30m --mem 12g            # 12 GiB expected VRAM per GPU
 bk 1 1h --share 1/2             # reserve half of the shared capacity
 bk 1 1h --share-with 1          # leave room for at most one minimum-share booking
@@ -67,6 +68,9 @@ bk 1 1h --at +30m                # human-friendly relative time
 bk 1 1h --at "tomorrow 09:00"   # local wall-clock time
 bk 1 1h --start 2030-01-01T20:00:00+08:00  # exact machine time
 ```
+
+Use `bk COMMAND --help` or `bk help COMMAND` for contextual help. Help never
+opens the guided form, full-screen TUI, or MCP stdio server.
 
 Manage your reservations with a list number or short ID:
 

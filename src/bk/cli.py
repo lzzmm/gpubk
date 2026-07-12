@@ -96,9 +96,14 @@ TIMELINE_AUTO_FACTORS = (1, 2, 3, 4, 6, 12, 24, 48, 96, 144, 288)
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
+        if argv and argv[0] == "help":
+            if len(argv) == 1:
+                _print_help()
+                return 0
+            argv = [argv[1], "--help", *argv[2:]]
         if argv:
             head = argv[0]
-            if head in {"-h", "--help", "help"}:
+            if head in {"-h", "--help"}:
                 _print_help()
                 return 0
             if head in {"-V", "--version", "version"}:
@@ -106,6 +111,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 return 0
             if head == "skill":
                 return _skill_command(argv[1:])
+            if head == "mcp":
+                from .mcp_server import main as mcp_main
+
+                return mcp_main(argv[1:], prog="bk mcp")
 
         config = load_config()
         store = LedgerStore(
@@ -121,12 +130,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         head = argv[0]
         if _looks_like_auto_request(argv):
             return _book_command(argv, MODE_SHARED, config, store)
+        if head == "book":
+            return _book_command(argv[1:], MODE_SHARED, config, store, prog="bk book")
         if head in {"auto", "shared", "s"}:
             return _book_command(argv[1:], MODE_SHARED, config, store)
         if head in {"exclusive", "x"}:
             return _book_command(argv[1:], MODE_EXCLUSIVE, config, store)
         if head in {"tui", "t"}:
-            return run_tui(config, store)
+            return _tui_command(argv[1:], config, store)
         if head in {"monitor", "m"}:
             return _monitor_command(argv[1:], config, store)
         if head in {"usage", "u"}:
@@ -147,17 +158,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _slots_command(argv[1:], config, store)
         if head in {"agent", "ai"}:
             return _agent_command(argv[1:], config, store)
-        if head == "mcp":
-            from .mcp_server import main as mcp_main
-
-            mcp_main()
-            return 0
         if head == "service":
             return _service_command(argv[1:], config)
         if head in {"config", "cfg"}:
             return _config_command(argv[1:], config, store)
         if head in {"add", "a"}:
-            return _add_interactive(config, store)
+            return _add_command(argv[1:], config, store)
         if head in {"edit", "e"}:
             return _edit_command(argv[1:], config, store)
         if head in {"del", "delete", "d", "rm"}:
@@ -170,7 +176,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _doctor_command(argv[1:], config, store)
         if head in {"list", "ls", "l"}:
             return _list_command(argv[1:], config, store)
-        print(f"未知命令: {head}", file=sys.stderr)
+        print(f"Unknown command: {head}", file=sys.stderr)
         _print_help(file=sys.stderr)
         return 2
     except MonitorBusyError as exc:
@@ -283,10 +289,10 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
         _reset_command(args[1:], config, store)
         return True
     if head in {"add", "a"}:
-        _add_interactive(config, store)
+        _add_command(args[1:], config, store)
         return True
     if head in {"tui", "t"}:
-        run_tui(config, store)
+        _tui_command(args[1:], config, store)
         return True
     if head in {"monitor", "m"}:
         _monitor_command(args[1:], config, store)
@@ -312,20 +318,32 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
     if _looks_like_auto_request(args):
         _book_command(args, MODE_SHARED, config, store)
         return True
+    if head == "book":
+        _book_command(args[1:], MODE_SHARED, config, store, prog="bk book")
+        return True
     if head in {"auto", "shared", "s"}:
         _book_command(args[1:], MODE_SHARED, config, store)
         return True
     if head in {"exclusive", "x"}:
         _book_command(args[1:], MODE_EXCLUSIVE, config, store)
         return True
-    print(f"未知命令: {head}")
+    print(f"Unknown command: {head}")
     _print_shell_help()
     return True
 
 
-def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore) -> int:
+def _book_command(
+    argv: List[str],
+    mode: str,
+    config: Config,
+    store: LedgerStore,
+    *,
+    prog: Optional[str] = None,
+) -> int:
     booking_argv, command_argv = _split_job_command(argv)
-    parser = argparse.ArgumentParser(prog=f"bk {'exclusive' if mode == MODE_EXCLUSIVE else ''}".strip())
+    parser = argparse.ArgumentParser(
+        prog=prog or f"bk {'exclusive' if mode == MODE_EXCLUSIVE else ''}".strip()
+    )
     parser.add_argument("count", type=int)
     parser.add_argument("duration")
     start_group = parser.add_mutually_exclusive_group()
@@ -428,6 +446,16 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
     if store.last_warning:
         print(f"warning: {store.last_warning}", file=sys.stderr)
     return 0
+
+
+def _tui_command(argv: List[str], config: Config, store: LedgerStore) -> int:
+    parser = argparse.ArgumentParser(
+        prog="bk tui",
+        description="Open the full-screen GPU status, timeline, and reservation editor.",
+        epilog="Use plain `bk` for the line-oriented prompt when a full-screen terminal is unavailable.",
+    )
+    parser.parse_args(argv)
+    return run_tui(config, store)
 
 
 def _slots_command(argv: List[str], config: Config, store: LedgerStore) -> int:
@@ -1186,6 +1214,19 @@ def _effective_config(config: Config) -> dict:
         "allocator_timeout_seconds": config.allocator_timeout_seconds,
         "allocator_weight": config.allocator_weight,
     }
+
+
+def _add_command(argv: List[str], config: Config, store: LedgerStore) -> int:
+    parser = argparse.ArgumentParser(
+        prog="bk add",
+        description="Create a reservation through recoverable guided prompts.",
+        epilog=(
+            "The guide asks for mode, share, GPU count, duration, start, devices, "
+            "expected VRAM, and an optional command. Use `bk 2 1h` for direct booking."
+        ),
+    )
+    parser.parse_args(argv)
+    return _add_interactive(config, store)
 
 
 def _add_interactive(config: Config, store: LedgerStore) -> int:
@@ -2447,6 +2488,7 @@ def _print_help(file=None) -> None:
 
 BOOK
   bk 2 1h                        earliest shared slot
+  bk book 2 1h                   explicit alias for the same booking
   bk x 1 1h                      earliest exclusive slot
   bk 1 1h --gpu 3 --mem 12g      choose GPU and expected VRAM
   bk 1 1h --share 1/2            reserve half of shared capacity
@@ -2497,7 +2539,7 @@ TIME AND POLICY
   Share units control admission and inferred VRAM.
   They do not enforce GPU compute bandwidth.
 
-Run `bk COMMAND --help` for more options.
+Run `bk COMMAND --help` or `bk help COMMAND` for more options.
 Plain `bk` opens the prompt; `bk t` opens the full-screen TUI.
 """,
         file=file,
@@ -2511,6 +2553,7 @@ def _print_shell_help() -> None:
   tl | timeline [2h]        aligned timeline; --from/--window/--step/--gpu
   slots 2 1h               show read-only earliest booking alternatives
   1 4h [--gpu 0]            shared booking, default mode
+  book 1 4h                 explicit alias for the same booking
   1 4h --share 3/4          weighted shared capacity (when server capacity is 4)
   s 1 4h [--gpu 0]          shared booking
   x 1 4h [--gpu 0]          exclusive booking

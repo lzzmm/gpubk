@@ -1,12 +1,15 @@
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
+from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 from bk.config import Config
 from bk.joblogs import job_log_path, rotated_job_log_path
-from bk.mcp_server import BkMcpBackend, _read_tail
+from bk.mcp_server import BkMcpBackend, _read_tail, main as mcp_main
 from bk.models import Actor, BookingError, BookingRequest
 from bk.scheduler import add_booking
 from bk.storage import LedgerStore
@@ -27,6 +30,16 @@ class McpBackendTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_entrypoint_help_does_not_construct_or_run_the_server(self):
+        output = StringIO()
+        with mock.patch("bk.mcp_server.create_mcp_server") as create_server:
+            with redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+                mcp_main(["--help"])
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("usage: bk-mcp", output.getvalue())
+        create_server.assert_not_called()
 
     def test_context_and_recommendation_use_stable_agent_schema(self):
         context = self.backend.context()

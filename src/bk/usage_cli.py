@@ -16,6 +16,12 @@ from .usage_store import UsageAuditStore, UsageRetentionPolicy
 
 def run_usage_cli(argv: List[str], config: Config) -> int:
     args_argv = list(argv)
+    if args_argv and args_argv[0] == "help":
+        if len(args_argv) == 1:
+            _usage_help_parser().parse_args(["--help"])
+        args_argv = [args_argv[1], "--help", *args_argv[2:]]
+    if args_argv and args_argv[0] in {"-h", "--help"}:
+        _usage_help_parser().parse_args(args_argv)
     legacy_rollups = "--rollups" in args_argv
     if legacy_rollups:
         args_argv.remove("--rollups")
@@ -76,6 +82,23 @@ def run_usage_cli(argv: List[str], config: Config) -> int:
     else:
         _print_payload(payload)
     return 0
+
+
+def _usage_help_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="bk usage",
+        description="Query versioned GPU usage history or inspect telemetry storage.",
+    )
+    commands = parser.add_subparsers(dest="action", metavar="COMMAND")
+    commands.add_parser("me", help="summarize the current UID (default without a command)")
+    commands.add_parser("users", help="summarize visible users")
+    commands.add_parser("events", help="show process audit events")
+    commands.add_parser("samples", help="show versioned time-series samples")
+    commands.add_parser("storage", help="inspect retention tiers and storage size")
+    commands.add_parser("capabilities", help="show telemetry API capabilities")
+    commands.add_parser("maintain", help="preview or apply retention maintenance")
+    commands.add_parser("migrate", help="preview or migrate legacy telemetry")
+    return parser
 
 
 def _admin_command(action: str, argv: List[str], config: Config) -> int:

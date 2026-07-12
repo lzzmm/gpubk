@@ -56,6 +56,7 @@ python3 -m pip install .
 
 ```bash
 bk 1 30m                         # 预约 1 张 GPU，持续 30 分钟
+bk book 1 30m                    # 完全等价的显式命令形式
 bk 2 1h30m --mem 12g            # 每张卡预计使用 12 GiB 显存
 bk 1 1h --share 1/2             # 占用 shared 总容量的一半
 bk 1 1h --share-with 1          # 最多给另一条最小份额预约留空间
@@ -65,6 +66,9 @@ bk 1 1h --at +30m               # 30 分钟后，当地时间
 bk 1 1h --at "tomorrow 09:00"  # 明天 09:00
 bk 1 1h --start 2030-01-01T20:00:00+08:00  # 脚本使用的精确时间
 ```
+
+使用 `bk COMMAND --help` 或 `bk help COMMAND` 查看对应帮助。帮助命令不会进入
+引导表单、全屏 TUI 或 MCP stdio 服务。
 
 可以用列表序号或短 ID 管理自己的预约：
 

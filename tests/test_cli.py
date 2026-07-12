@@ -1601,8 +1601,55 @@ class CliTests(unittest.TestCase):
             self.assertIn("BOOK\n", result.stdout)
             self.assertIn("VIEW\n", result.stdout)
             self.assertIn("bk 2 1h", result.stdout)
+            self.assertIn("bk book 2 1h", result.stdout)
             self.assertIn("bk e ID --at 20:00", result.stdout)
             self.assertTrue(all(len(line) <= 72 for line in result.stdout.splitlines()), result.stdout)
+
+    def test_contextual_help_never_starts_interactive_or_protocol_entrypoints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "absent"
+            cases = (
+                (["add", "--help"], "usage: bk add", "mode [s shared"),
+                (["tui", "--help"], "usage: bk tui", "GPUbk TUI fallback"),
+                (["mcp", "--help"], "usage: bk mcp", "MCP server requires"),
+                (["usage", "--help"], "usage: bk usage", "usage: bk usage me"),
+                (["book", "--help"], "usage: bk book", "Unknown command"),
+                (["help", "add"], "usage: bk add", "mode [s shared"),
+                (["help", "usage"], "usage: bk usage", "usage: bk usage me"),
+            )
+            for args, expected, forbidden in cases:
+                with self.subTest(args=args):
+                    result = self.run_bk(args, data_dir)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(expected, result.stdout)
+                    self.assertNotIn(forbidden, result.stdout + result.stderr)
+            self.assertFalse(data_dir.exists())
+
+    def test_launch_only_commands_reject_unexpected_arguments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "absent"
+            for command in ("add", "tui", "mcp"):
+                with self.subTest(command=command):
+                    result = self.run_bk([command, "unexpected"], data_dir)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("unrecognized arguments: unexpected", result.stderr)
+            self.assertFalse(data_dir.exists())
+
+    def test_explicit_book_alias_creates_the_same_default_shared_booking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_bk(["book", "1", "30m", "--quiet"], Path(tmp))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(result.stdout.startswith("created:"), result.stdout)
+            self.assertIn("mode=shared", result.stdout)
+
+    def test_unknown_command_uses_the_default_english_interface(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_bk(["not-a-command"], Path(tmp))
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("Unknown command: not-a-command", result.stderr)
+            self.assertNotIn("\u672a\u77e5\u547d\u4ee4", result.stderr)
 
     def test_monitor_once_writes_usage_events_and_rollups(self):
         with tempfile.TemporaryDirectory() as tmp:

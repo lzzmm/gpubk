@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Make contextual CLI help side-effect free, add an explicit `bk book` alias and
+  `bk help COMMAND`, and expose the usage-command overview instead of accidentally
+  entering guided, TUI, MCP, or default-query execution paths.
 - Extend the backward-compatible collector v1 heartbeat with per-GPU stable-device-identifier
   capability, degraded-state propagation, immediate recovery updates, and strict post-start
   doctor checks so monitor health cannot overstate guarded job readiness.

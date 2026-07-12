@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import sys
 from datetime import timedelta
 from pathlib import Path
 from typing import List, Optional
 
+from . import __version__
 from .config import Config, load_config
 from .fileio import open_existing_regular
 from .identity import current_actor
@@ -502,12 +505,23 @@ def create_mcp_server(backend: Optional[BkMcpBackend] = None):
     return mcp
 
 
-def main() -> None:
+def main(argv: Optional[List[str]] = None, *, prog: str = "bk-mcp") -> int:
+    parser = argparse.ArgumentParser(
+        prog=prog,
+        description="Run the GPUbk Model Context Protocol server over stdio.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"gpubk {__version__}",
+    )
+    parser.parse_args(sys.argv[1:] if argv is None else argv)
     try:
         server = create_mcp_server()
     except RuntimeError as exc:
         raise SystemExit(str(exc)) from exc
     server.run(transport="stdio")
+    return 0
 
 
 def _normalize_mode(value: str) -> str:
@@ -563,4 +577,4 @@ def _read_tail(path: Path, max_chars: int) -> str:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
