@@ -27,6 +27,8 @@ Recommendation fields:
 - `available`: whether the requested semantics have a legal slot.
 - `recommendation.gpus`, `start_at`, `end_at`, `queued`, `confidence`.
 - Context GPU entries include model name, temperature, live status, physical VRAM, and recent load history.
+- Context `policy.monitoring` reports the effective sample and rollup cadence; consumers must
+  not infer finer telemetry precision.
 - `gpu_details`: live status, predicted recent load, reservation pressure, physical free VRAM, and projected reservation headroom.
 - `nearest_available`: suggestion only when an exact request is unavailable.
 - `share_units_per_gpu` and `share_fraction_per_gpu`: admission capacity requested on each GPU. Context policy supplies `shared_capacity_units_per_gpu`. Missing fields on legacy reservations mean one unit.

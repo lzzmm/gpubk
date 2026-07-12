@@ -32,6 +32,13 @@ A separate trusted collector can implement `bk.telemetry.TelemetrySink`, or use
 `open_usage_store()` as the reference sink. Exactly one writer must hold
 `store.lock()` for its lifetime. Readers do not take that lock.
 
+The bundled monitor samples every 2 seconds and emits 60-second rollups by
+default. `monitor_interval_seconds` and `monitor_rollup_seconds` are versioned
+configuration fields with `BK_MONITOR_INTERVAL_SECONDS` and
+`BK_MONITOR_ROLLUP_SECONDS` overrides. A rollup must be at least one sample long
+and an exact multiple of the sampling interval, so accumulated observed time
+cannot exceed its storage window.
+
 ## Query Interfaces
 
 ```bash

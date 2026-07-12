@@ -264,6 +264,10 @@ NVML is initialized once and device handles are reused. The monitor records
 bounded scheduling load plus sparse per-user history and process start, stop,
 authorization, and workload changes. It does not append a full snapshot every
 second. Without NVML, GPUbk falls back to `nvidia-smi` with less process detail.
+The default cadence is a 2-second sample folded into 60-second records. Set
+`monitor_interval_seconds` and `monitor_rollup_seconds` in the trusted config to
+tune this for the server; the rollup must be an exact multiple of the sample
+interval. Command-line `--interval` and `--rollup` values override one run.
 
 Process status is based on the process UID and active reservation:
 `ok`, `wrong-gpu`, `unreserved`, `unknown`, or `system`. Command lines are
@@ -362,6 +366,8 @@ group-writable ledger directory:
   "worker_claim_timeout_seconds": 30,
   "worker_recovery_grace_seconds": 5,
   "worker_live_guard": true,
+  "monitor_interval_seconds": 2,
+  "monitor_rollup_seconds": 60,
   "file_mode": "0660",
   "dir_mode": "2770"
 }

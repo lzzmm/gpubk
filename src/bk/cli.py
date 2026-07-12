@@ -555,8 +555,22 @@ def _slots_command(argv: List[str], config: Config, store: LedgerStore) -> int:
 
 def _monitor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     parser = argparse.ArgumentParser(prog="bk monitor")
-    parser.add_argument("--interval", type=float, default=2.0, help="sampling interval in seconds (default: 2)")
-    parser.add_argument("--rollup", type=int, default=60, help="rollup window in seconds (default: 60)")
+    parser.add_argument(
+        "--interval",
+        type=float,
+        help=(
+            "sampling interval in seconds "
+            f"(configured default: {config.monitor_interval_seconds:g})"
+        ),
+    )
+    parser.add_argument(
+        "--rollup",
+        type=int,
+        help=(
+            "rollup window in seconds "
+            f"(configured default: {config.monitor_rollup_seconds})"
+        ),
+    )
     parser.add_argument("--once", action="store_true", help="collect one sample and exit")
     parser.add_argument("--samples", type=int, help="collect a bounded number of samples and exit")
     parser.add_argument("--verbose", action="store_true", help="print every sample instead of state changes only")
@@ -1019,6 +1033,10 @@ def _config_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         f"live-guard={'on' if effective['worker_live_guard'] else 'off'}"
     )
     print(
+        f"monitor: sample={effective['monitor_interval_seconds']}s "
+        f"rollup={effective['monitor_rollup_seconds']}s"
+    )
+    print(
         f"allocator: {'configured' if effective['allocator_command_configured'] else 'builtin'} "
         f"timeout={effective['allocator_timeout_seconds']}s"
     )
@@ -1061,6 +1079,8 @@ def _effective_config(config: Config) -> dict:
         "worker_claim_timeout_seconds": config.worker_claim_timeout_seconds,
         "worker_recovery_grace_seconds": config.worker_recovery_grace_seconds,
         "worker_live_guard": config.worker_live_guard,
+        "monitor_interval_seconds": config.monitor_interval_seconds,
+        "monitor_rollup_seconds": config.monitor_rollup_seconds,
         "file_mode": f"{config.file_mode:04o}",
         "dir_mode": f"{config.dir_mode:04o}",
         "allocator_command_configured": config.allocator_command is not None,

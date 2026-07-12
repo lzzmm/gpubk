@@ -66,6 +66,35 @@ class UsageMonitorTests(unittest.TestCase):
             self.assertEqual(store.recent_rollups(), [])
             self.assertFalse(data_dir.exists())
 
+    def test_monitor_uses_configured_cadence_when_not_overridden(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            config = Config(
+                data_dir=data_dir,
+                monitor_interval_seconds=2.5,
+                monitor_rollup_seconds=30,
+            )
+            monitor = UsageMonitor(
+                config,
+                LedgerStore(data_dir),
+                UsageAuditStore(data_dir),
+            )
+
+            self.assertEqual(monitor.interval_seconds, 2.5)
+            self.assertEqual(monitor.rollup_seconds, 30)
+
+    def test_monitor_override_rejects_inexact_rollup_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            with self.assertRaisesRegex(ValueError, "integer multiple"):
+                UsageMonitor(
+                    Config(data_dir=data_dir),
+                    LedgerStore(data_dir),
+                    UsageAuditStore(data_dir),
+                    interval_seconds=7,
+                    rollup_seconds=60,
+                )
+
     def test_event_append_rejects_symbolic_link_without_touching_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"

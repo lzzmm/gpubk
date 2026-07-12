@@ -92,8 +92,13 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(context["policy"]["job_log_max_mb"], 64)
         self.assertEqual(context["policy"]["job_log_total_max_mb"], 4096)
         self.assertEqual(context["policy"]["worker_recovery_grace_seconds"], 5.0)
+        self.assertEqual(
+            context["policy"]["monitoring"],
+            {"sample_interval_seconds": 2.0, "rollup_seconds": 60},
+        )
         self.assertEqual(context["policy"]["worker_busy_exit_code"], 75)
         self.assertEqual(context["policy"]["worker_waiting_exit_code"], 3)
+        self.assertTrue(context["capabilities"]["configurable_monitor_cadence"])
         self.assertNotIn("secret", str(context))
 
     def test_context_and_implicit_submission_use_configured_granularity(self):

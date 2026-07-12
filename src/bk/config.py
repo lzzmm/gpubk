@@ -32,6 +32,9 @@ MAX_WORKER_CLAIM_TIMEOUT_SECONDS = 7 * 24 * 60 * 60
 MAX_WORKER_RECOVERY_GRACE_SECONDS = 24 * 60 * 60
 MAX_ALLOCATOR_TIMEOUT_SECONDS = 5 * 60
 MAX_ALLOCATOR_WEIGHT = 1_000_000
+MIN_MONITOR_INTERVAL_SECONDS = 0.2
+MAX_MONITOR_INTERVAL_SECONDS = 60 * 60
+MAX_MONITOR_ROLLUP_SECONDS = 24 * 60 * 60
 
 CONFIG_ENV_MAP = {
     "gpu_count": "BK_GPU_COUNT",
@@ -58,6 +61,8 @@ CONFIG_ENV_MAP = {
     "worker_claim_timeout_seconds": "BK_WORKER_CLAIM_TIMEOUT_SECONDS",
     "worker_recovery_grace_seconds": "BK_WORKER_RECOVERY_GRACE_SECONDS",
     "worker_live_guard": "BK_WORKER_LIVE_GUARD",
+    "monitor_interval_seconds": "BK_MONITOR_INTERVAL_SECONDS",
+    "monitor_rollup_seconds": "BK_MONITOR_ROLLUP_SECONDS",
     "file_mode": "BK_FILE_MODE",
     "dir_mode": "BK_DIR_MODE",
 }
@@ -107,9 +112,17 @@ class Config:
     allocator_weight: float = 5.0
     slot_minutes: int = DEFAULT_SLOT_MINUTES
     config_file: Optional[Path] = None
+    monitor_interval_seconds: float = 2.0
+    monitor_rollup_seconds: int = 60
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "slot_minutes", validate_slot_minutes(self.slot_minutes))
+        interval, rollup = validate_monitor_timing(
+            self.monitor_interval_seconds,
+            self.monitor_rollup_seconds,
+        )
+        object.__setattr__(self, "monitor_interval_seconds", interval)
+        object.__setattr__(self, "monitor_rollup_seconds", rollup)
 
     @property
     def slot_seconds(self) -> int:
@@ -118,6 +131,54 @@ class Config:
     @property
     def config_path(self) -> Path:
         return self.config_file or self.data_dir / "config.json"
+
+
+def validate_monitor_timing(
+    interval_seconds: object,
+    rollup_seconds: object,
+) -> Tuple[float, int]:
+    if isinstance(interval_seconds, bool):
+        raise ValueError("monitor_interval_seconds must be a number")
+    try:
+        interval = float(interval_seconds)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("monitor_interval_seconds must be a number") from exc
+    if not math.isfinite(interval):
+        raise ValueError("monitor_interval_seconds must be finite")
+    if interval < MIN_MONITOR_INTERVAL_SECONDS:
+        raise ValueError(
+            f"monitor_interval_seconds must be >= {MIN_MONITOR_INTERVAL_SECONDS:g}"
+        )
+    if interval > MAX_MONITOR_INTERVAL_SECONDS:
+        raise ValueError(
+            f"monitor_interval_seconds must be <= {MAX_MONITOR_INTERVAL_SECONDS}"
+        )
+
+    if isinstance(rollup_seconds, bool) or not isinstance(rollup_seconds, (int, str)):
+        raise ValueError("monitor_rollup_seconds must be an integer")
+    try:
+        rollup = int(rollup_seconds)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("monitor_rollup_seconds must be an integer") from exc
+    if rollup < 1:
+        raise ValueError("monitor_rollup_seconds must be >= 1")
+    if rollup > MAX_MONITOR_ROLLUP_SECONDS:
+        raise ValueError(
+            f"monitor_rollup_seconds must be <= {MAX_MONITOR_ROLLUP_SECONDS}"
+        )
+    if rollup < interval:
+        raise ValueError("monitor_rollup_seconds must be >= monitor_interval_seconds")
+    samples_per_rollup = rollup / interval
+    if not math.isclose(
+        samples_per_rollup,
+        round(samples_per_rollup),
+        rel_tol=1e-9,
+        abs_tol=1e-9,
+    ):
+        raise ValueError(
+            "monitor_rollup_seconds must be an integer multiple of monitor_interval_seconds"
+        )
+    return interval, rollup
 
 
 def _read_config_file(path: Path, *, required: bool = False) -> Dict[str, Any]:
@@ -390,6 +451,18 @@ def load_config() -> Config:
             maximum=MAX_WORKER_RECOVERY_GRACE_SECONDS,
         ),
         worker_live_guard=_bool_value(raw, "worker_live_guard", True),
+        monitor_interval_seconds=_float_value(
+            raw,
+            "monitor_interval_seconds",
+            2.0,
+            maximum=MAX_MONITOR_INTERVAL_SECONDS,
+        ),
+        monitor_rollup_seconds=_int_value(
+            raw,
+            "monitor_rollup_seconds",
+            60,
+            maximum=MAX_MONITOR_ROLLUP_SECONDS,
+        ),
         file_mode=_mode_value(raw, "file_mode", DEFAULT_PRIVATE_FILE_MODE, directory=False),
         dir_mode=_mode_value(raw, "dir_mode", DEFAULT_PRIVATE_DIR_MODE, directory=True),
         allocator_command=allocator_command,

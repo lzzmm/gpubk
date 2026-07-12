@@ -38,6 +38,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.job_log_max_mb, 64)
             self.assertEqual(config.job_log_total_max_mb, 4096)
             self.assertEqual(config.worker_recovery_grace_seconds, 5.0)
+            self.assertEqual(config.monitor_interval_seconds, 2.0)
+            self.assertEqual(config.monitor_rollup_seconds, 60)
 
     def test_gpu_count_is_auto_detected_when_not_configured(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -80,6 +82,8 @@ class ConfigTests(unittest.TestCase):
                         "usage_daily_retention_days": 0,
                         "usage_event_retention_days": 365,
                         "worker_live_guard": False,
+                        "monitor_interval_seconds": 5,
+                        "monitor_rollup_seconds": 300,
                     }
                 ),
                 encoding="utf-8",
@@ -101,6 +105,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.usage_daily_retention_days, 0)
             self.assertEqual(config.usage_event_retention_days, 365)
             self.assertFalse(config.worker_live_guard)
+            self.assertEqual(config.monitor_interval_seconds, 5.0)
+            self.assertEqual(config.monitor_rollup_seconds, 300)
 
     def test_config_file_must_not_be_group_writable(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -314,6 +320,46 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.job_log_max_mb, 8)
             self.assertEqual(config.job_log_total_max_mb, 512)
             self.assertEqual(config.worker_recovery_grace_seconds, 0.25)
+
+    def test_monitor_cadence_can_be_overridden_by_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "BK_DATA_DIR": tmp,
+                    "BK_MONITOR_INTERVAL_SECONDS": "2.5",
+                    "BK_MONITOR_ROLLUP_SECONDS": "30",
+                },
+                clear=True,
+            ):
+                config = load_config()
+
+            self.assertEqual(config.monitor_interval_seconds, 2.5)
+            self.assertEqual(config.monitor_rollup_seconds, 30)
+
+    def test_monitor_cadence_rejects_unsafe_or_inexact_windows(self):
+        cases = (
+            ("0.1", "60", ">= 0.2"),
+            ("2", "1", ">= monitor_interval_seconds"),
+            ("7", "60", "integer multiple"),
+            ("2", "0", ">= 1"),
+        )
+        for interval, rollup, message in cases:
+            with (
+                self.subTest(interval=interval, rollup=rollup),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                with mock.patch.dict(
+                    "os.environ",
+                    {
+                        "BK_DATA_DIR": tmp,
+                        "BK_MONITOR_INTERVAL_SECONDS": interval,
+                        "BK_MONITOR_ROLLUP_SECONDS": rollup,
+                    },
+                    clear=True,
+                ):
+                    with self.assertRaisesRegex(ValueError, message):
+                        load_config()
 
     def test_file_mode_rejects_executable_bits(self):
         with tempfile.TemporaryDirectory() as tmp:

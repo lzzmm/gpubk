@@ -120,6 +120,8 @@ class CliTests(unittest.TestCase):
                 {
                     "BK_SLOT_MINUTES": "10",
                     "BK_TIMELINE_HOURS": "4",
+                    "BK_MONITOR_INTERVAL_SECONDS": "5",
+                    "BK_MONITOR_ROLLUP_SECONDS": "300",
                     "BK_ALLOCATOR_COMMAND": "allocator --token secret-value",
                 },
             )
@@ -130,10 +132,13 @@ class CliTests(unittest.TestCase):
             self.assertEqual(payload["schema_version"], "gpubk.config.v1")
             self.assertEqual(payload["effective"]["slot_minutes"], 10)
             self.assertEqual(payload["effective"]["timeline_hours"], 4)
+            self.assertEqual(payload["effective"]["monitor_interval_seconds"], 5.0)
+            self.assertEqual(payload["effective"]["monitor_rollup_seconds"], 300)
             self.assertTrue(payload["effective"]["allocator_command_configured"])
             self.assertNotIn("secret-value", result.stdout)
             self.assertEqual(payload["ledger_policy"]["status"], "unbound")
             self.assertIn("BK_SLOT_MINUTES", payload["environment_overrides"])
+            self.assertIn("BK_MONITOR_INTERVAL_SECONDS", payload["environment_overrides"])
 
     def test_config_report_detects_bound_policy_match_and_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1337,7 +1342,11 @@ class CliTests(unittest.TestCase):
             monitor = self.run_bk(
                 ["monitor", "--once"],
                 data_dir,
-                {"BK_GPU_SIM_FILE": str(simulation)},
+                {
+                    "BK_GPU_SIM_FILE": str(simulation),
+                    "BK_MONITOR_INTERVAL_SECONDS": "5",
+                    "BK_MONITOR_ROLLUP_SECONDS": "300",
+                },
             )
             events = self.run_bk(["usage", "events", "--all", "--since", "1h"], data_dir)
             rollups = self.run_bk(
@@ -1346,6 +1355,7 @@ class CliTests(unittest.TestCase):
             )
 
             self.assertEqual(monitor.returncode, 0, monitor.stderr)
+            self.assertIn("monitor started: interval=5s rollup=300s", monitor.stdout)
             self.assertIn("monitor started", monitor.stdout)
             self.assertIn("process-start", monitor.stdout)
             self.assertIn("discarded an incomplete trailing usage record", monitor.stdout)
@@ -1355,6 +1365,32 @@ class CliTests(unittest.TestCase):
             self.assertEqual(rollups.returncode, 0, rollups.stderr)
             self.assertIn('"partial": true', rollups.stdout)
             self.assertIn('"schema_version": "gpubk.usage.v1"', rollups.stdout)
+
+    def test_monitor_flags_override_configured_cadence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_bk(
+                ["monitor", "--once", "--interval", "1", "--rollup", "30"],
+                Path(tmp),
+                {
+                    "BK_MONITOR_INTERVAL_SECONDS": "5",
+                    "BK_MONITOR_ROLLUP_SECONDS": "300",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("monitor started: interval=1s rollup=30s", result.stdout)
+
+    def test_monitor_rejects_inexact_cadence_before_creating_storage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "absent"
+            result = self.run_bk(
+                ["monitor", "--once", "--interval", "7", "--rollup", "60"],
+                data_dir,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("integer multiple", result.stderr)
+            self.assertFalse(data_dir.exists())
 
     def test_monitor_fails_fast_when_another_writer_holds_the_usage_lock(self):
         from bk.usage_store import UsageAuditStore

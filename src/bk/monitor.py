@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from .config import Config
+from .config import Config, validate_monitor_timing
 from .gpu import GpuSnapshot, snapshot
 from .models import BookingError
 from .scheduler import list_active
@@ -53,14 +53,18 @@ class UsageMonitor:
         config: Config,
         ledger_store: LedgerStore,
         audit_store: TelemetrySink,
-        interval_seconds: float = 2.0,
-        rollup_seconds: int = 60,
+        interval_seconds: Optional[float] = None,
+        rollup_seconds: Optional[int] = None,
         snapshot_provider: SnapshotProvider = snapshot,
     ):
-        if interval_seconds < 0.2:
-            raise ValueError("monitor interval must be >= 0.2 seconds")
-        if rollup_seconds < 1:
-            raise ValueError("rollup interval must be >= 1 second")
+        interval_seconds, rollup_seconds = validate_monitor_timing(
+            (
+                config.monitor_interval_seconds
+                if interval_seconds is None
+                else interval_seconds
+            ),
+            config.monitor_rollup_seconds if rollup_seconds is None else rollup_seconds,
+        )
         self.config = config
         self.ledger_store = ledger_store
         self.audit_store = audit_store
@@ -268,14 +272,22 @@ class UsageMonitor:
 def run_monitor(
     config: Config,
     ledger_store: LedgerStore,
-    interval_seconds: float = 2.0,
-    rollup_seconds: int = 60,
+    interval_seconds: Optional[float] = None,
+    rollup_seconds: Optional[int] = None,
     once: bool = False,
     max_samples: Optional[int] = None,
     verbose: bool = False,
 ) -> int:
     if max_samples is not None and max_samples < 1:
         raise ValueError("--samples must be >= 1")
+    interval_seconds, rollup_seconds = validate_monitor_timing(
+        (
+            config.monitor_interval_seconds
+            if interval_seconds is None
+            else interval_seconds
+        ),
+        config.monitor_rollup_seconds if rollup_seconds is None else rollup_seconds,
+    )
     audit_store = UsageAuditStore(
         config.data_dir,
         config.lock_timeout_seconds,

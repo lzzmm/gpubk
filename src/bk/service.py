@@ -320,6 +320,10 @@ def build_agent_context(
                 "daily_days": config.usage_daily_retention_days,
                 "event_days": config.usage_event_retention_days,
             },
+            "monitoring": {
+                "sample_interval_seconds": config.monitor_interval_seconds,
+                "rollup_seconds": config.monitor_rollup_seconds,
+            },
         },
         "gpu_advice": gpu_advice.as_dict(),
         "reservations": [
@@ -345,6 +349,7 @@ def build_agent_context(
             "bounded_personal_audit_log": True,
             "audit_api_schema": AUDIT_SCHEMA_VERSION,
             "versioned_usage_history": True,
+            "configurable_monitor_cadence": True,
             "usage_api_schema": "gpubk.usage.v1",
             "external_allocator_is_advisory": True,
             "external_allocator_configured": bool(config.allocator_command),

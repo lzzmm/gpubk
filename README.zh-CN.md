@@ -237,6 +237,9 @@ bk u events --user me --since 7d
 NVML 只初始化一次，并复用设备句柄。监测器保存有限长度的调度负载、稀疏的用户历史，
 以及进程开始、结束、授权和工作负载变化事件，不会每秒写入一份完整快照。没有 NVML 时会回退到
 `nvidia-smi`，但进程级信息会减少。
+默认每 2 秒采样，并折叠为 60 秒记录。管理员可在可信配置中调整
+`monitor_interval_seconds` 与 `monitor_rollup_seconds`；聚合窗口必须是采样间隔的
+整数倍。命令行 `--interval`、`--rollup` 只覆盖本次运行。
 
 进程状态根据进程 UID 和有效预约判断，包括 `ok`、`wrong-gpu`、`unreserved`、
 `unknown` 和 `system`。命令行写入共享日志前会缩减为安全标签。
@@ -329,6 +332,8 @@ export BK_CONFIG_FILE=/etc/gpubk/config.json
   "worker_claim_timeout_seconds": 30,
   "worker_recovery_grace_seconds": 5,
   "worker_live_guard": true,
+  "monitor_interval_seconds": 2,
+  "monitor_rollup_seconds": 60,
   "file_mode": "0660",
   "dir_mode": "2770"
 }
