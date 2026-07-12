@@ -341,24 +341,30 @@ class UsageMonitor:
             return [f"usage maintenance deferred: {exc}"]
         return [str(item) for item in report.get("blocked", [])]
 
-    def close(self, closed_at: Optional[datetime] = None) -> int:
+    def close(
+        self,
+        closed_at: Optional[datetime] = None,
+        *,
+        record_stopped: bool = True,
+    ) -> int:
         if self._closed:
             return 0
         closed = closed_at or utc_now()
         if closed < self._last_sampled_at:
             closed = self._last_sampled_at
         flushed = self.flush_rollups(closed, force=True)
-        self._pending_warnings.extend(
-            self._write_collector_status(
-                self._last_sampled_at,
-                self._last_devices,
-                self._last_process_gap,
-                self._last_utilization_gap,
-                self._last_stable_identifier_gap,
-                force=True,
-                stopped_at=closed,
+        if record_stopped:
+            self._pending_warnings.extend(
+                self._write_collector_status(
+                    self._last_sampled_at,
+                    self._last_devices,
+                    self._last_process_gap,
+                    self._last_utilization_gap,
+                    self._last_stable_identifier_gap,
+                    force=True,
+                    stopped_at=closed,
+                )
             )
-        )
         self._closed = True
         return flushed
 
@@ -559,7 +565,10 @@ def run_monitor(
                         break
                     delay = max(0.0, interval_seconds - (time.monotonic() - started))
                     stop_event.wait(delay)
-            finally:
+            except BaseException:
+                _close_failed_monitor(monitor, samples)
+                raise
+            else:
                 flushed = monitor.close()
                 for warning in monitor.take_warnings():
                     print(f"monitor warning: {warning}")
@@ -569,6 +578,21 @@ def run_monitor(
     finally:
         lease.__exit__(None, None, None)
     return 0
+
+
+def _close_failed_monitor(monitor: UsageMonitor, samples: int) -> None:
+    try:
+        flushed = monitor.close(record_stopped=False)
+        warnings = monitor.take_warnings()
+    except BaseException as exc:
+        print(
+            "monitor warning: crash flush failed "
+            f"({type(exc).__name__}); the original monitor failure is preserved"
+        )
+        return
+    for warning in warnings:
+        print(f"monitor warning: {warning}")
+    print(f"monitor failed: samples={samples} partial_rollups={flushed}")
 
 
 def _install_signal_handlers(stop_event: threading.Event) -> Dict[int, object]:

@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Keep collector crash evidence honest: fatal sampling failures attempt a partial rollup flush
+  without publishing a graceful `stopped` heartbeat, preserve the original failure for systemd,
+  and always release the single-writer lease.
 - Force-kill and reap locally supervised job groups even when a worker crashes through an
   unavailable ledger reconciliation path, leaving durable state for explicit uncertain recovery
   instead of allowing a TERM-ignoring command to escape the failed worker.

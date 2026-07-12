@@ -60,7 +60,9 @@ The bundled collector writes its first heartbeat after a complete sample, then
 at a bounded low frequency; capability changes are published immediately. A
 graceful exit records `stopped`. An unclean exit leaves the last document in
 place and readers classify it as `stale` after the greater of 30 seconds or
-three heartbeat intervals. `degraded` means collection is alive but at least one
+three heartbeat intervals. The crash path attempts to flush partial rollups,
+but a flush failure never replaces the original collector error. `degraded`
+means collection is alive but at least one
 configured GPU lacks device telemetry, a stable CUDA-compatible identifier, a
 process list, or per-process utilization telemetry. A legacy v1 heartbeat without
 the additive stable-ID capability remains readable but is classified as degraded

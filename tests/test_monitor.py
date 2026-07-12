@@ -385,6 +385,60 @@ class UsageMonitorTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "monitor is closed"):
                 monitor.collect(self.now + timedelta(seconds=63))
 
+    def test_crash_close_keeps_the_last_collector_heartbeat_unstopped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self.write_ledger(data_dir, [])
+            config = Config(data_dir=data_dir, gpu_count=1)
+            audit_store = UsageAuditStore(data_dir)
+            device = GpuSnapshot(
+                0,
+                "gpu0",
+                memory_total_mb=24576,
+                source="simulation",
+                device_uuid="GPU-00000000-0000-0000-0000-000000000000",
+            )
+            monitor = UsageMonitor(
+                config,
+                LedgerStore(data_dir),
+                audit_store,
+                snapshot_provider=lambda _config: [device],
+            )
+
+            monitor.collect(self.now)
+            monitor.close(
+                self.now + timedelta(seconds=1),
+                record_stopped=False,
+            )
+            status = audit_store.load_collector_status(
+                now=self.now + timedelta(seconds=1)
+            )
+
+            self.assertEqual(status["state"], "running")
+            self.assertTrue(status["fresh"])
+            self.assertIsNone(status.get("stopped_at"))
+            with self.assertRaisesRegex(RuntimeError, "monitor is closed"):
+                monitor.collect(self.now + timedelta(seconds=2))
+
+    def test_run_monitor_preserves_collect_failure_and_releases_writer_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            config = Config(data_dir=data_dir, gpu_count=1)
+            ledger_store = LedgerStore(data_dir)
+            failed_monitor = mock.Mock(spec=UsageMonitor)
+            failed_monitor.collect.side_effect = OSError("simulated collector failure")
+            failed_monitor.close.side_effect = ValueError("simulated crash flush failure")
+
+            with mock.patch(
+                "bk.monitor.UsageMonitor",
+                return_value=failed_monitor,
+            ), self.assertRaisesRegex(OSError, "simulated collector failure"):
+                run_monitor(config, ledger_store, once=True)
+
+            failed_monitor.close.assert_called_once_with(record_stopped=False)
+            with UsageAuditStore(data_dir).lock(timeout_seconds=0.05):
+                pass
+
     def test_legacy_telemetry_sink_without_liveness_extension_warns_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

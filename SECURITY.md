@@ -70,6 +70,9 @@ Supported security boundaries:
   freshness are operator diagnostics, not proof of identity, authorization, or lock ownership;
   its capability gaps include stable device identifiers as well as process telemetry. A group
   member who can modify the data directory can also replace this advisory file.
+- Fatal collector exits never overwrite the last heartbeat with a graceful `stopped` state.
+  Partial rollups are flushed best-effort, the original error remains the service exit cause,
+  and the kernel-backed single-writer lease is released in all cases.
 - Applied telemetry maintenance and migration commands use the same writer role; dry-run
   inspection and public usage queries remain available to ordinary users.
 - `bk reset` is disabled whenever the configured data-directory mode is writable by group

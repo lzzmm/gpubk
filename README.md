@@ -402,6 +402,10 @@ restarted. Other failures retry at most three times in 60 seconds, allowing a
 short transient recovery without an endless log loop.
 The final command above is a read-only post-start check. Unlike deployment
 preflight, it fails when no collector heartbeat has ever been recorded.
+A normal signal-driven exit publishes `stopped`. A fatal sampling or storage
+error attempts to flush partial rollups but leaves the last `running`/`degraded`
+heartbeat untouched so it becomes `stale`; the original nonzero failure remains
+visible to systemd and the single-writer lease is still released.
 
 ## Agents and MCP
 
