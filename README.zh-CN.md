@@ -219,6 +219,13 @@ systemctl --user daemon-reload
 systemctl --user enable --now bk-worker.service
 ```
 
+在 systemd Linux 上，用户退出后 user manager 可能停止，开机时也不一定自动启动。
+确需无人值守任务时，由管理员按用户选择性开启 linger：
+
+```bash
+sudo loginctl enable-linger <worker用户>
+```
+
 生成的 unit 会固化安装当时生效的绝对 `BK_DATA_DIR`、私有 `BK_JOB_LOG_DIR`，以及
 显式设置的 `BK_CONFIG_FILE`。可用 `bk service show worker` 检查；任一路径变化后
 使用 `--force` 重新安装。同一 UID 的所有 worker 必须使用同一个私有目录，使租约
@@ -260,6 +267,12 @@ Python、JSON CLI 和 MCP 统一返回 `gpubk.usage.v1` 公共模型；可视化
 bk service install monitor
 systemctl --user daemon-reload
 systemctl --user enable --now bk-monitor.service
+```
+
+若主机需要开机及退出登录后持续运行，只为指定 monitor 账号开启 linger：
+
+```bash
+sudo loginctl enable-linger <monitor账号>
 ```
 
 共享服务器只能运行一个受信任的 monitor 写入者，不能每个用户各启一个；每位用户的

@@ -1465,6 +1465,7 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("EnvironmentFile=", unit)
             self.assertIn(f"captured data directory: {data_dir}", installed.stdout)
             self.assertNotIn("captured config file:", installed.stdout)
+            self.assertIn("sudo loginctl enable-linger", installed.stdout)
 
     def test_service_unit_captures_an_external_trusted_config(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1489,6 +1490,7 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("--interval", unit)
             self.assertNotIn("--rollup", unit)
             self.assertIn(f"captured config file: {config_path.resolve()}", installed.stdout)
+            self.assertIn("sudo loginctl enable-linger", installed.stdout)
 
     def test_shared_monitor_policy_fails_before_runtime_or_service_writes(self):
         with tempfile.TemporaryDirectory() as tmp:

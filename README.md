@@ -243,6 +243,13 @@ systemctl --user daemon-reload
 systemctl --user enable --now bk-worker.service
 ```
 
+On systemd Linux, the user manager may stop at logout and may not start at boot.
+For genuinely unattended jobs, an administrator can selectively enable linger:
+
+```bash
+sudo loginctl enable-linger <worker-user>
+```
+
 The generated unit captures the absolute `BK_DATA_DIR`, private
 `BK_JOB_LOG_DIR`, and an explicit `BK_CONFIG_FILE` in effect at installation
 time. Review it with `bk service show worker`; reinstall with `--force` after
@@ -293,6 +300,13 @@ The monitor also has a user service:
 bk service install monitor
 systemctl --user daemon-reload
 systemctl --user enable --now bk-monitor.service
+```
+
+For boot and logout persistence, enable linger only for the selected monitor
+account if the host requires it:
+
+```bash
+sudo loginctl enable-linger <monitor-account>
 ```
 
 Run exactly one trusted monitor writer on a shared server. Per-user workers are

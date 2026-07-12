@@ -66,6 +66,9 @@ Review generated units with `bk service show monitor` and
 `bk service show worker` before enabling them. Start exactly one trusted
 monitor for a shared data directory. Each UID may run one worker, and every
 worker for that UID must use the same private `BK_JOB_LOG_DIR`.
+If those user services must survive logout or start at boot, have an
+administrator verify selective `loginctl enable-linger <user>` state; GPUbk
+never changes linger policy automatically.
 
 Run `bk usage migrate --yes` only after reviewing its dry-run report. Legacy
 files remain untouched. Verify the result with read-only `bk agent context

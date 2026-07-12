@@ -955,6 +955,11 @@ def _service_command(argv: List[str], config: Config) -> int:
     print("not enabled or started; review it, then run systemctl --user daemon-reload")
     if args.kind == "monitor":
         print("shared server note: run exactly one trusted monitor writer; do not enable one per user")
+    username = shlex.quote(_current_actor().username)
+    print(
+        "Linux boot/logout persistence (optional, admin): "
+        f"sudo loginctl enable-linger {username}"
+    )
     return 0
 
 

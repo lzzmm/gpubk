@@ -74,6 +74,9 @@ Administrator responsibilities:
 - Review generated user units before enabling them. `bk service install` captures absolute data
   and private job-log paths plus an explicit trusted config path; reinstall the unit after
   those paths change.
+- Enabling systemd linger allows an account's user manager and background services to run
+  without an active login. Grant it only to the selected monitor account and users who need
+  unattended workers; disable it when that requirement ends.
 - Keep one canonical `BK_JOB_LOG_DIR` per UID. The worker lease cannot coordinate invocations
   deliberately pointed at different private directories.
 - Keep `worker_live_guard=true` on shared servers. Disabling it restores direct launch behavior

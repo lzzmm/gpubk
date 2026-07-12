@@ -13,6 +13,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Bound monitor service recovery to three attempts per 60 seconds while keeping duplicate-writer and role failures non-restartable.
 - Apply the same bounded startup-failure recovery to per-user worker services without treating ordinary child-command failures as daemon failures.
 - Disable global `bk reset` for shared data-directory modes so ordinary users cannot erase reservations, audit logs, backups, or telemetry.
+- Explain selective systemd linger in service-install output and deployment docs so unattended user services survive logout without silently changing host policy.
 - Fail closed with an actionable installer upgrade message when an old Debian/Ubuntu pip ignores the required isolated setuptools and would otherwise build an unusable `UNKNOWN` source package.
 - Validate configuration with a versioned closed schema, bounded finite values, typo hints, and a read-only redacted `bk config` report that detects ledger-policy drift.
 - Make booking granularity configurable through policy-bound `slot_minutes`/`BK_SLOT_MINUTES`, with consistent scheduler, CLI, TUI, Agent, and MCP behavior while retaining a 5-minute default.
