@@ -4,13 +4,29 @@
 
 1. Read the target release notes and run `bk doctor --json` with the installed
    version.
-2. Record the canonical `BK_DATA_DIR` and each user's `BK_JOB_LOG_DIR`.
+2. Record the canonical `BK_DATA_DIR`, trusted `BK_CONFIG_FILE`, and each user's
+   `BK_JOB_LOG_DIR`.
 3. Back up the shared data directory without following symbolic links. Keep its
    ownership, group, modes, and ACLs.
 4. Stop the one trusted monitor and ask users to stop their GPUbk workers. Do
    not stop GPU workloads or unrelated services.
 5. Test the new wheel in a separate virtual environment and an isolated
    `BK_DATA_DIR` before changing the shared installation.
+
+If an older shared deployment keeps `config.json` inside its group-writable data
+directory, move a reviewed copy to a non-writable administrator directory before
+starting 0.2.x:
+
+```bash
+sudo install -d -m 0755 -o root -g root /etc/gpubk
+sudo install -m 0644 -o root -g root /data2/shared/bk/config.json \
+  /etc/gpubk/config.json
+export BK_CONFIG_FILE=/etc/gpubk/config.json
+```
+
+Confirm `bk config` reports the new canonical path and a matching ledger policy.
+Reinstall monitor and worker units with `--force` so they capture it. GPUbk rejects
+an existing configuration whose directory can be replaced by shared-group members.
 
 GPUbk does not require an in-place ledger migration. It preserves unknown
 reservation fields and writes ledger changes atomically. Telemetry uses a

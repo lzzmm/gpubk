@@ -9,6 +9,7 @@ from bk.fileio import (
     ensure_directory,
     fsync_directory,
     open_existing_regular,
+    open_existing_regular_at,
     open_or_create_regular,
 )
 
@@ -24,6 +25,37 @@ class SecureFileIoTests(unittest.TestCase):
 
             with self.assertRaises(OSError):
                 open_existing_regular(link)
+
+    def test_directory_relative_read_is_pinned_and_rejects_path_components(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "managed"
+            path.write_text("keep", encoding="utf-8")
+            directory_fd = os.open(root, os.O_RDONLY)
+            try:
+                fd = open_existing_regular_at(directory_fd, "managed", path)
+                try:
+                    self.assertEqual(os.read(fd, 4), b"keep")
+                finally:
+                    os.close(fd)
+                with self.assertRaisesRegex(ValueError, "single path component"):
+                    open_existing_regular_at(directory_fd, "../managed", path)
+            finally:
+                os.close(directory_fd)
+
+    def test_directory_relative_read_rejects_symbolic_link(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "target"
+            link = root / "link"
+            target.write_text("secret", encoding="utf-8")
+            link.symlink_to(target.name)
+            directory_fd = os.open(root, os.O_RDONLY)
+            try:
+                with self.assertRaises(OSError):
+                    open_existing_regular_at(directory_fd, "link", link)
+            finally:
+                os.close(directory_fd)
 
     def test_existing_write_rejects_symbolic_link_without_touching_target(self):
         with tempfile.TemporaryDirectory() as tmp:

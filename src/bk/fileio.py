@@ -23,6 +23,29 @@ def open_existing_regular(
         raise
 
 
+def open_existing_regular_at(
+    directory_fd: int,
+    name: str,
+    display_path: Path,
+    flags: int = os.O_RDONLY,
+    *,
+    expected_mode: int | None = None,
+) -> int:
+    if not name or name in {".", ".."} or os.sep in name or (os.altsep and os.altsep in name):
+        raise ValueError("name must be a single path component")
+    if not hasattr(os, "O_NOFOLLOW"):
+        metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise OSError(errno.ELOOP, f"refusing symbolic link: {display_path}")
+    fd = os.open(name, _secure_flags(flags), dir_fd=directory_fd)
+    try:
+        _validate_regular_fd(fd, display_path, expected_mode=expected_mode)
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
 def open_or_create_regular(path: Path, flags: int, mode: int) -> int:
     secure_flags = _secure_flags(flags)
     created = False

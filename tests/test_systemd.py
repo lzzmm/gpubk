@@ -93,15 +93,27 @@ class BundledSystemdTests(unittest.TestCase):
         config = Config(
             data_dir=Path("relative-data"),
             job_log_dir=Path("relative-logs"),
+            config_file=Path("relative-config/config.json"),
         )
 
         worker = service_environment(config, "worker")
         monitor = service_environment(config, "monitor")
 
         self.assertEqual(worker["BK_DATA_DIR"], str(Path("relative-data").absolute()))
+        self.assertEqual(
+            worker["BK_CONFIG_FILE"],
+            str(Path("relative-config/config.json").absolute()),
+        )
         self.assertEqual(worker["BK_JOB_LOG_DIR"], str(Path("relative-logs").absolute()))
         self.assertEqual(monitor["BK_DATA_DIR"], str(Path("relative-data").absolute()))
+        self.assertEqual(
+            monitor["BK_CONFIG_FILE"],
+            str(Path("relative-config/config.json").absolute()),
+        )
         self.assertNotIn("BK_JOB_LOG_DIR", monitor)
+
+        defaults = service_environment(Config(data_dir=Path("relative-data")), "monitor")
+        self.assertNotIn("BK_CONFIG_FILE", defaults)
 
     def test_unit_rejects_control_characters_in_environment(self):
         with self.assertRaisesRegex(BookingError, "control character"):

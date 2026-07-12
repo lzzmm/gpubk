@@ -921,6 +921,8 @@ def _service_command(argv: List[str], config: Config) -> int:
     )
     print(f"installed unit: {path}")
     print(f"captured data directory: {environment['BK_DATA_DIR']}")
+    if "BK_CONFIG_FILE" in environment:
+        print(f"captured config file: {environment['BK_CONFIG_FILE']}")
     if "BK_JOB_LOG_DIR" in environment:
         print(f"captured job log directory: {environment['BK_JOB_LOG_DIR']}")
     print("not enabled or started; review it, then run systemctl --user daemon-reload")
@@ -934,7 +936,7 @@ def _config_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     parser.add_argument("--json", action="store_true", help="emit a stable machine-readable report")
     parser.add_argument("--compact", action="store_true", help="emit compact JSON")
     args = parser.parse_args(argv)
-    config_path = config.data_dir / "config.json"
+    config_path = config.config_path
     policy = {
         "status": "unbound",
         "bound": False,
@@ -962,6 +964,7 @@ def _config_command(argv: List[str], config: Config, store: LedgerStore) -> int:
 
     environment_names = {
         "BK_DATA_DIR",
+        "BK_CONFIG_FILE",
         "BK_JOB_LOG_DIR",
         "BK_ALLOCATOR_COMMAND",
         "BK_ALLOCATOR_TIMEOUT_SECONDS",
@@ -1032,6 +1035,7 @@ def _config_command(argv: List[str], config: Config, store: LedgerStore) -> int:
 def _effective_config(config: Config) -> dict:
     return {
         "data_dir": str(config.data_dir),
+        "config_file": str(config.config_path),
         "gpu_count": config.gpu_count,
         "slot_minutes": config.slot_minutes,
         "max_shared_users": config.max_shared_users,

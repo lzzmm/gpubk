@@ -239,12 +239,13 @@ systemctl --user daemon-reload
 systemctl --user enable --now bk-worker.service
 ```
 
-The generated unit captures the absolute `BK_DATA_DIR` and private
-`BK_JOB_LOG_DIR` in effect at installation time. Review it with
-`bk service show worker`; reinstall with `--force` after changing either path.
+The generated unit captures the absolute `BK_DATA_DIR`, private
+`BK_JOB_LOG_DIR`, and an explicit `BK_CONFIG_FILE` in effect at installation
+time. Review it with `bk service show worker`; reinstall with `--force` after
+changing any captured path.
 Every worker invocation for one UID must use that same private path so the lease
-has one authority. Other policy remains in `config.json` and is reloaded whenever
-the service starts.
+has one authority. Other policy is reloaded from the selected configuration path
+whenever the service starts.
 
 ## Monitoring and Placement
 
@@ -326,10 +327,13 @@ Create one setgid directory for the lab group:
 
 ```bash
 sudo install -d -m 2770 -o root -g gpuusers /data2/shared/bk
+sudo install -d -m 0755 -o root -g root /etc/gpubk
 export BK_DATA_DIR=/data2/shared/bk
+export BK_CONFIG_FILE=/etc/gpubk/config.json
 ```
 
-Put a root-owned `config.json` in that directory:
+Put the root-owned configuration at `/etc/gpubk/config.json`, outside the
+group-writable ledger directory:
 
 ```json
 {
@@ -364,9 +368,18 @@ Put a root-owned `config.json` in that directory:
 ```
 
 ```bash
-sudo chown root:gpuusers /data2/shared/bk/config.json
-sudo chmod 0644 /data2/shared/bk/config.json
+sudo chown root:root /etc/gpubk/config.json
+sudo chmod 0644 /etc/gpubk/config.json
 ```
+
+The configuration file and every directory that contains it must be owned by
+root or the current UID and must not be writable by group or other users. A
+root-owned file inside `/data2/shared/bk` is still replaceable by members who
+can write that directory, regardless of the file's `0644` mode. GPUbk therefore
+opens the configured parent chain and file by descriptor and rejects that layout.
+For a single-user installation, the backward-compatible default remains
+`$BK_DATA_DIR/config.json`; `BK_CONFIG_FILE` is required only when selecting a
+separate file.
 
 `max_shared_users` is retained as the compatible configuration name; it now
 defines whole shared capacity units per GPU. Old reservations without a
@@ -375,8 +388,8 @@ defines whole shared capacity units per GPU. Old reservations without a
 `slot_minutes` controls booking start and duration granularity. It defaults to
 `5` and may be any divisor of one hour from 1 through 60. `BK_SLOT_MINUTES`
 overrides it for single-user or test setups. On a shared server, keep this in the
-root-owned file: the ledger binds the value on first write and rejects clients
-using another grid.
+trusted root-owned file: the ledger binds the value on first write and rejects
+clients using another grid.
 
 Inspect the resolved settings without creating or changing data:
 
@@ -397,13 +410,16 @@ defaults are configurable. Schema versions, transaction durability, path and
 permission checks, record-size limits, and other corruption defenses are fixed
 implementation safeguards rather than administrator tuning knobs.
 
-All users and user services must use the same `BK_DATA_DIR`. The first write
-binds scheduling and storage policy into the ledger; clients with conflicting
-settings fail closed. Run the deployment preflight before enabling services:
+All users and user services must use the same `BK_DATA_DIR` and
+`BK_CONFIG_FILE`. The first write binds scheduling and storage policy into the
+ledger. Clients with conflicting settings fail closed. Run the deployment
+preflight before enabling services:
 
 ```bash
-BK_DATA_DIR=/data2/shared/bk bk doctor --probe --strict
-BK_DATA_DIR=/data2/shared/bk bk doctor --probe --json --strict
+BK_DATA_DIR=/data2/shared/bk BK_CONFIG_FILE=/etc/gpubk/config.json \
+  bk doctor --probe --strict
+BK_DATA_DIR=/data2/shared/bk BK_CONFIG_FILE=/etc/gpubk/config.json \
+  bk doctor --probe --json --strict
 ```
 
 The probe creates randomly named temporary files, verifies same-directory atomic

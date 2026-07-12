@@ -154,6 +154,32 @@ class CliTests(unittest.TestCase):
             self.assertEqual(mismatch_payload["ledger_policy"]["status"], "mismatch")
             self.assertIn("granularity", mismatch_payload["ledger_policy"]["message"])
 
+    def test_config_report_uses_external_trusted_config_without_writing_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "absent-data"
+            config_dir = root / "trusted"
+            config_dir.mkdir(mode=0o700)
+            config_path = config_dir / "config.json"
+            config_path.write_text(
+                json.dumps({"config_version": 1, "gpu_count": 2, "slot_minutes": 10}),
+                encoding="utf-8",
+            )
+            config_path.chmod(0o600)
+
+            result = self.run_bk(
+                ["config", "--compact"],
+                data_dir,
+                {"BK_CONFIG_FILE": str(config_path)},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(data_dir.exists())
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["config_file"]["path"], str(config_path.resolve()))
+            self.assertEqual(payload["effective"]["config_file"], str(config_path.resolve()))
+            self.assertIn("BK_CONFIG_FILE", payload["environment_overrides"])
+
     def test_plain_interactive_shell_can_create_booking(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.run_bk_with_input([], Path(tmp), "1 30m --gpu 0\nlist\nquit\n")
@@ -1394,8 +1420,32 @@ class CliTests(unittest.TestCase):
             self.assertEqual(shown.stdout, unit)
             self.assertIn(f'Environment="BK_DATA_DIR={data_dir}"', unit)
             self.assertIn(f'Environment="BK_JOB_LOG_DIR={jobs}"', unit)
+            self.assertNotIn("BK_CONFIG_FILE", unit)
             self.assertNotIn("EnvironmentFile=", unit)
             self.assertIn(f"captured data directory: {data_dir}", installed.stdout)
+            self.assertNotIn("captured config file:", installed.stdout)
+
+    def test_service_unit_captures_an_external_trusted_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "shared"
+            config_dir = root / "trusted"
+            config_dir.mkdir(mode=0o700)
+            config_path = config_dir / "config.json"
+            config_path.write_text("{}", encoding="utf-8")
+            config_path.chmod(0o600)
+            units = root / "units"
+
+            installed = self.run_bk(
+                ["service", "install", "monitor", "--target-dir", str(units)],
+                data_dir,
+                {"BK_CONFIG_FILE": str(config_path)},
+            )
+
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            unit = (units / "bk-monitor.service").read_text(encoding="utf-8")
+            self.assertIn(f'Environment="BK_CONFIG_FILE={config_path.resolve()}"', unit)
+            self.assertIn(f"captured config file: {config_path.resolve()}", installed.stdout)
 
     def test_usage_cli_exposes_stable_storage_and_dry_run_maintenance(self):
         with tempfile.TemporaryDirectory() as tmp:

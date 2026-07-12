@@ -42,11 +42,16 @@ Supported security boundaries:
 - Durable writes fsync both file contents and the containing directory. Directory-sync
   errors are never silently ignored: a valid WAL remains for idempotent deferred recovery,
   while telemetry, private job files, and service installation fail visibly.
+- Trusted configuration can live outside the writable ledger through `BK_CONFIG_FILE`.
+  GPUbk canonicalizes its parent, pins every directory component and the leaf by file
+  descriptor, rejects replaceable non-sticky directories, and never follows a leaf symlink.
 
 Administrator responsibilities:
 
 - Configure a dedicated Unix group and correct setgid directory permissions.
-- On a shared deployment, make `config.json` root-owned and not writable by group or other users; GPUbk rejects untrusted configuration files.
+- On a shared deployment, keep `BK_CONFIG_FILE` in a root-owned directory such as
+  `/etc/gpubk`, outside the group-writable ledger directory. File mode alone cannot prevent
+  rename or deletion by a user who can write its parent directory.
 - Verify `flock` and atomic rename behavior on the actual NFS/FUSE mount.
 - Control `/dev/nvidia*` access separately if hard enforcement is required.
 - Run MCP over per-user local stdio unless an authenticated remote transport is deliberately engineered.
@@ -54,7 +59,8 @@ Administrator responsibilities:
 - Run exactly one trusted telemetry writer per server. Do not expose `TelemetrySink` as an
   unauthenticated network write endpoint or allow users to submit records for arbitrary UIDs.
 - Review generated user units before enabling them. `bk service install` captures absolute data
-  and private job-log paths; reinstall the unit after those paths change.
+  and private job-log paths plus an explicit trusted config path; reinstall the unit after
+  those paths change.
 - Keep one canonical `BK_JOB_LOG_DIR` per UID. The worker lease cannot coordinate invocations
   deliberately pointed at different private directories.
 - Keep `worker_live_guard=true` on shared servers. Disabling it restores direct launch behavior

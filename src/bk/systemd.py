@@ -85,6 +85,8 @@ def service_environment(config: Config, kind: str) -> dict[str, str]:
         "BK_DATA_DIR": str(_absolute_path(config.data_dir)),
         "PYTHONUNBUFFERED": "1",
     }
+    if config.config_file is not None:
+        environment["BK_CONFIG_FILE"] = str(_absolute_path(config.config_file))
     if kind == "worker" and config.job_log_dir is not None:
         environment["BK_JOB_LOG_DIR"] = str(_absolute_path(config.job_log_dir))
     return environment

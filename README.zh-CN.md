@@ -216,10 +216,10 @@ systemctl --user daemon-reload
 systemctl --user enable --now bk-worker.service
 ```
 
-生成的 unit 会固化安装当时生效的绝对 `BK_DATA_DIR` 与私有 `BK_JOB_LOG_DIR`。
-可用 `bk service show worker` 检查；路径变化后使用 `--force` 重新安装。同一 UID 的
-所有 worker 必须使用同一个私有目录，使租约只有一个权威位置。其他策略仍从
-`config.json` 读取，并在服务每次启动时重新加载。
+生成的 unit 会固化安装当时生效的绝对 `BK_DATA_DIR`、私有 `BK_JOB_LOG_DIR`，以及
+显式设置的 `BK_CONFIG_FILE`。可用 `bk service show worker` 检查；任一路径变化后
+使用 `--force` 重新安装。同一 UID 的所有 worker 必须使用同一个私有目录，使租约
+只有一个权威位置。其他策略仍从所选配置路径读取，并在服务每次启动时重新加载。
 
 ## 监测与自动选卡
 
@@ -295,10 +295,12 @@ schema 标明 read-only、idempotent、destructive 和 closed-world 属性。
 
 ```bash
 sudo install -d -m 2770 -o root -g gpuusers /data2/shared/bk
+sudo install -d -m 0755 -o root -g root /etc/gpubk
 export BK_DATA_DIR=/data2/shared/bk
+export BK_CONFIG_FILE=/etc/gpubk/config.json
 ```
 
-在目录中放置由 root 管理的 `config.json`：
+将 root 管理的配置放在 `/etc/gpubk/config.json`，不要与组可写台账目录同置：
 
 ```json
 {
@@ -333,9 +335,15 @@ export BK_DATA_DIR=/data2/shared/bk
 ```
 
 ```bash
-sudo chown root:gpuusers /data2/shared/bk/config.json
-sudo chmod 0644 /data2/shared/bk/config.json
+sudo chown root:root /etc/gpubk/config.json
+sudo chmod 0644 /etc/gpubk/config.json
 ```
+
+配置文件及其每一级目录必须由 root 或当前 UID 所有，并且不可被 group/other 写入。
+即使文件自身是 root 所有的 `0644`，只要它位于 `/data2/shared/bk` 这种组可写目录中，
+目录成员仍能通过 rename 替换它。GPUbk 会按文件描述符逐级固定并验证配置路径，拒绝
+这种部署。单用户安装继续兼容 `$BK_DATA_DIR/config.json` 默认路径；只有选择独立配置
+时才需要 `BK_CONFIG_FILE`。
 
 `max_shared_users` 为兼容旧配置保留，现表示每张 GPU 的 shared 容量单位数；
 旧预约没有 `share_units` 字段时按 1 单位读取。
@@ -361,12 +369,14 @@ bk config --json
 事务持久性、路径与权限校验、记录大小上限等防损坏约束属于实现安全边界，不开放为
 管理员调优项。
 
-所有用户和用户服务必须使用同一个 `BK_DATA_DIR`。第一次写入会把调度与存储策略
-绑定到台账，配置冲突的客户端会直接拒绝操作。启用服务前运行部署预检：
+所有用户和用户服务必须使用同一个 `BK_DATA_DIR` 与 `BK_CONFIG_FILE`。第一次写入会把
+调度与存储策略绑定到台账，配置冲突的客户端会直接拒绝操作。启用服务前运行部署预检：
 
 ```bash
-BK_DATA_DIR=/data2/shared/bk bk doctor --probe --strict
-BK_DATA_DIR=/data2/shared/bk bk doctor --probe --json --strict
+BK_DATA_DIR=/data2/shared/bk BK_CONFIG_FILE=/etc/gpubk/config.json \
+  bk doctor --probe --strict
+BK_DATA_DIR=/data2/shared/bk BK_CONFIG_FILE=/etc/gpubk/config.json \
+  bk doctor --probe --json --strict
 ```
 
 预检会创建随机命名的临时文件，验证同目录原子替换与目录 fsync、同机跨进程

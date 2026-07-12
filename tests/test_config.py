@@ -30,6 +30,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.dir_mode, 0o700)
             self.assertEqual(config.slot_minutes, 5)
             self.assertEqual(config.slot_seconds, 300)
+            self.assertIsNone(config.config_file)
+            self.assertEqual(config.config_path, Path(tmp) / "bk" / "config.json")
             self.assertEqual(config.timeline_hours, 2)
             self.assertTrue(config.worker_live_guard)
             self.assertEqual(config.job_log_retention_days, 30)
@@ -122,6 +124,122 @@ class ConfigTests(unittest.TestCase):
 
             with mock.patch.dict("os.environ", {"BK_DATA_DIR": str(data_dir)}, clear=True):
                 with self.assertRaises(OSError):
+                    load_config()
+
+    def test_external_config_file_is_separate_from_shared_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "shared"
+            data_dir.mkdir(mode=0o770)
+            data_dir.chmod(0o2770)
+            config_dir = root / "trusted"
+            config_dir.mkdir(mode=0o700)
+            config_path = config_dir / "config.json"
+            config_path.write_text(
+                json.dumps({"config_version": 1, "gpu_count": 3, "slot_minutes": 10}),
+                encoding="utf-8",
+            )
+            config_path.chmod(0o600)
+
+            with mock.patch.dict(
+                "os.environ",
+                {"BK_DATA_DIR": str(data_dir), "BK_CONFIG_FILE": str(config_path)},
+                clear=True,
+            ):
+                config = load_config()
+
+            self.assertEqual(config.data_dir, data_dir)
+            self.assertEqual(config.config_file, config_path.resolve())
+            self.assertEqual(config.config_path, config_path.resolve())
+            self.assertEqual(config.gpu_count, 3)
+            self.assertEqual(config.slot_minutes, 10)
+
+    def test_explicit_config_file_must_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "BK_DATA_DIR": str(root / "data"),
+                    "BK_CONFIG_FILE": str(root / "missing.json"),
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(FileNotFoundError, "BK_CONFIG_FILE does not exist"):
+                    load_config()
+
+    def test_config_directory_must_not_be_group_writable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "shared"
+            data_dir.mkdir()
+            data_dir.chmod(0o2770)
+            path = data_dir / "config.json"
+            path.write_text("{}", encoding="utf-8")
+            path.chmod(0o600)
+
+            with mock.patch.dict("os.environ", {"BK_DATA_DIR": str(data_dir)}, clear=True):
+                with self.assertRaisesRegex(PermissionError, "outside the shared data directory"):
+                    load_config()
+
+    def test_external_config_directory_is_canonicalized_but_leaf_links_stay_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "trusted"
+            target.mkdir(mode=0o700)
+            config_path = target / "config.json"
+            config_path.write_text("{}", encoding="utf-8")
+            config_path.chmod(0o600)
+            linked_parent = root / "linked"
+            linked_parent.symlink_to(target, target_is_directory=True)
+
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "BK_DATA_DIR": str(root / "data"),
+                    "BK_CONFIG_FILE": str(linked_parent / "config.json"),
+                },
+                clear=True,
+            ):
+                config = load_config()
+
+            self.assertEqual(config.config_file, config_path.resolve())
+
+            config_path.unlink()
+            outside = root / "outside.json"
+            outside.write_text("{}", encoding="utf-8")
+            config_path.symlink_to(outside)
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "BK_DATA_DIR": str(root / "data"),
+                    "BK_CONFIG_FILE": str(linked_parent / "config.json"),
+                },
+                clear=True,
+            ):
+                with self.assertRaises(OSError):
+                    load_config()
+
+    def test_secure_leaf_under_group_writable_ancestor_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shared = root / "shared"
+            shared.mkdir()
+            shared.chmod(0o2770)
+            trusted = shared / "trusted"
+            trusted.mkdir(mode=0o700)
+            config_path = trusted / "config.json"
+            config_path.write_text("{}", encoding="utf-8")
+            config_path.chmod(0o600)
+
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "BK_DATA_DIR": str(root / "data"),
+                    "BK_CONFIG_FILE": str(config_path),
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(PermissionError, "outside the shared data directory"):
                     load_config()
 
     def test_zero_retention_disables_hot_ledger_pruning(self):

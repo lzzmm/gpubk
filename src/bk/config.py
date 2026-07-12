@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from .fileio import open_existing_regular
+from .fileio import open_existing_regular_at
 from .granularity import DEFAULT_SLOT_MINUTES, slot_seconds, validate_slot_minutes
 
 
@@ -106,6 +106,7 @@ class Config:
     allocator_timeout_seconds: float = 3.0
     allocator_weight: float = 5.0
     slot_minutes: int = DEFAULT_SLOT_MINUTES
+    config_file: Optional[Path] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "slot_minutes", validate_slot_minutes(self.slot_minutes))
@@ -114,12 +115,21 @@ class Config:
     def slot_seconds(self) -> int:
         return slot_seconds(self.slot_minutes)
 
+    @property
+    def config_path(self) -> Path:
+        return self.config_file or self.data_dir / "config.json"
 
-def _read_config_file(data_dir: Path) -> Dict[str, Any]:
-    path = data_dir / "config.json"
+
+def _read_config_file(path: Path, *, required: bool = False) -> Dict[str, Any]:
     if not os.path.lexists(path):
+        if required:
+            raise FileNotFoundError(f"configured BK_CONFIG_FILE does not exist: {path}")
         return {}
-    fd = open_existing_regular(path)
+    parent_fd = _open_trusted_config_parent(path.parent)
+    try:
+        fd = open_existing_regular_at(parent_fd, path.name, path)
+    finally:
+        os.close(parent_fd)
     try:
         metadata = os.fstat(fd)
         if metadata.st_uid not in {0, os.getuid()}:
@@ -280,7 +290,13 @@ def load_config() -> Config:
         if "BK_DATA_DIR" in os.environ
         else _default_data_dir()
     )
-    raw = _read_config_file(data_dir)
+    explicit_config_file = "BK_CONFIG_FILE" in os.environ
+    config_file = (
+        _canonical_config_file(_path_value(os.environ["BK_CONFIG_FILE"], "BK_CONFIG_FILE"))
+        if explicit_config_file
+        else data_dir / "config.json"
+    )
+    raw = _read_config_file(config_file, required=explicit_config_file)
 
     for key, env_name in CONFIG_ENV_MAP.items():
         if env_name in os.environ:
@@ -305,6 +321,7 @@ def load_config() -> Config:
 
     return Config(
         data_dir=data_dir,
+        config_file=config_file if explicit_config_file else None,
         gpu_count=gpu_count,
         slot_minutes=validate_slot_minutes(raw.get("slot_minutes", DEFAULT_SLOT_MINUTES)),
         max_shared_users=_int_value(raw, "max_shared_users", 2, maximum=MAX_SHARED_UNITS),
@@ -407,6 +424,57 @@ def _bounded_detected_gpu_count(value: int) -> int:
     if value < 1 or value > MAX_GPU_COUNT:
         raise ValueError(f"detected gpu_count must be between 1 and {MAX_GPU_COUNT}")
     return value
+
+
+def _open_trusted_config_parent(path: Path) -> int:
+    absolute = Path(os.path.realpath(os.path.abspath(os.fspath(path))))
+    flags = os.O_RDONLY
+    for name in ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW"):
+        flags |= getattr(os, name, 0)
+    anchor = Path(absolute.anchor)
+    fd = os.open(str(anchor), flags)
+    try:
+        _validate_trusted_config_directory(fd, anchor)
+        cursor = anchor
+        for component in absolute.parts[1:]:
+            if not hasattr(os, "O_NOFOLLOW"):
+                metadata = os.stat(component, dir_fd=fd, follow_symlinks=False)
+                if stat.S_ISLNK(metadata.st_mode):
+                    raise OSError(f"refusing symbolic-link configuration directory: {cursor / component}")
+            child_fd = os.open(component, flags, dir_fd=fd)
+            try:
+                cursor /= component
+                _validate_trusted_config_directory(child_fd, cursor)
+            except Exception:
+                os.close(child_fd)
+                raise
+            os.close(fd)
+            fd = child_fd
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _validate_trusted_config_directory(fd: int, path: Path) -> None:
+    metadata = os.fstat(fd)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise NotADirectoryError(f"configuration path component is not a directory: {path}")
+    if metadata.st_uid not in {0, os.getuid()}:
+        raise PermissionError(
+            f"configuration directory {path} must be owned by root or UID {os.getuid()}"
+        )
+    mode = stat.S_IMODE(metadata.st_mode)
+    if mode & 0o022 and not mode & stat.S_ISVTX:
+        raise PermissionError(
+            f"configuration directory {path} must not be writable by group or other users; "
+            "use BK_CONFIG_FILE outside the shared data directory"
+        )
+
+
+def _canonical_config_file(path: Path) -> Path:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    return Path(os.path.realpath(absolute.parent)) / absolute.name
 
 
 def _path_value(value: Any, key: str) -> Path:
