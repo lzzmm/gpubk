@@ -15,7 +15,13 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .collector_status import collector_document, safe_hostname
 from .config import Config, validate_monitor_timing
-from .gpu import GpuSnapshot, has_process_telemetry, has_process_utilization, snapshot
+from .gpu import (
+    GpuSnapshot,
+    has_process_telemetry,
+    has_process_utilization,
+    has_stable_device_identifier,
+    snapshot,
+)
 from .models import BookingError
 from .scheduler import list_active
 from .storage import LedgerStore
@@ -114,6 +120,7 @@ class UsageMonitor:
         self._reported_sink_warnings = 0
         self._process_telemetry_gap: frozenset[int] = frozenset()
         self._process_utilization_gap: frozenset[int] = frozenset()
+        self._stable_identifier_gap: frozenset[int] = frozenset()
         self._collector_heartbeat_seconds = max(
             10.0,
             float(interval_seconds),
@@ -126,6 +133,9 @@ class UsageMonitor:
         self._last_devices: Sequence[GpuSnapshot] = ()
         self._last_process_gap: frozenset[int] = frozenset(range(config.gpu_count))
         self._last_utilization_gap: frozenset[int] = frozenset()
+        self._last_stable_identifier_gap: frozenset[int] = frozenset(
+            range(config.gpu_count)
+        )
         self._next_collector_heartbeat: Optional[datetime] = None
         self._last_collector_signature: Optional[tuple] = None
         self._collector_write_failed = False
@@ -139,10 +149,16 @@ class UsageMonitor:
         sampled_at = sampled_at or utc_now()
         warnings = self._maintain_storage(sampled_at)
         devices = self.snapshot_provider(self.config)
-        process_gap, utilization_gap = _telemetry_capability_gaps(
+        process_gap, utilization_gap, stable_identifier_gap = _telemetry_capability_gaps(
             devices, self.config.gpu_count
         )
-        warnings.extend(self._telemetry_gap_warnings(process_gap, utilization_gap))
+        warnings.extend(
+            self._telemetry_gap_warnings(
+                process_gap,
+                utilization_gap,
+                stable_identifier_gap,
+            )
+        )
         reservations = list_active(self.ledger_store.load(), sampled_at)
         usage_by_gpu = classify_process_usage(devices, reservations, sampled_at)
         workload_ids = _register_sample_workloads(
@@ -170,6 +186,7 @@ class UsageMonitor:
                 devices,
                 process_gap,
                 utilization_gap,
+                stable_identifier_gap,
             )
         )
         warnings.extend(self.take_warnings())
@@ -189,6 +206,7 @@ class UsageMonitor:
         self,
         process_gap: frozenset[int],
         utilization_gap: frozenset[int],
+        stable_identifier_gap: frozenset[int],
     ) -> List[str]:
         warnings = []
         if process_gap != self._process_telemetry_gap:
@@ -210,6 +228,18 @@ class UsageMonitor:
             elif self._process_utilization_gap:
                 warnings.append("per-process utilization restored for all configured GPUs")
             self._process_utilization_gap = utilization_gap
+        if stable_identifier_gap != self._stable_identifier_gap:
+            if stable_identifier_gap:
+                warnings.append(
+                    "stable device identifier unavailable for GPU(s) "
+                    + ",".join(str(gpu) for gpu in sorted(stable_identifier_gap))
+                    + "; guarded scheduled jobs cannot launch safely"
+                )
+            elif self._stable_identifier_gap:
+                warnings.append(
+                    "stable device identifiers restored for all configured GPUs"
+                )
+            self._stable_identifier_gap = stable_identifier_gap
         return warnings
 
     def _write_collector_status(
@@ -218,6 +248,7 @@ class UsageMonitor:
         devices: Sequence[GpuSnapshot],
         process_gap: frozenset[int],
         utilization_gap: frozenset[int],
+        stable_identifier_gap: frozenset[int],
         *,
         force: bool = False,
         stopped_at: Optional[datetime] = None,
@@ -226,6 +257,7 @@ class UsageMonitor:
         self._last_devices = tuple(devices)
         self._last_process_gap = process_gap
         self._last_utilization_gap = utilization_gap
+        self._last_stable_identifier_gap = stable_identifier_gap
         save = getattr(self.audit_store, "save_collector_status", None)
         if not callable(save):
             if self._collector_extension_warning_reported:
@@ -236,6 +268,7 @@ class UsageMonitor:
         degraded = bool(
             process_gap
             or utilization_gap
+            or stable_identifier_gap
             or any(not item["device_telemetry"] for item in device_status)
         )
         status = "stopped" if stopped_at is not None else ("degraded" if degraded else "running")
@@ -246,6 +279,7 @@ class UsageMonitor:
                     item["gpu"],
                     item["source"],
                     item["device_telemetry"],
+                    item["stable_device_identifier"],
                     item["process_telemetry"],
                     item["process_utilization"],
                 )
@@ -253,6 +287,7 @@ class UsageMonitor:
             ),
             tuple(sorted(process_gap)),
             tuple(sorted(utilization_gap)),
+            tuple(sorted(stable_identifier_gap)),
         )
         if (
             not force
@@ -276,6 +311,7 @@ class UsageMonitor:
             written_at=written_at,
             stopped_at=stopped_at,
             devices=device_status,
+            stable_device_identifier_gap=sorted(stable_identifier_gap),
             process_telemetry_gap=sorted(process_gap),
             process_utilization_gap=sorted(utilization_gap),
         )
@@ -318,6 +354,7 @@ class UsageMonitor:
                 self._last_devices,
                 self._last_process_gap,
                 self._last_utilization_gap,
+                self._last_stable_identifier_gap,
                 force=True,
                 stopped_at=closed,
             )
@@ -646,10 +683,11 @@ def _process_sample_key(gpu: int, pid: int, start_id: str) -> Tuple[int, int, st
 
 def _telemetry_capability_gaps(
     devices: Sequence[GpuSnapshot], gpu_count: int
-) -> Tuple[frozenset[int], frozenset[int]]:
+) -> Tuple[frozenset[int], frozenset[int], frozenset[int]]:
     by_index = {device.index: device for device in devices}
     process_gap = set()
     utilization_gap = set()
+    stable_identifier_gap = set()
     for gpu in range(gpu_count):
         device = by_index.get(gpu)
         if (
@@ -660,7 +698,13 @@ def _telemetry_capability_gaps(
             process_gap.add(gpu)
         elif not has_process_utilization(device):
             utilization_gap.add(gpu)
-    return frozenset(process_gap), frozenset(utilization_gap)
+        if device is None or not has_stable_device_identifier(device):
+            stable_identifier_gap.add(gpu)
+    return (
+        frozenset(process_gap),
+        frozenset(utilization_gap),
+        frozenset(stable_identifier_gap),
+    )
 
 
 def _collector_devices(
@@ -684,6 +728,11 @@ def _collector_devices(
                 "gpu": gpu,
                 "source": source,
                 "device_telemetry": device_telemetry,
+                "stable_device_identifier": bool(
+                    device_telemetry
+                    and device is not None
+                    and has_stable_device_identifier(device)
+                ),
                 "process_telemetry": process_telemetry,
                 "process_utilization": bool(
                     process_telemetry

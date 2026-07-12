@@ -47,11 +47,11 @@ configuration fields with `BK_MONITOR_INTERVAL_SECONDS` and
 and an exact multiple of the sampling interval, so accumulated observed time
 cannot exceed its storage window.
 
-NVML device, process-list, and per-process-utilization capabilities are tracked
-separately. A transient NVML failure closes stale handles and retries after a
-short backoff. Device metrics may temporarily come from `nvidia-smi`, but that
-fallback is not treated as an empty process list: the collector preserves the
-last observed process state and emits a deduplicated warning until process
+NVML device, stable-device-identifier, process-list, and per-process-utilization
+capabilities are tracked separately. A transient NVML failure closes stale handles
+and retries after a short backoff. Device metrics may temporarily come from
+`nvidia-smi`, but that fallback is not treated as an empty process list: the
+collector preserves the last observed process state and emits a deduplicated warning until process
 telemetry returns. This prevents telemetry gaps from becoming false process-stop
 and process-start audit events. Per-user SM values remain missing when only the
 process list is available.
@@ -61,7 +61,10 @@ at a bounded low frequency; capability changes are published immediately. A
 graceful exit records `stopped`. An unclean exit leaves the last document in
 place and readers classify it as `stale` after the greater of 30 seconds or
 three heartbeat intervals. `degraded` means collection is alive but at least one
-configured GPU lacks device, process-list, or per-process utilization telemetry.
+configured GPU lacks device telemetry, a stable CUDA-compatible identifier, a
+process list, or per-process utilization telemetry. A legacy v1 heartbeat without
+the additive stable-ID capability remains readable but is classified as degraded
+until a current monitor replaces it.
 `clock-skew`, `invalid`, and `incompatible` remain explicit rather than being
 treated as fresh data. A fresh heartbeat covering a different number of GPUs
 than the active policy is `topology-mismatch` and is also not current. These

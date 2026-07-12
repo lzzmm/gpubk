@@ -171,11 +171,13 @@ class AgentServiceTests(unittest.TestCase):
                         "gpu": gpu,
                         "source": "nvml",
                         "device_telemetry": True,
+                        "stable_device_identifier": True,
                         "process_telemetry": True,
                         "process_utilization": True,
                     }
                     for gpu in range(2)
                 ],
+                stable_device_identifier_gap=[],
                 process_telemetry_gap=[],
                 process_utilization_gap=[],
             )

@@ -623,10 +623,12 @@ class UsageStoreTests(unittest.TestCase):
                     "gpu": 0,
                     "source": "nvml",
                     "device_telemetry": True,
+                    "stable_device_identifier": True,
                     "process_telemetry": True,
                     "process_utilization": True,
                 }
             ],
+            stable_device_identifier_gap=[],
             process_telemetry_gap=[],
             process_utilization_gap=[],
         )

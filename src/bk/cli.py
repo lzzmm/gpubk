@@ -2009,7 +2009,8 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     }:
         if collector_state == "degraded":
             message = (
-                "collector is running with incomplete GPU telemetry; process gaps="
+                "collector is running with incomplete GPU telemetry; stable identifier gaps="
+                f"{collector.get('stable_device_identifier_gap', [])}, process gaps="
                 f"{collector.get('process_telemetry_gap', [])}, utilization gaps="
                 f"{collector.get('process_utilization_gap', [])}"
             )

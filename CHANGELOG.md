@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Extend the backward-compatible collector v1 heartbeat with per-GPU stable-device-identifier
+  capability, degraded-state propagation, immediate recovery updates, and strict post-start
+  doctor checks so monitor health cannot overstate guarded job readiness.
 - Bind scheduled commands to stable CUDA-compatible GPU UUIDs from the same NVML snapshot that
   passed the live launch guard, fail closed when real devices lack an identifier or process list,
   and expose the capability to deployment checks and Agents instead of assuming NVML indices equal

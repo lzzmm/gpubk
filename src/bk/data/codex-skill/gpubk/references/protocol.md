@@ -40,9 +40,11 @@ Recommendation fields:
   not the Agent caller.
 - Context `policy.monitoring.collector` and every `gpubk.usage.v1` response report collector
   freshness. Treat live values as current only when `fresh=true`. `degraded` identifies explicit
-  device/process capability gaps; `stale`, `stopped`, `not-seen`, `clock-skew`, `invalid`, and
-  `incompatible` are never evidence that a GPU has no processes. `topology-mismatch` means the
-  fresh monitor covers a different GPU count than the active policy and is also not current.
+  stable-device-identifier or device/process capability gaps; inspect
+  `stable_device_identifier_gap` before promising unattended launch. `stale`, `stopped`,
+  `not-seen`, `clock-skew`, `invalid`, and `incompatible` are never evidence that a GPU has no
+  processes. `topology-mismatch` means the fresh monitor covers a different GPU count than the
+  active policy and is also not current.
 - `gpu_details`: live status, predicted recent load, reservation pressure, physical free VRAM, and projected reservation headroom.
 - `nearest_available`: suggestion only when an exact request is unavailable.
 - `share_units_per_gpu` and `share_fraction_per_gpu`: admission capacity requested on each GPU. Context policy supplies `shared_capacity_units_per_gpu`. Missing fields on legacy reservations mean one unit.

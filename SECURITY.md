@@ -62,7 +62,8 @@ Supported security boundaries:
   from bypassing GPUbk and modifying group-writable files directly.
 - `usage/collector.json` is an atomic, versioned liveness hint. Its PID, hostname, and
   freshness are operator diagnostics, not proof of identity, authorization, or lock ownership;
-  a group member who can modify the data directory can also replace this advisory file.
+  its capability gaps include stable device identifiers as well as process telemetry. A group
+  member who can modify the data directory can also replace this advisory file.
 - Applied telemetry maintenance and migration commands use the same writer role; dry-run
   inspection and public usage queries remain available to ordinary users.
 - `bk reset` is disabled whenever the configured data-directory mode is writable by group

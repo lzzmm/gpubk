@@ -74,6 +74,7 @@ class ReleaseConfigurationTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
         releasing = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
+        telemetry = (ROOT / "TELEMETRY.md").read_text(encoding="utf-8")
         protocol = (
             ROOT / "src" / "bk" / "data" / "codex-skill" / "gpubk"
             / "references" / "protocol.md"
@@ -82,6 +83,8 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("NVML indices equal CUDA ordinals", readme)
         self.assertIn("stable UUIDs", security)
         self.assertIn("capabilities.stable_device_identifier=true", releasing)
+        self.assertIn("collector.stable_device_identifier_gap=[]", releasing)
+        self.assertIn("legacy v1 heartbeat", telemetry)
         self.assertIn("capabilities.stable_device_identifier", protocol)
 
     def test_upgrade_guide_is_packaged_and_linked(self):

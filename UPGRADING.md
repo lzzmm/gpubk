@@ -73,6 +73,9 @@ Review generated units with `bk service show monitor` and
 `bk service show worker` before enabling them. Start exactly one trusted
 monitor for a shared data directory. Each UID may run one worker, and every
 worker for that UID must use the same private `BK_JOB_LOG_DIR`.
+Restart the monitor during this upgrade. A legacy `gpubk.collector.v1` heartbeat
+without the additive stable-device-identifier capability is intentionally shown
+as degraded until the current monitor replaces it.
 After starting the services, verify the monitor with
 `bk doctor --require-monitor --strict` and each user's worker with
 `bk worker --status --require-running`.

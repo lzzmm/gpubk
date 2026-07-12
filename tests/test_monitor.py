@@ -317,6 +317,7 @@ class UsageMonitorTests(unittest.TestCase):
                 source="nvml",
                 process_telemetry_available=True,
                 process_utilization_available=False,
+                device_uuid="GPU-00000000-0000-0000-0000-000000000000",
             )
             monitor = UsageMonitor(
                 config,
@@ -339,7 +340,13 @@ class UsageMonitorTests(unittest.TestCase):
             self.write_ledger(data_dir, [])
             config = Config(data_dir=data_dir, gpu_count=1)
             audit_store = UsageAuditStore(data_dir)
-            device = GpuSnapshot(0, "gpu0", memory_total_mb=24576, source="simulation")
+            device = GpuSnapshot(
+                0,
+                "gpu0",
+                memory_total_mb=24576,
+                source="simulation",
+                device_uuid="GPU-00000000-0000-0000-0000-000000000000",
+            )
             monitor = UsageMonitor(
                 config,
                 LedgerStore(data_dir),
@@ -370,6 +377,8 @@ class UsageMonitorTests(unittest.TestCase):
             self.assertEqual(running["state"], "running")
             self.assertTrue(running["fresh"])
             self.assertEqual(running["devices"][0]["source"], "simulation")
+            self.assertTrue(running["devices"][0]["stable_device_identifier"])
+            self.assertEqual(running["stable_device_identifier_gap"], [])
             self.assertEqual(stopped["state"], "stopped")
             self.assertFalse(stopped["fresh"])
             self.assertEqual(stopped["stopped_at"], iso(self.now + timedelta(seconds=61)))
@@ -415,6 +424,7 @@ class UsageMonitorTests(unittest.TestCase):
                     source="nvml",
                     process_telemetry_available=True,
                     process_utilization_available=True,
+                    device_uuid="GPU-00000000-0000-0000-0000-000000000000",
                 )
             ]
             monitor = UsageMonitor(
@@ -432,6 +442,7 @@ class UsageMonitorTests(unittest.TestCase):
                 source="nvidia-smi",
                 process_telemetry_available=False,
                 process_utilization_available=False,
+                device_uuid="GPU-00000000-0000-0000-0000-000000000000",
             )
             monitor.collect(self.now + timedelta(seconds=2))
             degraded = audit_store.load_collector_status(
@@ -444,6 +455,7 @@ class UsageMonitorTests(unittest.TestCase):
                 source="nvml",
                 process_telemetry_available=True,
                 process_utilization_available=True,
+                device_uuid="GPU-00000000-0000-0000-0000-000000000000",
             )
             monitor.collect(self.now + timedelta(seconds=4))
             restored = audit_store.load_collector_status(
@@ -454,6 +466,57 @@ class UsageMonitorTests(unittest.TestCase):
             self.assertEqual(degraded["process_telemetry_gap"], [0])
             self.assertEqual(restored["state"], "running")
             self.assertEqual(restored["process_telemetry_gap"], [])
+
+    def test_stable_identifier_recovery_bypasses_heartbeat_throttle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self.write_ledger(data_dir, [])
+            config = Config(data_dir=data_dir, gpu_count=1)
+            audit_store = UsageAuditStore(data_dir)
+            current = [
+                GpuSnapshot(
+                    0,
+                    "gpu0",
+                    memory_total_mb=24576,
+                    source="nvml",
+                    process_telemetry_available=True,
+                    process_utilization_available=True,
+                )
+            ]
+            monitor = UsageMonitor(
+                config,
+                LedgerStore(data_dir),
+                audit_store,
+                snapshot_provider=lambda _config: current,
+            )
+
+            degraded_sample = monitor.collect(self.now)
+            degraded = audit_store.load_collector_status(now=self.now)
+            current[0] = GpuSnapshot(
+                0,
+                "gpu0",
+                memory_total_mb=24576,
+                source="nvml",
+                process_telemetry_available=True,
+                process_utilization_available=True,
+                device_uuid="GPU-00000000-0000-0000-0000-000000000000",
+            )
+            restored_sample = monitor.collect(self.now + timedelta(seconds=2))
+            restored = audit_store.load_collector_status(
+                now=self.now + timedelta(seconds=2)
+            )
+
+            self.assertEqual(degraded["state"], "degraded")
+            self.assertEqual(degraded["stable_device_identifier_gap"], [0])
+            self.assertTrue(
+                any("cannot launch safely" in warning for warning in degraded_sample.warnings)
+            )
+            self.assertEqual(restored["state"], "running")
+            self.assertEqual(restored["stable_device_identifier_gap"], [])
+            self.assertIn(
+                "stable device identifiers restored for all configured GPUs",
+                restored_sample.warnings,
+            )
 
     def test_collector_heartbeat_failure_is_deduplicated_and_recovers(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -476,7 +539,13 @@ class UsageMonitorTests(unittest.TestCase):
                 LedgerStore(data_dir),
                 audit_store,
                 snapshot_provider=lambda _config: [
-                    GpuSnapshot(0, "gpu0", memory_total_mb=24576, source="simulation")
+                    GpuSnapshot(
+                        0,
+                        "gpu0",
+                        memory_total_mb=24576,
+                        source="simulation",
+                        device_uuid="GPU-00000000-0000-0000-0000-000000000000",
+                    )
                 ],
             )
 

@@ -19,6 +19,7 @@ class CollectorStatusTests(unittest.TestCase):
                 "gpu": 0,
                 "source": "nvml",
                 "device_telemetry": True,
+                "stable_device_identifier": True,
                 "process_telemetry": True,
                 "process_utilization": True,
             }
@@ -38,6 +39,7 @@ class CollectorStatusTests(unittest.TestCase):
             "sampled_at": self.now,
             "written_at": self.now,
             "devices": self.devices,
+            "stable_device_identifier_gap": [],
             "process_telemetry_gap": [],
             "process_utilization_gap": [],
         }
@@ -54,6 +56,8 @@ class CollectorStatusTests(unittest.TestCase):
         self.assertIs(validate_collector_document(payload), payload)
         self.assertEqual(fresh["state"], "running")
         self.assertTrue(fresh["fresh"])
+        self.assertTrue(fresh["stable_device_identifier_capability_known"])
+        self.assertEqual(fresh["stable_device_identifier_gap"], [])
         self.assertEqual(stale["state"], "stale")
         self.assertFalse(stale["fresh"])
         self.assertEqual(stale["reported_status"], "running")
@@ -76,6 +80,22 @@ class CollectorStatusTests(unittest.TestCase):
         stopped_status = classify_collector_document(stopped, now=stopped_at)
         self.assertEqual(stopped_status["state"], "stopped")
         self.assertFalse(stopped_status["fresh"])
+
+    def test_legacy_status_without_stable_identifier_capability_is_degraded(self):
+        payload = self.document()
+        payload.pop("stable_device_identifier_gap")
+        for device in payload["devices"]:
+            device.pop("stable_device_identifier")
+
+        self.assertIs(validate_collector_document(payload), payload)
+        status = classify_collector_document(payload, now=self.now)
+
+        self.assertEqual(status["reported_status"], "running")
+        self.assertEqual(status["state"], "degraded")
+        self.assertTrue(status["fresh"])
+        self.assertFalse(status["stable_device_identifier_capability_known"])
+        self.assertEqual(status["stable_device_identifier_gap"], [0])
+        self.assertFalse(status["devices"][0]["stable_device_identifier"])
 
     def test_large_future_timestamp_is_reported_as_clock_skew(self):
         payload = self.document()
@@ -118,11 +138,36 @@ class CollectorStatusTests(unittest.TestCase):
         mismatched_gap = self.document()
         mismatched_gap["process_telemetry_gap"] = [0]
         cases.append((mismatched_gap, "must match per-device process telemetry"))
+        mismatched_identifier_gap = self.document()
+        mismatched_identifier_gap["stable_device_identifier_gap"] = [0]
+        cases.append(
+            (
+                mismatched_identifier_gap,
+                "must match per-device stable identifier capabilities",
+            )
+        )
+        invalid_identifier_capability = self.document()
+        invalid_identifier_capability["devices"] = [
+            dict(self.devices[0], stable_device_identifier=None)
+        ]
+        cases.append((invalid_identifier_capability, "must be boolean"))
         impossible_capability = self.document()
         impossible_capability["devices"] = [
             dict(self.devices[0], device_telemetry=False, process_telemetry=True)
         ]
         cases.append((impossible_capability, "requires device telemetry"))
+        impossible_identifier = self.document()
+        impossible_identifier["devices"] = [
+            dict(
+                self.devices[0],
+                device_telemetry=False,
+                stable_device_identifier=True,
+                process_telemetry=False,
+                process_utilization=False,
+            )
+        ]
+        impossible_identifier["process_telemetry_gap"] = [0]
+        cases.append((impossible_identifier, "stable_device_identifier requires"))
         bad_order = self.document()
         bad_order["sampled_at"] = "2029-12-31T11:00:00Z"
         cases.append((bad_order, "sampled_at must not precede"))
@@ -143,6 +188,18 @@ class CollectorStatusTests(unittest.TestCase):
             self.document(
                 devices=[degraded_device],
                 process_telemetry_gap=[0],
+            )
+
+    def test_builder_rejects_missing_stable_identifier_marked_running(self):
+        degraded_device = dict(
+            self.devices[0],
+            stable_device_identifier=False,
+        )
+
+        with self.assertRaisesRegex(CollectorStatusError, "running collector status"):
+            self.document(
+                devices=[degraded_device],
+                stable_device_identifier_gap=[0],
             )
 
     def test_hostname_is_ascii_bounded_and_nonempty(self):

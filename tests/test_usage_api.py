@@ -149,6 +149,7 @@ class UsageApiTests(unittest.TestCase):
                         "gpu": 0,
                         "source": "nvml",
                         "device_telemetry": True,
+                        "stable_device_identifier": True,
                         "process_telemetry": True,
                         "process_utilization": True,
                     },
@@ -156,10 +157,12 @@ class UsageApiTests(unittest.TestCase):
                         "gpu": 1,
                         "source": "nvml",
                         "device_telemetry": True,
+                        "stable_device_identifier": True,
                         "process_telemetry": True,
                         "process_utilization": True,
                     },
                 ],
+                stable_device_identifier_gap=[],
                 process_telemetry_gap=[],
                 process_utilization_gap=[],
             )
@@ -176,6 +179,12 @@ class UsageApiTests(unittest.TestCase):
         self.assertTrue(all(payload["collector"]["state"] == "running" for payload in payloads))
         self.assertTrue(all(payload["collector"]["fresh"] for payload in payloads))
         self.assertTrue(all(payload["collector"]["topology_match"] for payload in payloads))
+        self.assertTrue(
+            all(
+                payload["collector"]["stable_device_identifier_gap"] == []
+                for payload in payloads
+            )
+        )
 
     def test_public_telemetry_facade_is_ui_independent(self):
         store = open_usage_store(self.config)
