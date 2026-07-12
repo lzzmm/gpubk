@@ -11,7 +11,9 @@ from pathlib import Path
 from unittest import mock
 
 from bk.cli import main as bk_main
+from bk.collector_status import collector_document
 from bk.fileio import ensure_directory
+from bk.usage_store import UsageAuditStore
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -695,6 +697,96 @@ class CliTests(unittest.TestCase):
             self.assertEqual(gpu["configured_device_count"], 2)
             self.assertEqual(gpu["indices"], [0])
             self.assertFalse(payload["ready"])
+
+    def test_doctor_reports_a_stale_collector_heartbeat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            now = datetime.now(timezone.utc).replace(microsecond=0)
+            sampled_at = now - timedelta(minutes=10)
+            UsageAuditStore(data_dir).save_collector_status(
+                collector_document(
+                    monitor_id="monitor-doctor",
+                    status="running",
+                    uid=os.getuid(),
+                    pid=4321,
+                    hostname="gpu-host",
+                    heartbeat_interval_seconds=60.0,
+                    sample_interval_seconds=2.0,
+                    rollup_seconds=60,
+                    started_at=sampled_at - timedelta(minutes=5),
+                    sampled_at=sampled_at,
+                    written_at=sampled_at,
+                    devices=[
+                        {
+                            "gpu": 0,
+                            "source": "nvml",
+                            "device_telemetry": True,
+                            "process_telemetry": True,
+                            "process_utilization": True,
+                        }
+                    ],
+                    process_telemetry_gap=[],
+                    process_utilization_gap=[],
+                )
+            )
+
+            result = self.run_bk(["doctor", "--json", "--strict"], data_dir)
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["collector"]["state"], "stale")
+            issue = next(
+                item for item in payload["policy_issues"] if item["type"] == "monitor-health"
+            )
+            self.assertIn("heartbeat is stale", issue["message"])
+            self.assertFalse(payload["healthy"])
+
+    def test_doctor_rejects_a_fresh_collector_for_the_wrong_gpu_topology(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            now = datetime.now(timezone.utc).replace(microsecond=0)
+            UsageAuditStore(data_dir).save_collector_status(
+                collector_document(
+                    monitor_id="monitor-old-config",
+                    status="running",
+                    uid=os.getuid(),
+                    pid=4321,
+                    hostname="gpu-host",
+                    heartbeat_interval_seconds=60.0,
+                    sample_interval_seconds=2.0,
+                    rollup_seconds=60,
+                    started_at=now - timedelta(minutes=1),
+                    sampled_at=now,
+                    written_at=now,
+                    devices=[
+                        {
+                            "gpu": 0,
+                            "source": "nvml",
+                            "device_telemetry": True,
+                            "process_telemetry": True,
+                            "process_utilization": True,
+                        }
+                    ],
+                    process_telemetry_gap=[],
+                    process_utilization_gap=[],
+                )
+            )
+
+            result = self.run_bk(
+                ["doctor", "--json", "--strict"],
+                data_dir,
+                {"BK_GPU_COUNT": "2"},
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["collector"]["state"], "topology-mismatch")
+            self.assertFalse(payload["collector"]["fresh"])
+            issue = next(
+                item for item in payload["policy_issues"] if item["type"] == "monitor-health"
+            )
+            self.assertIn("reports 1 GPU(s)", issue["message"])
+            self.assertIn("expects 2", issue["message"])
 
     def test_doctor_reports_ledger_symlink_as_json_without_following_it(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1425,11 +1517,13 @@ class CliTests(unittest.TestCase):
             self.assertIn("process-start", monitor.stdout)
             self.assertIn("discarded an incomplete trailing usage record", monitor.stdout)
             self.assertEqual(events.returncode, 0, events.stderr)
+            self.assertIn("collector: stopped at=", events.stdout)
             self.assertIn("unreserved", events.stdout)
             self.assertIn("train.py", events.stdout)
             self.assertEqual(rollups.returncode, 0, rollups.stderr)
             self.assertIn('"partial": true', rollups.stdout)
             self.assertIn('"schema_version": "gpubk.usage.v1"', rollups.stdout)
+            self.assertEqual(json.loads(rollups.stdout)["collector"]["state"], "stopped")
 
     def test_monitor_flags_override_configured_cadence(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
+from bk.collector_status import CollectorStatusError, collector_document
 from bk.usage_store import UsageAuditStore, UsageFormatError, UsageRetentionPolicy
 from bk.workload import describe_workload
 
@@ -120,6 +121,65 @@ class UsageStoreTests(unittest.TestCase):
             self.store.append_rollups([self._rollup_at(0)])
 
         self.assertFalse(self.store._partition_path("minute", self.at.date()).exists())
+
+    def test_collector_status_read_is_side_effect_free_and_atomic(self):
+        self.assertEqual(self.store.load_collector_status()["state"], "not-seen")
+        self.assertFalse(self.store.usage_dir.exists())
+
+        payload = self._collector_status()
+        self.store.save_collector_status(payload)
+        observed = self.store.load_collector_status(now=self.at + timedelta(seconds=20))
+        mismatched = self.store.load_collector_status(
+            now=self.at + timedelta(seconds=20),
+            expected_gpu_count=2,
+        )
+
+        self.assertEqual(observed["state"], "running")
+        self.assertTrue(observed["fresh"])
+        self.assertEqual(observed["monitor_id"], "monitor-test")
+        self.assertEqual(mismatched["state"], "topology-mismatch")
+        self.assertFalse(mismatched["topology_match"])
+        self.assertEqual(stat.S_IMODE(self.store.collector_path.stat().st_mode), 0o600)
+        self.assertFalse(any(self.store.usage_dir.glob(".collector.*.tmp")))
+
+    def test_invalid_collector_status_is_rejected_before_storage_creation(self):
+        payload = self._collector_status()
+        payload["status"] = "future-state"
+
+        with self.assertRaises(CollectorStatusError):
+            self.store.save_collector_status(payload)
+
+        self.assertFalse(self.store.usage_dir.exists())
+
+    def test_corrupt_or_newer_collector_status_is_reported_read_only(self):
+        self.store.ensure()
+        self.store.collector_path.write_text("{broken", encoding="utf-8")
+        self.store.collector_path.chmod(0o600)
+
+        invalid = self.store.load_collector_status(now=self.at)
+        issues = self.store.health_issues()
+
+        self.assertEqual(invalid["state"], "invalid")
+        self.assertTrue(any(item["type"] == "usage-collector-status" for item in issues))
+
+        newer = self._collector_status()
+        newer["schema_version"] = "gpubk.collector.v2"
+        self.store.collector_path.write_text(json.dumps(newer), encoding="utf-8")
+        incompatible = self.store.load_collector_status(now=self.at)
+        self.assertEqual(incompatible["state"], "incompatible")
+
+    def test_collector_status_symlink_is_never_followed_or_replaced(self):
+        self.store.ensure()
+        target = self.data_dir / "outside.json"
+        target.write_text("keep", encoding="utf-8")
+        self.store.collector_path.symlink_to(target)
+
+        status = self.store.load_collector_status(now=self.at)
+        with self.assertRaises(OSError):
+            self.store.save_collector_status(self._collector_status())
+
+        self.assertEqual(status["state"], "invalid")
+        self.assertEqual(target.read_text(encoding="utf-8"), "keep")
 
     def test_plain_partition_reader_yields_before_parsing_the_next_record(self):
         path = self.data_dir / "stream.v1.jsonl"
@@ -544,6 +604,32 @@ class UsageStoreTests(unittest.TestCase):
             "status": "ok",
             "reservation_ids": ["booking"],
         }
+
+    def _collector_status(self):
+        return collector_document(
+            monitor_id="monitor-test",
+            status="running",
+            uid=1001,
+            pid=4321,
+            hostname="gpu-host",
+            heartbeat_interval_seconds=60.0,
+            sample_interval_seconds=2.0,
+            rollup_seconds=60,
+            started_at=self.at - timedelta(minutes=5),
+            sampled_at=self.at,
+            written_at=self.at,
+            devices=[
+                {
+                    "gpu": 0,
+                    "source": "nvml",
+                    "device_telemetry": True,
+                    "process_telemetry": True,
+                    "process_utilization": True,
+                }
+            ],
+            process_telemetry_gap=[],
+            process_utilization_gap=[],
+        )
 
     def _rollup(self, workload_id):
         return {

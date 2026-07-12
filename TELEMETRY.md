@@ -31,6 +31,10 @@ but the value was unavailable. A numeric zero is a measured zero.
 A separate trusted collector can implement `bk.telemetry.TelemetrySink`, or use
 `open_usage_store()` as the reference sink. Exactly one writer must hold
 `store.lock()` for its lifetime. Readers do not take that lock.
+Collectors may also implement `bk.telemetry.CollectorStatusSink`. The reference
+store writes a versioned `gpubk.collector.v1` health document by atomic replace.
+Every `UsageQueryService` response includes its classified `collector` view, so
+clients never need to read the status file directly.
 For group-writable deployments, the bundled writer additionally requires a
 root-owned explicit configuration and matching numeric `monitor_uid`.
 Applied `bk u maintain --yes` and `bk u migrate --yes` operations require that
@@ -51,6 +55,17 @@ last observed process state and emits a deduplicated warning until process
 telemetry returns. This prevents telemetry gaps from becoming false process-stop
 and process-start audit events. Per-user SM values remain missing when only the
 process list is available.
+
+The bundled collector writes its first heartbeat after a complete sample, then
+at a bounded low frequency; capability changes are published immediately. A
+graceful exit records `stopped`. An unclean exit leaves the last document in
+place and readers classify it as `stale` after the greater of 30 seconds or
+three heartbeat intervals. `degraded` means collection is alive but at least one
+configured GPU lacks device, process-list, or per-process utilization telemetry.
+`clock-skew`, `invalid`, and `incompatible` remain explicit rather than being
+treated as fresh data. A fresh heartbeat covering a different number of GPUs
+than the active policy is `topology-mismatch` and is also not current. These
+states are health evidence only, never an authorization or scheduling lock.
 
 ## Query Interfaces
 
@@ -92,6 +107,7 @@ The versioned store is rooted at `BK_DATA_DIR/usage/`:
 ```text
 usage/
   store.json
+  collector.json
   state.json
   load.json
   users.json
@@ -145,6 +161,9 @@ bk u migrate --yes        # copy legacy data; originals remain untouched
 - A writer encountering a newer store major version refuses to write.
 - Migration is copy-on-write and retry-safe; legacy files are retained.
 - Agents and visualizers use the public API version, not storage versions.
+- Consumers check `collector.fresh` before treating recent telemetry as current.
+- Unknown additive collector fields are accepted; incompatible schema versions
+  remain visible and are never rewritten by readers.
 
 The legacy `usage-events.jsonl`, `usage-rollups.jsonl`, `usage-state.json`, and
 `usage-load.json` files remain readable. They are not automatically deleted.

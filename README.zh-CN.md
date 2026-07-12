@@ -254,6 +254,10 @@ NVML 只初始化一次，并复用设备句柄。初始化失败或设备句柄
 没有 NVML 时会回退到 `nvidia-smi` 获取设备指标；由于该回退没有可信的进程列表，
 GPUbk 会保留最后一次已观测进程状态并报告遥测缺口，不会伪造 stop/start 事件。
 monitor 警告与 Agent 的 GPU 详情都会暴露进程列表和进程级利用率能力。
+monitor 还会原子更新一个很小的 `usage/collector.json` 心跳。Usage JSON、Agent
+上下文、`bk doctor` 与 TUI 顶栏读取同一组 `running`、`degraded`、`stale`、
+`stopped`、拓扑不匹配状态。异常退出漏过三次心跳后变为 `stale`，正常退出显示
+`stopped`；TUI 中 `M:OK` 表示采集器新鲜，`M:--` 表示尚无心跳记录。
 默认每 2 秒采样，并折叠为 60 秒记录。管理员可在可信配置中调整
 `monitor_interval_seconds` 与 `monitor_rollup_seconds`；聚合窗口必须是采样间隔的
 整数倍。命令行 `--interval`、`--rollup` 只覆盖本次运行。

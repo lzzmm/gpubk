@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from bk.advisor import build_gpu_advice
+from bk.collector_status import collector_document
 from bk.config import Config
 from bk.gpu import GpuProcessSnapshot, GpuSnapshot
 from bk.models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingRequest
@@ -20,6 +21,7 @@ from bk.service import (
     submit_edit,
 )
 from bk.storage import LedgerStore
+from bk.usage_store import UsageAuditStore
 from bk.worker import job_spec_path
 
 
@@ -98,12 +100,64 @@ class AgentServiceTests(unittest.TestCase):
                 "sample_interval_seconds": 2.0,
                 "rollup_seconds": 60,
                 "writer_uid": None,
+                "collector": {
+                    "schema_version": "gpubk.collector.v1",
+                    "state": "not-seen",
+                    "reported_status": None,
+                    "fresh": None,
+                    "age_seconds": None,
+                    "stale_after_seconds": None,
+                },
             },
         )
         self.assertEqual(context["policy"]["worker_busy_exit_code"], 75)
         self.assertEqual(context["policy"]["worker_waiting_exit_code"], 3)
         self.assertTrue(context["capabilities"]["configurable_monitor_cadence"])
+        self.assertTrue(context["capabilities"]["collector_liveness"])
         self.assertNotIn("secret", str(context))
+
+    def test_agent_context_exposes_a_stale_collector_without_writing(self):
+        usage_store = UsageAuditStore(self.data_dir)
+        usage_store.save_collector_status(
+            collector_document(
+                monitor_id="monitor-agent",
+                status="running",
+                uid=1001,
+                pid=4321,
+                hostname="gpu-host",
+                heartbeat_interval_seconds=60.0,
+                sample_interval_seconds=2.0,
+                rollup_seconds=60,
+                started_at=self.start - timedelta(minutes=5),
+                sampled_at=self.start,
+                written_at=self.start,
+                devices=[
+                    {
+                        "gpu": gpu,
+                        "source": "nvml",
+                        "device_telemetry": True,
+                        "process_telemetry": True,
+                        "process_utilization": True,
+                    }
+                    for gpu in range(2)
+                ],
+                process_telemetry_gap=[],
+                process_utilization_gap=[],
+            )
+        )
+
+        context = build_agent_context(
+            self.config,
+            self.store,
+            self.actor,
+            at=self.start + timedelta(seconds=181),
+            advice=self.advice,
+        )
+
+        collector = context["policy"]["monitoring"]["collector"]
+        self.assertEqual(collector["state"], "stale")
+        self.assertFalse(collector["fresh"])
+        self.assertTrue(collector["topology_match"])
 
     def test_context_and_implicit_submission_use_configured_granularity(self):
         config = Config(

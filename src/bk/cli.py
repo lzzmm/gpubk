@@ -1859,6 +1859,16 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
                     "message": f"{type(exc).__name__}: {exc}",
                 }
             )
+    collector = (
+        {
+            "schema_version": "gpubk.collector.v1",
+            "state": "unavailable",
+            "fresh": None,
+            "error": "skipped because the data root is unsafe",
+        }
+        if unsafe_data_root
+        else usage_store.load_collector_status(expected_gpu_count=config.gpu_count)
+    )
 
     ledger = {"version": 1, "reservations": []}
     managed_ledger_paths = {
@@ -1910,6 +1920,37 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
                 "message": monitor_error,
             }
         )
+    collector_state = collector.get("state")
+    if collector_state in {
+        "degraded",
+        "stale",
+        "stopped",
+        "clock-skew",
+        "topology-mismatch",
+    }:
+        if collector_state == "degraded":
+            message = (
+                "collector is running with incomplete GPU telemetry; process gaps="
+                f"{collector.get('process_telemetry_gap', [])}, utilization gaps="
+                f"{collector.get('process_utilization_gap', [])}"
+            )
+        elif collector_state == "stale":
+            message = (
+                f"collector heartbeat is stale ({collector.get('age_seconds')}s old; "
+                f"limit {collector.get('stale_after_seconds')}s)"
+            )
+        elif collector_state == "stopped":
+            message = f"collector stopped at {collector.get('stopped_at')}"
+        elif collector_state == "clock-skew":
+            message = (
+                f"collector clock is ahead by {collector.get('clock_skew_seconds')}s"
+            )
+        else:
+            message = (
+                f"collector reports {len(collector.get('devices', []))} GPU(s), but policy "
+                f"expects {collector.get('expected_gpu_count')}"
+            )
+        issues.append({"type": "monitor-health", "message": message})
     if ledger_readable:
         try:
             validate_ledger_policy(ledger, config)
@@ -1953,6 +1994,7 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         "configured_gpu_count": config.gpu_count,
         "booking_slot_minutes": config.slot_minutes,
         "monitor_uid": config.monitor_uid,
+        "collector": collector,
         "file_mode": f"{config.file_mode:04o}",
         "dir_mode": f"{config.dir_mode:04o}",
         "storage_issues": storage_issues,

@@ -30,6 +30,7 @@ from bk.tui import (
     _capacity_text,
     _cell_for_gpu,
     _clear_now_label_slot,
+    _collector_label,
     _date_label,
     _decorate_timeline_cell,
     _default_timeline_view_start,
@@ -55,6 +56,7 @@ from bk.tui import (
     _reservation_palette,
     _reservation_color_map,
     _reservation_gpu_text,
+    _refresh_collector_status,
     _resolve_tui_theme,
     _selected_share_detail,
     _shared_weave_pair,
@@ -137,6 +139,7 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertTrue(title.endswith("5m"), title)
         self.assertTrue(details.endswith("? help"), details)
         self.assertIn("2.5s refresh", details)
+        self.assertIn("M:--", details)
 
         preview = AddPreview(self.start, self.end, (0,), 0, MODE_SHARED, True, blink=True)
         variants = [
@@ -159,6 +162,7 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertIn("any GPUs", pages["Add / Edit"]["f"])
         self.assertIn("exactly the selected GPUs", pages["Add / Edit"]["g"])
         self.assertIn("restore", pages["Add / Edit"]["r"])
+        self.assertIn("collector health", pages["Timeline"]["Monitor"])
         self.assertIn("bk u", pages["Quick Tour"])
 
         minimum_window_width = 70
@@ -172,6 +176,42 @@ class TuiAddPreviewTests(unittest.TestCase):
                 if key:
                     self.assertLessEqual(len(key), key_width - 2)
                     self.assertLessEqual(len(description), description_width, (key, description))
+
+    def test_collector_labels_are_compact_and_defensive(self):
+        expected = {
+            "running": "OK",
+            "degraded": "DEG",
+            "stale": "STALE",
+            "stopped": "STOP",
+            "clock-skew": "CLOCK",
+            "topology-mismatch": "TOPO",
+            "not-seen": "--",
+        }
+        for state, label in expected.items():
+            self.assertEqual(_collector_label({"state": state}), label)
+        self.assertEqual(_collector_label({"state": "future-state"}), "ERR")
+        self.assertEqual(_collector_label(None), "ERR")
+
+    def test_collector_status_refresh_is_side_effect_free_and_rate_limited(self):
+        config = Config(data_dir=Path("/tmp/bk-tui-collector"), gpu_count=2)
+        state = TuiState()
+        first = self.start
+        payload = {"state": "running", "fresh": True}
+
+        with mock.patch(
+            "bk.tui.UsageAuditStore.load_collector_status", return_value=payload
+        ) as load:
+            _refresh_collector_status(config, state, first)
+            _refresh_collector_status(config, state, first + timedelta(seconds=9))
+            _refresh_collector_status(config, state, first + timedelta(seconds=10))
+
+        self.assertEqual(load.call_count, 2)
+        load.assert_called_with(
+            now=first + timedelta(seconds=10),
+            expected_gpu_count=2,
+        )
+        self.assertEqual(state.collector_status, payload)
+        self.assertEqual(state.collector_checked_at, first + timedelta(seconds=10))
 
     def test_curses_timeout_uses_configured_refresh_interval(self):
         screen = mock.Mock()

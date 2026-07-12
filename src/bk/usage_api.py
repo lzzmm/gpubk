@@ -44,6 +44,7 @@ class UsageQueryService:
         redact_labels: bool = False,
     ) -> dict:
         normalized_start, normalized_end = _normalize_range(start, end)
+        generated_at = utc_now()
         self.store.last_warnings = []
         _validate_limit(limit)
         resolution_seconds = (
@@ -67,7 +68,11 @@ class UsageQueryService:
         return {
             "schema_version": USAGE_API_VERSION,
             "kind": "usage-samples",
-            "generated_at": to_iso(utc_now()),
+            "generated_at": to_iso(generated_at),
+            "collector": self.store.load_collector_status(
+                now=generated_at,
+                expected_gpu_count=self.config.gpu_count,
+            ),
             "query": {
                 "start_at": to_iso(normalized_start),
                 "end_at": to_iso(normalized_end),
@@ -94,6 +99,7 @@ class UsageQueryService:
         redact_labels: bool = False,
     ) -> dict:
         normalized_start, normalized_end = _normalize_range(start, end)
+        generated_at = utc_now()
         self.store.last_warnings = []
         _validate_limit(limit)
         records = list(
@@ -115,7 +121,11 @@ class UsageQueryService:
         return {
             "schema_version": USAGE_API_VERSION,
             "kind": "usage-events",
-            "generated_at": to_iso(utc_now()),
+            "generated_at": to_iso(generated_at),
+            "collector": self.store.load_collector_status(
+                now=generated_at,
+                expected_gpu_count=self.config.gpu_count,
+            ),
             "query": {
                 "start_at": to_iso(normalized_start),
                 "end_at": to_iso(normalized_end),
@@ -139,6 +149,7 @@ class UsageQueryService:
         redact_labels: bool = False,
     ) -> dict:
         normalized_start, normalized_end = _normalize_range(start, end)
+        generated_at = utc_now()
         self.store.last_warnings = []
         _validate_limit(limit)
         resolution_seconds = (
@@ -162,7 +173,11 @@ class UsageQueryService:
         return {
             "schema_version": USAGE_API_VERSION,
             "kind": "usage-users",
-            "generated_at": to_iso(utc_now()),
+            "generated_at": to_iso(generated_at),
+            "collector": self.store.load_collector_status(
+                now=generated_at,
+                expected_gpu_count=self.config.gpu_count,
+            ),
             "query": {
                 "start_at": to_iso(normalized_start),
                 "end_at": to_iso(normalized_end),
@@ -183,10 +198,16 @@ class UsageQueryService:
 
     def capabilities(self) -> dict:
         policy = UsageRetentionPolicy.from_config(self.config)
+        generated_at = utc_now()
+        storage = self.store.storage_info(include_collector=False)
         return {
             "schema_version": USAGE_API_VERSION,
             "kind": "usage-capabilities",
-            "generated_at": to_iso(utc_now()),
+            "generated_at": to_iso(generated_at),
+            "collector": self.store.load_collector_status(
+                now=generated_at,
+                expected_gpu_count=self.config.gpu_count,
+            ),
             "ingest_schema": "gpubk.telemetry.v1",
             "storage_format": "gpubk.usage/1",
             "resolutions": dict(RESOLUTIONS),
@@ -203,6 +224,7 @@ class UsageQueryService:
             "interfaces": {
                 "python": "bk.usage_api.UsageQueryService",
                 "writer_protocol": "bk.telemetry.TelemetrySink",
+                "collector_status_protocol": "bk.telemetry.CollectorStatusSink",
                 "json_cli": "bk usage ... --json",
                 "mcp": "get_my_gpu_usage",
             },
@@ -217,7 +239,7 @@ class UsageQueryService:
                 "interrupted_tail_repair": True,
                 "closed_partition_checksums": True,
             },
-            "storage": self.store.storage_info(),
+            "storage": storage,
         }
 
     def _records(

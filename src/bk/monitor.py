@@ -4,13 +4,16 @@ import hashlib
 import json
 import os
 import signal
+import socket
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+from .collector_status import collector_document, safe_hostname
 from .config import Config, validate_monitor_timing
 from .gpu import GpuSnapshot, has_process_telemetry, has_process_utilization, snapshot
 from .models import BookingError
@@ -111,8 +114,28 @@ class UsageMonitor:
         self._reported_sink_warnings = 0
         self._process_telemetry_gap: frozenset[int] = frozenset()
         self._process_utilization_gap: frozenset[int] = frozenset()
+        self._collector_heartbeat_seconds = max(
+            10.0,
+            float(interval_seconds),
+            min(60.0, float(rollup_seconds)),
+        )
+        self._monitor_id = uuid.uuid4().hex
+        self._hostname = safe_hostname(socket.gethostname())
+        self._started_at = utc_now()
+        self._last_sampled_at = self._started_at
+        self._last_devices: Sequence[GpuSnapshot] = ()
+        self._last_process_gap: frozenset[int] = frozenset(range(config.gpu_count))
+        self._last_utilization_gap: frozenset[int] = frozenset()
+        self._next_collector_heartbeat: Optional[datetime] = None
+        self._last_collector_signature: Optional[tuple] = None
+        self._collector_write_failed = False
+        self._collector_extension_warning_reported = False
+        self._pending_warnings: List[str] = []
+        self._closed = False
 
     def collect(self, sampled_at: Optional[datetime] = None) -> MonitorSample:
+        if self._closed:
+            raise RuntimeError("monitor is closed")
         sampled_at = sampled_at or utc_now()
         warnings = self._maintain_storage(sampled_at)
         devices = self.snapshot_provider(self.config)
@@ -141,6 +164,14 @@ class UsageMonitor:
         self._record_groups(groups, sampled_at)
         self._record_device_load(devices, sampled_at)
         flushed = self.flush_rollups(sampled_at)
+        warnings.extend(
+            self._write_collector_status(
+                sampled_at,
+                devices,
+                process_gap,
+                utilization_gap,
+            )
+        )
         warnings.extend(self.take_warnings())
         process_count = sum(len(rows) for rows in usage_by_gpu.values())
         violation_count = sum(1 for rows in usage_by_gpu.values() for item in rows if item.violation)
@@ -181,6 +212,89 @@ class UsageMonitor:
             self._process_utilization_gap = utilization_gap
         return warnings
 
+    def _write_collector_status(
+        self,
+        sampled_at: datetime,
+        devices: Sequence[GpuSnapshot],
+        process_gap: frozenset[int],
+        utilization_gap: frozenset[int],
+        *,
+        force: bool = False,
+        stopped_at: Optional[datetime] = None,
+    ) -> List[str]:
+        self._last_sampled_at = sampled_at
+        self._last_devices = tuple(devices)
+        self._last_process_gap = process_gap
+        self._last_utilization_gap = utilization_gap
+        save = getattr(self.audit_store, "save_collector_status", None)
+        if not callable(save):
+            if self._collector_extension_warning_reported:
+                return []
+            self._collector_extension_warning_reported = True
+            return ["telemetry sink does not expose collector liveness status"]
+        device_status = _collector_devices(devices, self.config.gpu_count)
+        degraded = bool(
+            process_gap
+            or utilization_gap
+            or any(not item["device_telemetry"] for item in device_status)
+        )
+        status = "stopped" if stopped_at is not None else ("degraded" if degraded else "running")
+        signature = (
+            status,
+            tuple(
+                (
+                    item["gpu"],
+                    item["source"],
+                    item["device_telemetry"],
+                    item["process_telemetry"],
+                    item["process_utilization"],
+                )
+                for item in device_status
+            ),
+            tuple(sorted(process_gap)),
+            tuple(sorted(utilization_gap)),
+        )
+        if (
+            not force
+            and signature == self._last_collector_signature
+            and self._next_collector_heartbeat is not None
+            and sampled_at < self._next_collector_heartbeat
+        ):
+            return []
+        written_at = stopped_at or sampled_at
+        payload = collector_document(
+            monitor_id=self._monitor_id,
+            status=status,
+            uid=os.getuid(),
+            pid=os.getpid(),
+            hostname=self._hostname,
+            heartbeat_interval_seconds=self._collector_heartbeat_seconds,
+            sample_interval_seconds=self.interval_seconds,
+            rollup_seconds=self.rollup_seconds,
+            started_at=min(self._started_at, sampled_at),
+            sampled_at=sampled_at,
+            written_at=written_at,
+            stopped_at=stopped_at,
+            devices=device_status,
+            process_telemetry_gap=sorted(process_gap),
+            process_utilization_gap=sorted(utilization_gap),
+        )
+        try:
+            save(payload)
+        except (OSError, ValueError) as exc:
+            if self._collector_write_failed:
+                return []
+            self._collector_write_failed = True
+            return [f"collector heartbeat write failed: {exc}"]
+        self._next_collector_heartbeat = sampled_at + timedelta(
+            seconds=self._collector_heartbeat_seconds
+        )
+        self._last_collector_signature = signature
+        if self._collector_write_failed:
+            self._collector_write_failed = False
+            return ["collector heartbeat storage recovered"]
+        return []
+
     def _maintain_storage(self, sampled_at: datetime) -> List[str]:
         if self._next_maintenance_check is not None and sampled_at < self._next_maintenance_check:
             return []
@@ -192,12 +306,31 @@ class UsageMonitor:
         return [str(item) for item in report.get("blocked", [])]
 
     def close(self, closed_at: Optional[datetime] = None) -> int:
-        return self.flush_rollups(closed_at or utc_now(), force=True)
+        if self._closed:
+            return 0
+        closed = closed_at or utc_now()
+        if closed < self._last_sampled_at:
+            closed = self._last_sampled_at
+        flushed = self.flush_rollups(closed, force=True)
+        self._pending_warnings.extend(
+            self._write_collector_status(
+                self._last_sampled_at,
+                self._last_devices,
+                self._last_process_gap,
+                self._last_utilization_gap,
+                force=True,
+                stopped_at=closed,
+            )
+        )
+        self._closed = True
+        return flushed
 
     def take_warnings(self) -> Tuple[str, ...]:
+        local = tuple(self._pending_warnings)
+        self._pending_warnings.clear()
         raw = getattr(self.audit_store, "last_warnings", ())
         if not isinstance(raw, (list, tuple)):
-            return ()
+            return local
         start = min(self._reported_sink_warnings, len(raw))
         pending = tuple(str(item) for item in raw[start:])
         if isinstance(raw, list):
@@ -205,7 +338,7 @@ class UsageMonitor:
             self._reported_sink_warnings = 0
         else:
             self._reported_sink_warnings = len(raw)
-        return pending
+        return tuple(dict.fromkeys((*local, *pending)))
 
     def flush_rollups(self, at: datetime, force: bool = False) -> int:
         ready = []
@@ -530,6 +663,38 @@ def _telemetry_capability_gaps(
     return frozenset(process_gap), frozenset(utilization_gap)
 
 
+def _collector_devices(
+    devices: Sequence[GpuSnapshot], gpu_count: int
+) -> List[dict]:
+    by_index = {device.index: device for device in devices}
+    result = []
+    for gpu in range(gpu_count):
+        device = by_index.get(gpu)
+        source = str(device.source if device is not None else "none")
+        source = "".join(
+            character if 0x20 <= ord(character) < 0x7F else "?"
+            for character in source
+        )[:64] or "none"
+        device_telemetry = device is not None and source != "none"
+        process_telemetry = bool(
+            device_telemetry and device is not None and has_process_telemetry(device)
+        )
+        result.append(
+            {
+                "gpu": gpu,
+                "source": source,
+                "device_telemetry": device_telemetry,
+                "process_telemetry": process_telemetry,
+                "process_utilization": bool(
+                    process_telemetry
+                    and device is not None
+                    and has_process_utilization(device)
+                ),
+            }
+        )
+    return result
+
+
 def _preserve_unobserved_process_state(
     current: Dict[str, dict],
     previous: Dict[str, dict],
@@ -538,6 +703,8 @@ def _preserve_unobserved_process_state(
     if not process_gap:
         return current
     for key, item in previous.items():
+        if not isinstance(item, dict):
+            continue
         try:
             gpu = int(item.get("gpu", -1))
         except (TypeError, ValueError):

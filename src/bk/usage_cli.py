@@ -165,6 +165,7 @@ def _parse_time(value: str, reference: datetime) -> datetime:
 
 
 def _print_payload(payload: dict) -> None:
+    _print_collector_summary(payload.get("collector"))
     kind = payload.get("kind")
     if kind == "usage-users":
         _print_users(payload)
@@ -174,6 +175,30 @@ def _print_payload(payload: dict) -> None:
         _print_samples(payload)
     else:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def _print_collector_summary(collector: object) -> None:
+    if not isinstance(collector, dict):
+        return
+    state = str(collector.get("state", "unknown"))
+    if state in {"running", "degraded", "stale"}:
+        age = collector.get("age_seconds")
+        detail = f" age={age:g}s" if isinstance(age, (int, float)) else ""
+    elif state == "stopped" and collector.get("stopped_at"):
+        try:
+            detail = f" at={parse_iso(str(collector['stopped_at'])).astimezone():%m-%d %H:%M:%S}"
+        except ValueError:
+            detail = ""
+    elif state == "not-seen":
+        detail = " (no monitor heartbeat has been recorded)"
+    elif state == "topology-mismatch":
+        detail = (
+            f" (reported={len(collector.get('devices', []))}, "
+            f"expected={collector.get('expected_gpu_count')})"
+        )
+    else:
+        detail = f" ({collector.get('error')})" if collector.get("error") else ""
+    print(f"collector: {state}{detail}")
 
 
 def _print_users(payload: dict) -> None:

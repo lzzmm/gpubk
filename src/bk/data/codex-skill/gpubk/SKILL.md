@@ -90,6 +90,9 @@ holds the lease; do not loop or start a second worker.
 
 - External AI allocator output is advisory ordering only. Local time, capacity, VRAM, identity, and transaction checks remain authoritative.
 - Treat live utilization as a soft forecast because running processes have no reliable end time.
+- Check `policy.monitoring.collector.fresh` before treating recent telemetry as current. A
+  degraded, stale, stopped, topology-mismatched, missing, or invalid collector is never proof
+  that a GPU is idle.
 - Do not delete journal or lock files manually.
 - Do not enable a worker, monitor, or service on a shared server without the user's or administrator's approval.
 - Do not disable `worker_live_guard` merely to make a scheduled command start sooner.

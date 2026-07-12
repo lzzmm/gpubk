@@ -24,6 +24,7 @@ from .scheduler import (
 from .sharing import normalize_share_units, reservation_share_units, share_text
 from .storage import AUDIT_SCHEMA_VERSION, LedgerStore
 from .timeparse import normalize_queue_start, parse_iso, to_iso, utc_now
+from .usage_store import UsageAuditStore
 from .worker import (
     JOB_SPEC_ORPHAN_GRACE_SECONDS,
     WORKER_BUSY_EXIT_CODE,
@@ -287,6 +288,15 @@ def build_agent_context(
     validate_ledger_policy(ledger, config)
     active = list_active(ledger, generated_at)
     gpu_advice = advice or build_gpu_advice(config, at=generated_at)
+    collector = UsageAuditStore(
+        config.data_dir,
+        config.lock_timeout_seconds,
+        config.file_mode,
+        config.dir_mode,
+    ).load_collector_status(
+        now=generated_at,
+        expected_gpu_count=config.gpu_count,
+    )
     return {
         "schema_version": AGENT_SCHEMA_VERSION,
         "kind": "context",
@@ -324,6 +334,7 @@ def build_agent_context(
                 "sample_interval_seconds": config.monitor_interval_seconds,
                 "rollup_seconds": config.monitor_rollup_seconds,
                 "writer_uid": config.monitor_uid,
+                "collector": collector,
             },
         },
         "gpu_advice": gpu_advice.as_dict(),
@@ -351,6 +362,7 @@ def build_agent_context(
             "audit_api_schema": AUDIT_SCHEMA_VERSION,
             "versioned_usage_history": True,
             "configurable_monitor_cadence": True,
+            "collector_liveness": True,
             "usage_api_schema": "gpubk.usage.v1",
             "external_allocator_is_advisory": True,
             "external_allocator_configured": bool(config.allocator_command),

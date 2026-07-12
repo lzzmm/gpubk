@@ -33,6 +33,11 @@ Recommendation fields:
 - Context `policy.monitoring` reports the effective sample and rollup cadence; consumers must
   not infer finer telemetry precision. `writer_uid` identifies the configured telemetry role,
   not the Agent caller.
+- Context `policy.monitoring.collector` and every `gpubk.usage.v1` response report collector
+  freshness. Treat live values as current only when `fresh=true`. `degraded` identifies explicit
+  device/process capability gaps; `stale`, `stopped`, `not-seen`, `clock-skew`, `invalid`, and
+  `incompatible` are never evidence that a GPU has no processes. `topology-mismatch` means the
+  fresh monitor covers a different GPU count than the active policy and is also not current.
 - `gpu_details`: live status, predicted recent load, reservation pressure, physical free VRAM, and projected reservation headroom.
 - `nearest_available`: suggestion only when an exact request is unavailable.
 - `share_units_per_gpu` and `share_fraction_per_gpu`: admission capacity requested on each GPU. Context policy supplies `shared_capacity_units_per_gpu`. Missing fields on legacy reservations mean one unit.
@@ -44,7 +49,8 @@ Recommendation fields:
   same-UID process group was stopped after worker loss, but job status remains `uncertain` because
   earlier side effects cannot be disproved. `remote-unverified`, `unverified`, and
   `termination-unverified` must never trigger automatic retry.
-- Context capabilities advertise `single_worker_lease` and `scheduled_job_crash_recovery`.
+- Context capabilities advertise `single_worker_lease`, `scheduled_job_crash_recovery`, and
+  `collector_liveness`.
   Worker exit `75` means the UID-private lease is already held; do not retry in a tight loop.
 
 Create and edit return the same `kind=booking_result` shape through JSON CLI and MCP: `status`, a

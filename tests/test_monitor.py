@@ -333,6 +333,166 @@ class UsageMonitorTests(unittest.TestCase):
             self.assertEqual(first.warnings, ("per-process utilization unavailable for GPU(s) 0",))
             self.assertEqual(second.warnings, ())
 
+    def test_collector_heartbeat_is_rate_limited_and_marks_graceful_stop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self.write_ledger(data_dir, [])
+            config = Config(data_dir=data_dir, gpu_count=1)
+            audit_store = UsageAuditStore(data_dir)
+            device = GpuSnapshot(0, "gpu0", memory_total_mb=24576, source="simulation")
+            monitor = UsageMonitor(
+                config,
+                LedgerStore(data_dir),
+                audit_store,
+                snapshot_provider=lambda _config: [device],
+            )
+
+            with mock.patch.object(
+                audit_store,
+                "save_collector_status",
+                wraps=audit_store.save_collector_status,
+            ) as save:
+                monitor.collect(self.now)
+                monitor.collect(self.now + timedelta(seconds=2))
+                monitor.collect(self.now + timedelta(seconds=59))
+                monitor.collect(self.now + timedelta(seconds=60))
+                running = audit_store.load_collector_status(
+                    now=self.now + timedelta(seconds=60)
+                )
+                monitor.close(self.now + timedelta(seconds=61))
+                stopped = audit_store.load_collector_status(
+                    now=self.now + timedelta(seconds=61)
+                )
+                repeated_close = monitor.close(self.now + timedelta(seconds=62))
+
+            self.assertEqual(save.call_count, 3)
+            self.assertEqual(repeated_close, 0)
+            self.assertEqual(running["state"], "running")
+            self.assertTrue(running["fresh"])
+            self.assertEqual(running["devices"][0]["source"], "simulation")
+            self.assertEqual(stopped["state"], "stopped")
+            self.assertFalse(stopped["fresh"])
+            self.assertEqual(stopped["stopped_at"], iso(self.now + timedelta(seconds=61)))
+            with self.assertRaisesRegex(RuntimeError, "monitor is closed"):
+                monitor.collect(self.now + timedelta(seconds=63))
+
+    def test_legacy_telemetry_sink_without_liveness_extension_warns_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self.write_ledger(data_dir, [])
+            audit_store = UsageAuditStore(data_dir)
+            monitor = UsageMonitor(
+                Config(data_dir=data_dir, gpu_count=1),
+                LedgerStore(data_dir),
+                audit_store,
+                snapshot_provider=lambda _config: [
+                    GpuSnapshot(0, "gpu0", memory_total_mb=24576, source="simulation")
+                ],
+            )
+
+            with mock.patch.object(audit_store, "save_collector_status", None):
+                first = monitor.collect(self.now)
+                second = monitor.collect(self.now + timedelta(seconds=2))
+                monitor.close(self.now + timedelta(seconds=3))
+
+            self.assertTrue(
+                any("does not expose collector liveness" in warning for warning in first.warnings)
+            )
+            self.assertEqual(second.warnings, ())
+            self.assertEqual(monitor.take_warnings(), ())
+
+    def test_collector_capability_changes_bypass_heartbeat_throttle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self.write_ledger(data_dir, [])
+            config = Config(data_dir=data_dir, gpu_count=1)
+            audit_store = UsageAuditStore(data_dir)
+            current = [
+                GpuSnapshot(
+                    0,
+                    "gpu0",
+                    memory_total_mb=24576,
+                    source="nvml",
+                    process_telemetry_available=True,
+                    process_utilization_available=True,
+                )
+            ]
+            monitor = UsageMonitor(
+                config,
+                LedgerStore(data_dir),
+                audit_store,
+                snapshot_provider=lambda _config: current,
+            )
+
+            monitor.collect(self.now)
+            current[0] = GpuSnapshot(
+                0,
+                "gpu0",
+                memory_total_mb=24576,
+                source="nvidia-smi",
+                process_telemetry_available=False,
+                process_utilization_available=False,
+            )
+            monitor.collect(self.now + timedelta(seconds=2))
+            degraded = audit_store.load_collector_status(
+                now=self.now + timedelta(seconds=2)
+            )
+            current[0] = GpuSnapshot(
+                0,
+                "gpu0",
+                memory_total_mb=24576,
+                source="nvml",
+                process_telemetry_available=True,
+                process_utilization_available=True,
+            )
+            monitor.collect(self.now + timedelta(seconds=4))
+            restored = audit_store.load_collector_status(
+                now=self.now + timedelta(seconds=4)
+            )
+
+            self.assertEqual(degraded["state"], "degraded")
+            self.assertEqual(degraded["process_telemetry_gap"], [0])
+            self.assertEqual(restored["state"], "running")
+            self.assertEqual(restored["process_telemetry_gap"], [])
+
+    def test_collector_heartbeat_failure_is_deduplicated_and_recovers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self.write_ledger(data_dir, [])
+            config = Config(data_dir=data_dir, gpu_count=1)
+            audit_store = UsageAuditStore(data_dir)
+            real_save = audit_store.save_collector_status
+            attempts = 0
+
+            def flaky_save(payload):
+                nonlocal attempts
+                attempts += 1
+                if attempts <= 2:
+                    raise OSError("simulated heartbeat disk error")
+                real_save(payload)
+
+            monitor = UsageMonitor(
+                config,
+                LedgerStore(data_dir),
+                audit_store,
+                snapshot_provider=lambda _config: [
+                    GpuSnapshot(0, "gpu0", memory_total_mb=24576, source="simulation")
+                ],
+            )
+
+            with mock.patch.object(audit_store, "save_collector_status", side_effect=flaky_save):
+                first = monitor.collect(self.now)
+                second = monitor.collect(self.now + timedelta(seconds=2))
+                third = monitor.collect(self.now + timedelta(seconds=4))
+
+            self.assertIn("collector heartbeat write failed", first.warnings[0])
+            self.assertEqual(second.warnings, ())
+            self.assertIn("collector heartbeat storage recovered", third.warnings)
+            self.assertEqual(
+                audit_store.load_collector_status(now=self.now + timedelta(seconds=4))["state"],
+                "running",
+            )
+
     def test_monitor_emits_authorization_change_when_booking_appears(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

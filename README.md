@@ -287,6 +287,11 @@ Because that fallback has no trustworthy process list, GPUbk preserves the last
 observed process state and reports the telemetry gap instead of manufacturing
 stop/start events. The gap and per-process utilization capabilities are exposed
 in monitor warnings and Agent GPU details.
+The monitor also atomically updates a small `usage/collector.json` heartbeat.
+Usage JSON, Agent context, `bk doctor`, and the TUI header expose the same states:
+`running`, `degraded`, `stale`, `stopped`, or `topology-mismatch`. A crash becomes
+`stale` after three missed heartbeats; a normal exit becomes `stopped`. In the
+TUI, `M:OK` means a fresh collector and `M:--` means no heartbeat has been recorded.
 The default cadence is a 2-second sample folded into 60-second records. Set
 `monitor_interval_seconds` and `monitor_rollup_seconds` in the trusted config to
 tune this for the server; the rollup must be an exact multiple of the sample

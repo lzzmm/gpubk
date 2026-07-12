@@ -53,6 +53,9 @@ Supported security boundaries:
   or external configuration and matching numeric `monitor_uid`. This prevents accidental or
   misconfigured telemetry writers that still use GPUbk; it does not stop a group member
   from bypassing GPUbk and modifying group-writable files directly.
+- `usage/collector.json` is an atomic, versioned liveness hint. Its PID, hostname, and
+  freshness are operator diagnostics, not proof of identity, authorization, or lock ownership;
+  a group member who can modify the data directory can also replace this advisory file.
 - Applied telemetry maintenance and migration commands use the same writer role; dry-run
   inspection and public usage queries remain available to ordinary users.
 - `bk reset` is disabled whenever the configured data-directory mode is writable by group

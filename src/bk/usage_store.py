@@ -14,6 +14,14 @@ from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Protocol, Sequence, Tuple
 
+from .collector_status import (
+    COLLECTOR_STATUS_SCHEMA_VERSION,
+    CollectorStatusError,
+    absent_collector_status,
+    classify_collector_document,
+    invalid_collector_status,
+    validate_collector_document,
+)
 from .fileio import (
     ensure_directory,
     file_type_name,
@@ -80,6 +88,19 @@ class TelemetrySink(Protocol):
     ) -> dict: ...
 
 
+class CollectorStatusSink(Protocol):
+    """Optional health extension for collectors that expose liveness."""
+
+    def save_collector_status(self, payload: dict) -> None: ...
+
+    def load_collector_status(
+        self,
+        *,
+        now: Optional[datetime] = None,
+        expected_gpu_count: Optional[int] = None,
+    ) -> dict: ...
+
+
 @dataclass(frozen=True)
 class UsageRetentionPolicy:
     load_minutes: int = 120
@@ -124,6 +145,7 @@ class UsageAuditStore:
         self.state_path = self.usage_dir / "state.json"
         self.transition_journal_path = self.usage_dir / "state-transition.json"
         self.load_path = self.usage_dir / "load.json"
+        self.collector_path = self.usage_dir / "collector.json"
         self.users_path = self.usage_dir / "users.json"
         self.workloads_path = self.usage_dir / "workloads.v1.jsonl"
         self.key_path = self.usage_dir / "workload.key"
@@ -235,6 +257,39 @@ class UsageAuditStore:
     def save_load_history(self, history: dict) -> None:
         self.ensure()
         _atomic_write_json(self.load_path, history, self.file_mode, self.usage_dir, ".load.")
+
+    def save_collector_status(self, payload: dict) -> None:
+        validate_collector_document(payload)
+        self.ensure()
+        _atomic_write_json(
+            self.collector_path,
+            payload,
+            self.file_mode,
+            self.usage_dir,
+            ".collector.",
+        )
+
+    def load_collector_status(
+        self,
+        *,
+        now: Optional[datetime] = None,
+        expected_gpu_count: Optional[int] = None,
+    ) -> dict:
+        if not os.path.lexists(self.collector_path):
+            return absent_collector_status()
+        try:
+            payload = self._read_json(self.collector_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return invalid_collector_status(f"{type(exc).__name__}: {exc}")
+        try:
+            return classify_collector_document(
+                payload,
+                now=now,
+                expected_gpu_count=expected_gpu_count,
+            )
+        except CollectorStatusError as exc:
+            incompatible = payload.get("schema_version") != COLLECTOR_STATUS_SCHEMA_VERSION
+            return invalid_collector_status(str(exc), incompatible=incompatible)
 
     def append_events(self, events: Iterable[dict]) -> int:
         items = [dict(item) for item in events if str(item.get("status", "")) != "system"]
@@ -579,7 +634,7 @@ class UsageAuditStore:
         )
         return report
 
-    def storage_info(self) -> dict:
+    def storage_info(self, *, include_collector: bool = True) -> dict:
         meta = self._read_json(self.meta_path) if self.meta_path.exists() else None
         tiers = {}
         for tier in ("events", "minute", "five-minute", "ten-minute", "hourly", "daily"):
@@ -590,7 +645,7 @@ class UsageAuditStore:
                 "oldest": str(min((_partition_day(path) for path in paths if _partition_day(path)), default="")),
                 "newest": str(max((_partition_day(path) for path in paths if _partition_day(path)), default="")),
             }
-        return {
+        result = {
             "format": meta,
             "path": str(self.usage_dir),
             "tiers": tiers,
@@ -604,6 +659,9 @@ class UsageAuditStore:
             },
             "warnings": list(self.last_warnings),
         }
+        if include_collector:
+            result["collector"] = self.load_collector_status()
+        return result
 
     def health_issues(self) -> List[dict]:
         issues = []
@@ -680,6 +738,17 @@ class UsageAuditStore:
                 self._validate_meta(self._read_json(self.meta_path))
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 issues.append({"type": "usage-format", "path": str(self.meta_path), "message": str(exc)})
+        if os.path.lexists(self.collector_path):
+            try:
+                validate_collector_document(self._read_json(self.collector_path))
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                issues.append(
+                    {
+                        "type": "usage-collector-status",
+                        "path": str(self.collector_path),
+                        "message": str(exc),
+                    }
+                )
         if os.path.lexists(self.workloads_path) and not os.path.lexists(self.key_path):
             issues.append(
                 {
@@ -1269,6 +1338,7 @@ class UsageAuditStore:
             self.state_path: self.file_mode,
             self.transition_journal_path: self.file_mode,
             self.load_path: self.file_mode,
+            self.collector_path: self.file_mode,
             self.users_path: self.file_mode,
             self.workloads_path: self.file_mode,
             self.key_path: 0o600,

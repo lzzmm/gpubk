@@ -2,11 +2,18 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
+from bk.collector_status import COLLECTOR_STATUS_SCHEMA_VERSION, collector_document
 from bk.config import Config
 from bk.usage_api import UsageQueryService, auto_resolution
 from bk.usage_store import UsageAuditStore
-from bk.telemetry import TELEMETRY_INGEST_SCHEMA_VERSION, open_usage_query, open_usage_store
+from bk.telemetry import (
+    CollectorStatusSink,
+    TELEMETRY_INGEST_SCHEMA_VERSION,
+    open_usage_query,
+    open_usage_store,
+)
 from bk.workload import describe_workload
 
 
@@ -104,6 +111,12 @@ class UsageApiTests(unittest.TestCase):
 
         self.assertEqual(payload["storage_format"], "gpubk.usage/1")
         self.assertEqual(payload["interfaces"]["writer_protocol"], "bk.telemetry.TelemetrySink")
+        self.assertEqual(
+            payload["interfaces"]["collector_status_protocol"],
+            "bk.telemetry.CollectorStatusSink",
+        )
+        self.assertEqual(payload["collector"]["state"], "not-seen")
+        self.assertNotIn("collector", payload["storage"])
         self.assertEqual(payload["retention"]["minute_days"], 30)
         self.assertEqual(payload["retention"]["daily_days"], 0)
         self.assertEqual(
@@ -117,6 +130,53 @@ class UsageApiTests(unittest.TestCase):
         self.assertTrue(payload["durability"]["append_batch_rollback"])
         self.assertTrue(payload["durability"]["interrupted_tail_repair"])
 
+    def test_every_public_query_reports_collector_freshness(self):
+        self.store.save_collector_status(
+            collector_document(
+                monitor_id="monitor-api",
+                status="running",
+                uid=1001,
+                pid=4321,
+                hostname="gpu-host",
+                heartbeat_interval_seconds=60.0,
+                sample_interval_seconds=2.0,
+                rollup_seconds=60,
+                started_at=self.start - timedelta(minutes=1),
+                sampled_at=self.start,
+                written_at=self.start,
+                devices=[
+                    {
+                        "gpu": 0,
+                        "source": "nvml",
+                        "device_telemetry": True,
+                        "process_telemetry": True,
+                        "process_utilization": True,
+                    },
+                    {
+                        "gpu": 1,
+                        "source": "nvml",
+                        "device_telemetry": True,
+                        "process_telemetry": True,
+                        "process_utilization": True,
+                    },
+                ],
+                process_telemetry_gap=[],
+                process_utilization_gap=[],
+            )
+        )
+
+        with mock.patch("bk.usage_api.utc_now", return_value=self.start):
+            payloads = [
+                self.api.capabilities(),
+                self.api.samples(start=self.start - timedelta(minutes=1), end=self.start),
+                self.api.events(start=self.start - timedelta(minutes=1), end=self.start),
+                self.api.users(start=self.start - timedelta(minutes=1), end=self.start),
+            ]
+
+        self.assertTrue(all(payload["collector"]["state"] == "running" for payload in payloads))
+        self.assertTrue(all(payload["collector"]["fresh"] for payload in payloads))
+        self.assertTrue(all(payload["collector"]["topology_match"] for payload in payloads))
+
     def test_public_telemetry_facade_is_ui_independent(self):
         store = open_usage_store(self.config)
         api = open_usage_query(self.config)
@@ -124,6 +184,8 @@ class UsageApiTests(unittest.TestCase):
         self.assertIsInstance(store, UsageAuditStore)
         self.assertIsInstance(api, UsageQueryService)
         self.assertEqual(TELEMETRY_INGEST_SCHEMA_VERSION, "gpubk.telemetry.v1")
+        self.assertEqual(COLLECTOR_STATUS_SCHEMA_VERSION, "gpubk.collector.v1")
+        self.assertTrue(hasattr(CollectorStatusSink, "save_collector_status"))
 
     def test_auto_resolution_scales_with_query_window(self):
         self.assertEqual(auto_resolution(self.start, self.start + timedelta(hours=2)), 60)

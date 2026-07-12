@@ -36,6 +36,7 @@ from .sharing import parse_share_units, reservation_share_units, share_example, 
 from .storage import LedgerStore
 from .timeparse import format_local_range, parse_iso, parse_memory_mb, utc_now
 from .usage import ProcessUsage, classify_process_usage, summarize_process_command
+from .usage_store import UsageAuditStore
 
 
 COLOR_HEADER = 1
@@ -145,6 +146,7 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
             ("Shared", "Split or woven cells divide space among sharers"),
             ("GPU focus", "Tab to expand share lanes and live processes"),
             ("Reservation", "Select a row to blink its exact interval"),
+            ("Monitor", "Header M shows collector health; details: bk doctor"),
             ("Util history", "Run: bk u me, users, samples, or events"),
             ("Live context", "Run: bk agent context --compact"),
             ("Theme", "Auto-detect; set BK_TUI_THEME=dark or light"),
@@ -196,6 +198,10 @@ class TuiState:
     speed_index: int = 0
     booking_slot_minutes: int = DEFAULT_SLOT_MINUTES
     zoom_levels: Tuple[int, ...] = tuple(ZOOM_LEVELS)
+    collector_status: dict = field(
+        default_factory=lambda: {"state": "not-seen", "fresh": None}
+    )
+    collector_checked_at: Optional[datetime] = None
 
     @property
     def slot_minutes(self) -> int:
@@ -533,6 +539,7 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
         return
 
     now = utc_now()
+    _refresh_collector_status(config, state, now)
     ledger = store.load()
     active_index = ReservationIndex.from_ledger(ledger, now)
     active = active_index.records()
@@ -684,7 +691,8 @@ def _header_lines(
         f"| {state.slot_minutes}m/col "
     )
     wide_details = (
-        f" data={config.data_dir} | shared_capacity={config.max_shared_users} units/GPU "
+        f" data={config.data_dir} | M:{_collector_label(state.collector_status)} "
+        f"| shared_capacity={config.max_shared_users} units/GPU "
         f"| refresh={config.tui_refresh_seconds:g}s | n NOW | q quit | ? help"
     )
     if width >= 100 and len(wide_title) < width and len(wide_details) < width:
@@ -696,13 +704,46 @@ def _header_lines(
             f"| {local_start:%m-%d %H:%M}->{local_end:%m-%d %H:%M} | {state.slot_minutes}m"
         )
         suffix = (
-            f" | cap={config.max_shared_users}u/GPU | "
+            f" | M:{_collector_label(state.collector_status)} "
+            f"| cap={config.max_shared_users}u/GPU | "
             f"{config.tui_refresh_seconds:g}s refresh | n NOW | ? help"
         )
         path_budget = max(1, width - len(" data=") - len(suffix) - 1)
         details = f" data={_truncate(config.data_dir.name or str(config.data_dir), path_budget)}{suffix}"
     limit = max(0, width - 1)
     return title[:limit], details[:limit]
+
+
+def _refresh_collector_status(config: Config, state: TuiState, now: datetime) -> None:
+    if (
+        state.collector_checked_at is not None
+        and now < state.collector_checked_at + timedelta(seconds=10)
+    ):
+        return
+    store = UsageAuditStore(
+        config.data_dir,
+        config.lock_timeout_seconds,
+        config.file_mode,
+        config.dir_mode,
+    )
+    state.collector_status = store.load_collector_status(
+        now=now,
+        expected_gpu_count=config.gpu_count,
+    )
+    state.collector_checked_at = now
+
+
+def _collector_label(status: object) -> str:
+    state = str(status.get("state", "unknown")) if isinstance(status, dict) else "unknown"
+    return {
+        "running": "OK",
+        "degraded": "DEG",
+        "stale": "STALE",
+        "stopped": "STOP",
+        "clock-skew": "CLOCK",
+        "topology-mismatch": "TOPO",
+        "not-seen": "--",
+    }.get(state, "ERR")
 
 
 def _draw_time_axis(
