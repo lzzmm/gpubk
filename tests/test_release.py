@@ -58,6 +58,29 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("TelemetrySink", telemetry)
         self.assertIn("TELEMETRY.md", readme)
 
+    def test_upgrade_guide_is_packaged_and_linked(self):
+        guide = (ROOT / "UPGRADING.md").read_text(encoding="utf-8")
+        manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+        english = (ROOT / "README.md").read_text(encoding="utf-8")
+        chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+
+        self.assertIn("include UPGRADING.md", manifest)
+        self.assertIn("UPGRADING.md", english)
+        self.assertIn("UPGRADING.md", chinese)
+        self.assertIn("0.1.x to 0.2.x", guide)
+        self.assertIn("weighted `--share` capacity", guide)
+        self.assertIn("Do not run a 0.1 worker", guide)
+
+    def test_prerelease_targets_a_documented_final_version(self):
+        init = (ROOT / "src" / "bk" / "__init__.py").read_text(encoding="utf-8")
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        match = re.search(r'^__version__ = "([^"]+)"$', init, re.MULTILINE)
+
+        self.assertIsNotNone(match)
+        candidate = re.fullmatch(r"(\d+\.\d+\.\d+)rc[1-9]\d*", match.group(1))
+        if candidate:
+            self.assertIn(f"## {candidate.group(1)} - Unreleased", changelog)
+
     def test_external_github_actions_are_pinned_to_commit_shas(self):
         workflows = ROOT / ".github" / "workflows"
         if not workflows.is_dir():
@@ -79,6 +102,7 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("python -m pip install -e '.[mcp]'", workflow)
         for tool in ("bandit", "coverage", "ruff", "pip-audit"):
             self.assertIn(tool, workflow)
+        self.assertIn("python -m pip install --upgrade 'pip>=26.1.2'", workflow)
         self.assertRegex(
             pyproject,
             r'(?s)\[tool\.coverage\.paths\]\s+source = \[\s+"src/bk",\s+"\*/site-packages/bk",\s+\]',
@@ -95,19 +119,25 @@ class ReleaseConfigurationTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 
         self.assertIn('tags:\n      - "v[0-9]*.[0-9]*.[0-9]*"', workflow)
+        self.assertIn("python -m pip install --upgrade 'pip>=26.1.2'", workflow)
         self.assertIn('"$GITHUB_REF_NAME" != "v$version"', workflow)
-        self.assertIn("CHANGELOG.md still marks $version as Unreleased", workflow)
+        self.assertIn("CHANGELOG.md needs a dated heading for $version", workflow)
         self.assertEqual(workflow.count("python -m build"), 1)
         self.assertIn("name: python-package-distributions", workflow)
         self.assertIn("environment:\n      name: testpypi", workflow)
         self.assertIn("environment:\n      name: pypi", workflow)
-        self.assertIn("needs: [build, verify-testpypi]", workflow)
+        self.assertIn("needs: [build, preflight-testpypi]", workflow)
+        self.assertIn("needs: [build, verify-testpypi, preflight-pypi]", workflow)
         self.assertIn("vars.TESTPYPI_RELEASE_ENABLED == 'true'", workflow)
         self.assertIn("vars.PYPI_RELEASE_ENABLED == 'true'", workflow)
         self.assertIn("github.event_name == 'push'", workflow)
         self.assertIn("github.ref_type == 'tag'", workflow)
         self.assertIn("id-token: write", workflow)
         self.assertIn("https://test.pypi.org/legacy/", workflow)
+        self.assertIn("manual Release dispatch requires a prerelease version", workflow)
+        self.assertIn("tagged commit must be contained in origin/main", workflow)
+        self.assertIn("already exists on TestPyPI", workflow)
+        self.assertIn("already exists on PyPI", workflow)
         self.assertIn("pypa/gh-action-pypi-publish@", workflow)
         self.assertNotIn("password:", workflow)
         self.assertNotIn("TWINE_PASSWORD", workflow)
@@ -132,6 +162,8 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("create a draft GitHub Release", guide)
         self.assertIn("attach the wheel and sdist, then publish the draft", guide)
         self.assertIn("verify its hashes against PyPI", guide)
+        self.assertIn("prerelease-only TestPyPI path", guide)
+        self.assertNotIn("git tag -a v0.1.0", guide)
 
 
 if __name__ == "__main__":

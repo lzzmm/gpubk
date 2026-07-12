@@ -2,8 +2,9 @@
 
 All notable changes are documented here. The project follows Semantic Versioning once a public release is published.
 
-## Unreleased
+## 0.2.0 - Unreleased
 
+- Require the patched pip 26.1.2 security floor in dependency-audit jobs.
 - Document the draft-first workflow required by GitHub immutable releases.
 - Start implicit `now` reservations in the active 5-minute interval instead of delaying them to the next boundary.
 - Promote the plain CLI with natural `--at` times, recoverable guided Add/Edit, compact status, fixed-cell timelines, and copyable read-only `slots` alternatives.

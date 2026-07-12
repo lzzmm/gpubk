@@ -361,5 +361,5 @@ PYTHONPATH=src python3 benchmarks/scheduler_queue.py
 PYTHONPATH=src python3 benchmarks/usage_store.py
 ```
 
-项目文档：[安全说明](SECURITY.md) · [发布流程](RELEASING.md) ·
+项目文档：[安全说明](SECURITY.md) · [升级说明](UPGRADING.md) · [发布流程](RELEASING.md) ·
 [更新记录](CHANGELOG.md) · [Apache-2.0 许可证](LICENSE)

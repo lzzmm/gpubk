@@ -398,6 +398,7 @@ PYTHONPATH=src python3 benchmarks/usage_store.py
 ```
 
 Project documents: [Security](https://github.com/lzzmm/gpubk/blob/main/SECURITY.md) ·
+[Upgrading](https://github.com/lzzmm/gpubk/blob/main/UPGRADING.md) ·
 [Release process](https://github.com/lzzmm/gpubk/blob/main/RELEASING.md) ·
 [Changelog](https://github.com/lzzmm/gpubk/blob/main/CHANGELOG.md) ·
 [Apache-2.0 license](https://github.com/lzzmm/gpubk/blob/main/LICENSE)
