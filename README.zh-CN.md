@@ -223,6 +223,8 @@ systemctl --user enable --now bk-worker.service
 显式设置的 `BK_CONFIG_FILE`。可用 `bk service show worker` 检查；任一路径变化后
 使用 `--force` 重新安装。同一 UID 的所有 worker 必须使用同一个私有目录，使租约
 只有一个权威位置。其他策略仍从所选配置路径读取，并在服务每次启动时重新加载。
+worker 持久启动失败在 60 秒内最多重试 3 次；普通子任务失败只写入任务状态，不会让
+长驻 worker 退出。
 
 ## 监测与自动选卡
 

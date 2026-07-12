@@ -250,6 +250,9 @@ changing any captured path.
 Every worker invocation for one UID must use that same private path so the lease
 has one authority. Other policy is reloaded from the selected configuration path
 whenever the service starts.
+Persistent worker startup failures are bounded to three attempts per 60 seconds;
+ordinary child-command failures are recorded without terminating the long-lived
+worker.
 
 ## Monitoring and Placement
 

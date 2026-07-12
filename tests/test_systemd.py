@@ -24,6 +24,8 @@ class BundledSystemdTests(unittest.TestCase):
         self.assertIn("StartLimitIntervalSec=60", monitor)
         self.assertIn("StartLimitBurst=3", monitor)
         self.assertIn("RestartPreventExitStatus=75", worker)
+        self.assertIn("StartLimitIntervalSec=60", worker)
+        self.assertIn("StartLimitBurst=3", worker)
         self.assertNotIn("EnvironmentFile=", worker)
         self.assertNotIn("@PYTHON_EXECUTABLE@", worker)
         self.assertNotIn("@SERVICE_ENVIRONMENT@", worker)
