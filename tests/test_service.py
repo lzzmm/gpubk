@@ -32,7 +32,7 @@ class AgentServiceTests(unittest.TestCase):
         self.data_dir = Path(self.tmp.name)
         self.config = Config(data_dir=self.data_dir, gpu_count=2, max_shared_users=2)
         self.store = LedgerStore(self.data_dir)
-        self.actor = Actor(1001, "alice")
+        self.actor = Actor(1002 if os.getuid() == 1001 else 1001, "alice")
         self.start = datetime(2030, 1, 1, 12, 0, tzinfo=timezone.utc)
         self.snapshots = [
             GpuSnapshot(
@@ -60,6 +60,7 @@ class AgentServiceTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_context_has_stable_schema_and_no_process_arguments(self):
+        self.assertNotEqual(self.actor.uid, os.getuid())
         context = build_agent_context(
             self.config,
             self.store,
