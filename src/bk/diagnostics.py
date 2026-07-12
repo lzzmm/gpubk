@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Iterable
 
 from .config import Config
-from .fileio import ensure_directory, open_existing_regular, open_or_create_regular
+from .fileio import (
+    ensure_directory,
+    fsync_directory,
+    open_existing_regular,
+    open_or_create_regular,
+)
 from .gpu import snapshot
 from .storage import FileLock
 
@@ -112,7 +117,7 @@ def _probe_atomic_replace(config: Config) -> dict:
         os.close(fd)
         fd = -1
         os.replace(source, destination)
-        _fsync_directory(config.data_dir)
+        fsync_directory(config.data_dir)
         fd = open_existing_regular(destination)
         metadata = os.fstat(fd)
         observed = os.read(fd, len(payload) + 1)
@@ -217,15 +222,6 @@ def _probe_gpu(config: Config) -> dict:
     if "simulation" in sources:
         return _result("gpu-telemetry", "warn", "simulation is active; real GPU telemetry was not tested", **details)
     return _result("gpu-telemetry", "fail", "unexpected GPU telemetry source", **details)
-
-
-def _fsync_directory(path: Path) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
-    fd = os.open(str(path), flags)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
 
 
 def _cleanup_paths(paths: Iterable[Path]) -> str | None:

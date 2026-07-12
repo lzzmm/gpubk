@@ -5,10 +5,12 @@ import uuid
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from bk.config import Config
 from bk.joblogs import (
     MIB,
+    JobLogPump,
     WorkerBusyError,
     acquire_job_worker_lease,
     cleanup_job_logs,
@@ -75,6 +77,21 @@ class JobLogTests(unittest.TestCase):
             acquire_job_worker_lease(self.config, self.actor, "worker-1", "host-a")
 
         self.assertEqual(target.read_text(encoding="utf-8"), "untouched")
+
+    def test_new_job_log_propagates_directory_fsync_failure_and_closes_file(self):
+        path = job_log_path(self.config, str(uuid.uuid4()))
+        real_close = os.close
+        with (
+            mock.patch(
+                "bk.joblogs.fsync_directory",
+                side_effect=OSError("job log directory sync failed"),
+            ),
+            mock.patch("bk.joblogs.os.close", wraps=real_close) as close,
+        ):
+            with self.assertRaisesRegex(OSError, "job log directory sync failed"):
+                JobLogPump(path, self.actor, MIB, {"event": "start"})
+
+        close.assert_called_once()
 
     def test_retention_removes_old_terminal_log(self):
         reservation_id = str(uuid.uuid4())

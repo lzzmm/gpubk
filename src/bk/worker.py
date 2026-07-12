@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from .config import Config
-from .fileio import open_existing_regular
+from .fileio import fsync_directory, open_existing_regular
 from .gpu import GpuSnapshot, snapshot
 from .job_recovery import active_legacy_job_count, recover_abandoned_jobs
 from .joblogs import (
@@ -144,7 +144,7 @@ def prepare_job_spec(
             fh.write("\n")
             fh.flush()
             os.fsync(fh.fileno())
-        _fsync_directory(path.parent)
+        fsync_directory(path.parent)
     except Exception:
         try:
             os.close(fd)
@@ -1263,7 +1263,7 @@ def _remove_job_spec_file(path: Path, uid: int) -> Tuple[str, Optional[str]]:
         return "failed", issue
     try:
         path.unlink()
-        _fsync_directory(path.parent)
+        fsync_directory(path.parent)
     except OSError as exc:
         return "failed", str(exc)
     return "removed", None
@@ -1358,14 +1358,3 @@ def _install_signal_handlers(stop_event: threading.Event) -> Dict[int, object]:
 def _restore_signal_handlers(previous: Dict[int, object]) -> None:
     for signum, handler in previous.items():
         signal.signal(signum, handler)
-
-
-def _fsync_directory(path: Path) -> None:
-    try:
-        fd = os.open(str(path), os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)

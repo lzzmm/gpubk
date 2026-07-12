@@ -93,6 +93,8 @@ Open partitions are append-only. Each batch is validated before writing and is
 truncated back to its original size if a detected write or fsync fails. After an
 unclean stop, the next writer preserves a complete final JSON record missing only
 its newline, or discards only the malformed trailing fragment before appending.
+File and containing-directory fsync errors are propagated; a monitor must not report
+an append as durable when the filesystem could not persist its directory entry.
 Per-record and per-file safety limits prevent the writer from creating data that
 the bounded reader would later refuse.
 

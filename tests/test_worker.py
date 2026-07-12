@@ -588,6 +588,21 @@ class ScheduledJobTests(unittest.TestCase):
 
         self.assertEqual(list(target.iterdir()), [])
 
+    def test_job_spec_is_removed_when_directory_fsync_fails(self):
+        with mock.patch(
+            "bk.worker.fsync_directory",
+            side_effect=OSError("job spec directory sync failed"),
+        ):
+            with self.assertRaisesRegex(OSError, "job spec directory sync failed"):
+                prepare_job_spec(
+                    self.config,
+                    self.actor,
+                    [sys.executable, "-c", "print('safe')"],
+                    str(self.work_dir),
+                )
+
+        self.assertEqual(list((self.log_dir / "specs").glob("*.json")), [])
+
     def test_shared_ledger_contains_no_command_arguments_and_private_spec_is_locked_down(self):
         secret = "api-token-should-stay-private"
         reservation = self.booking(command=[sys.executable, "-c", f"print({secret!r})"])

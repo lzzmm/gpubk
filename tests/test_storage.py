@@ -224,6 +224,60 @@ class LedgerStorageTests(unittest.TestCase):
             self.assertEqual(len(lines), 1)
             self.assertEqual(json.loads(lines[0])["reservation_id"], "durable")
 
+    def test_journal_directory_fsync_failure_is_accepted_for_deferred_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store = LedgerStore(data_dir)
+
+            def mutate(ledger):
+                ledger["reservations"].append({"id": "journal-sync"})
+                return ledger, "accepted", [{"action": "add"}], True
+
+            with mock.patch(
+                "bk.storage.fsync_directory",
+                side_effect=OSError("journal directory sync failed"),
+            ):
+                result = store.transaction(mutate)
+
+            self.assertEqual(result, "accepted")
+            self.assertTrue(store.journal_path.exists())
+            self.assertFalse(store.ledger_path.exists())
+            self.assertIn("deferred recovery", store.last_warning)
+            self.assertIn("journal directory sync failed", store.last_warning)
+
+            recovered = LedgerStore(data_dir)
+            ledger = recovered.load()
+            self.assertEqual([item["id"] for item in ledger["reservations"]], ["journal-sync"])
+            self.assertFalse(recovered.journal_path.exists())
+            self.assertEqual(len(recovered.log_path.read_text(encoding="utf-8").splitlines()), 1)
+
+    def test_ledger_directory_fsync_failure_retains_journal_for_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store = LedgerStore(data_dir)
+
+            def mutate(ledger):
+                ledger["reservations"].append({"id": "ledger-sync"})
+                return ledger, "accepted", [{"action": "add"}], True
+
+            with mock.patch(
+                "bk.storage.fsync_directory",
+                side_effect=[None, OSError("ledger directory sync failed")],
+            ):
+                result = store.transaction(mutate)
+
+            self.assertEqual(result, "accepted")
+            self.assertTrue(store.journal_path.exists())
+            self.assertTrue(store.ledger_path.exists())
+            self.assertIn("deferred recovery", store.last_warning)
+            self.assertIn("ledger directory sync failed", store.last_warning)
+
+            recovered = LedgerStore(data_dir)
+            ledger = recovered.load()
+            self.assertEqual([item["id"] for item in ledger["reservations"]], ["ledger-sync"])
+            self.assertFalse(recovered.journal_path.exists())
+            self.assertEqual(len(recovered.log_path.read_text(encoding="utf-8").splitlines()), 1)
+
     def test_recovery_does_not_duplicate_an_already_appended_event(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

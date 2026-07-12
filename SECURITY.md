@@ -36,6 +36,9 @@ Supported security boundaries:
 - Audit events use the same validated append and rollback path. `bk log` scans at most
   64 MiB from the tail, filters by the process UID, bounds output, and treats malformed
   records as warnings; read-only doctor checks report an interrupted tail without repairing it.
+- Durable writes fsync both file contents and the containing directory. Directory-sync
+  errors are never silently ignored: a valid WAL remains for idempotent deferred recovery,
+  while telemetry, private job files, and service installation fail visibly.
 
 Administrator responsibilities:
 

@@ -52,6 +52,22 @@ def ensure_directory(path: Path, mode: int) -> None:
     path.chmod(mode)
 
 
+def fsync_directory(path: Path) -> None:
+    if not hasattr(os, "O_NOFOLLOW") and path.is_symlink():
+        raise OSError(errno.ELOOP, f"refusing symbolic link: {path}")
+    flags = os.O_RDONLY
+    for name in ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW"):
+        flags |= getattr(os, name, 0)
+    fd = os.open(str(path), flags)
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise NotADirectoryError(errno.ENOTDIR, f"refusing non-directory path: {path}")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def file_type_name(mode: int) -> str:
     if stat.S_ISLNK(mode):
         return "symbolic-link"

@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import BinaryIO, Dict, Iterable, List, Optional, Tuple
 
 from .config import Config
-from .fileio import ensure_directory, open_existing_regular, open_or_create_regular
+from .fileio import (
+    ensure_directory,
+    fsync_directory,
+    open_existing_regular,
+    open_or_create_regular,
+)
 from .models import (
     JOB_CLAIMED,
     JOB_FAILED,
@@ -172,7 +177,12 @@ class JobLogPump:
         if stat.S_IMODE(metadata.st_mode) & 0o077:
             os.close(fd)
             raise BookingError(f"job log is accessible by group or other users: {self.path}")
-        os.fchmod(fd, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            fsync_directory(self.path.parent)
+        except BaseException:
+            os.close(fd)
+            raise
         self._fh = os.fdopen(fd, "ab", buffering=0)
         self._segment_bytes = metadata.st_size
         self._write_raw(self.header)
@@ -203,7 +213,7 @@ class JobLogPump:
             if issue is not None:
                 raise BookingError(issue)
             os.replace(self.path, self.rotated_path)
-        _fsync_directory(self.path.parent)
+        fsync_directory(self.path.parent)
         if count_rotation:
             self.rotation_count += 1
 
@@ -570,7 +580,7 @@ def _remove_log_group(paths: Iterable[Path], uid: int) -> Optional[str]:
         for path in existing:
             path.unlink(missing_ok=True)
         if existing:
-            _fsync_directory(existing[0].parent)
+            fsync_directory(existing[0].parent)
     except OSError as exc:
         return str(exc)
     return None
@@ -583,14 +593,3 @@ def _read_tail_bytes(path: Path, max_bytes: int) -> bytes:
         size = fh.tell()
         fh.seek(max(0, size - max_bytes))
         return fh.read()
-
-
-def _fsync_directory(path: Path) -> None:
-    try:
-        fd = os.open(str(path), os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)

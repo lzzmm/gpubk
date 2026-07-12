@@ -4,6 +4,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Propagate directory-fsync failures across WAL, ledger, telemetry, private job files, and systemd unit installation instead of reporting uncertain writes as durable.
+- Preserve a valid renamed journal for deferred idempotent recovery and surface the warning even in quiet CLI booking flows.
 - Repair interrupted telemetry and audit JSONL tails, roll back failed append batches, and reject files beyond reader limits.
 - Tail-read recent per-UID audit events with bounded memory, machine-readable output, corruption warnings, and read-only doctor checks.
 - Keep version, help, and bundled Skill commands usable when shared configuration is broken.

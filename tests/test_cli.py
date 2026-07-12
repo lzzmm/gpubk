@@ -4,8 +4,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
+from io import StringIO
 from pathlib import Path
+from unittest import mock
+
+from bk.cli import main as bk_main
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -119,6 +124,36 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             ledger = json.loads((Path(tmp) / "ledger.json").read_text(encoding="utf-8"))
             self.assertEqual(ledger["reservations"][0]["mode"], "shared")
+
+    def test_quiet_booking_still_surfaces_deferred_transaction_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            output = StringIO()
+            errors = StringIO()
+            environment = {
+                "BK_DATA_DIR": str(data_dir),
+                "BK_GPU_COUNT": "1",
+                "BK_MAX_SHARED_USERS": "2",
+                "BK_GPU_SIM_FILE": str(data_dir / "missing-simulation.json"),
+            }
+
+            with (
+                mock.patch.dict(os.environ, environment),
+                mock.patch(
+                    "bk.storage.fsync_directory",
+                    side_effect=OSError("journal directory sync failed"),
+                ),
+                redirect_stdout(output),
+                redirect_stderr(errors),
+            ):
+                result = bk_main(["1", "5m", "--op-id", "warning-test", "--quiet"])
+
+            self.assertEqual(result, 0)
+            self.assertIn("created:", output.getvalue())
+            self.assertIn("warning: transaction accepted", errors.getvalue())
+            self.assertIn("deferred recovery", errors.getvalue())
+            self.assertTrue((data_dir / "transaction.json").exists())
+            self.assertFalse((data_dir / "ledger.json").exists())
 
     def test_compound_duration_memory_and_live_idle_selection(self):
         with tempfile.TemporaryDirectory() as tmp:

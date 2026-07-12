@@ -7,7 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence, Tuple
 
-from .fileio import ensure_directory, open_existing_regular, open_or_create_regular
+from .fileio import (
+    ensure_directory,
+    fsync_directory,
+    open_existing_regular,
+    open_or_create_regular,
+)
 
 
 WRITE_CHUNK_BYTES = 1024 * 1024
@@ -71,6 +76,7 @@ def append_json_objects(
         try:
             _write_batch(fd, serialized)
             os.fsync(fd)
+            fsync_directory(path.parent)
         except BaseException as append_error:
             try:
                 os.ftruncate(fd, original_size)

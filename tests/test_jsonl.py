@@ -146,6 +146,37 @@ class JsonlTailTests(unittest.TestCase):
 
             self.assertFalse(path.exists())
 
+    def test_append_rolls_back_when_directory_fsync_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            append_json_objects(
+                path,
+                [{"id": 1}],
+                file_mode=0o600,
+                dir_mode=0o700,
+                max_line_bytes=1024,
+                max_file_bytes=None,
+                record_name="test",
+            )
+            original = path.read_bytes()
+
+            with mock.patch(
+                "bk.jsonl.fsync_directory",
+                side_effect=OSError("directory sync failed"),
+            ):
+                with self.assertRaisesRegex(OSError, "directory sync failed"):
+                    append_json_objects(
+                        path,
+                        [{"id": 2}],
+                        file_mode=0o600,
+                        dir_mode=0o700,
+                        max_line_bytes=1024,
+                        max_file_bytes=None,
+                        record_name="test",
+                    )
+
+            self.assertEqual(path.read_bytes(), original)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -43,6 +43,13 @@ files remain untouched. Verify the result with read-only `bk agent context
 --compact`, `bk jobs --json`, and `bk usage --json` calls before enabling
 unattended services.
 
+Version 0.2 treats a failed containing-directory `fsync` as a real durability
+failure. A booking whose WAL was already renamed is returned with a deferred-
+recovery warning and is recovered idempotently on the next operation; telemetry,
+private job files, and unit installation fail visibly. Do not enable unattended
+services on a mount where `bk doctor --probe --strict` fails the atomic-replace
+probe.
+
 ## Running-job boundary
 
 A 0.2 worker does not take over an active job created by a pre-lease worker.

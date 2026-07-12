@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from bk.config import Config
 from bk.models import BookingError
@@ -53,6 +54,40 @@ class BundledSystemdTests(unittest.TestCase):
             with self.assertRaisesRegex(BookingError, "already exists"):
                 install_user_unit("worker", target, environment=environment)
             install_user_unit("worker", target, environment=environment, force=True)
+
+    def test_install_refuses_dangling_unit_symlink_without_force(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            destination = target / "bk-worker.service"
+            destination.symlink_to(target / "missing-unit")
+
+            with self.assertRaisesRegex(BookingError, "already exists"):
+                install_user_unit(
+                    "worker",
+                    target,
+                    environment={"BK_DATA_DIR": "/data2/shared/bk"},
+                )
+
+            self.assertTrue(destination.is_symlink())
+
+    def test_install_surfaces_directory_fsync_failure_without_temp_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            with mock.patch(
+                "bk.systemd.fsync_directory",
+                side_effect=OSError("unit directory sync failed"),
+            ):
+                with self.assertRaisesRegex(OSError, "unit directory sync failed"):
+                    install_user_unit(
+                        "worker",
+                        target,
+                        environment={"BK_DATA_DIR": "/data2/shared/bk"},
+                    )
+
+            destination = target / "bk-worker.service"
+            self.assertTrue(destination.is_file())
+            self.assertIn("-m bk worker", destination.read_text(encoding="utf-8"))
+            self.assertEqual(list(target.glob(".bk-worker.service.*.tmp")), [])
 
     def test_service_environment_captures_absolute_runtime_paths(self):
         config = Config(

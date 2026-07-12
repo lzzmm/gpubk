@@ -17,6 +17,7 @@ from typing import Dict, Iterable, Iterator, List, Optional, Protocol, Sequence,
 from .fileio import (
     ensure_directory,
     file_type_name,
+    fsync_directory,
     open_existing_regular,
 )
 from .jsonl import JsonlFormatError, append_json_objects
@@ -215,7 +216,7 @@ class UsageAuditStore:
         written = self.append_events(sanitized_events)
         self.save_state(processes)
         self.transition_journal_path.unlink(missing_ok=True)
-        _fsync_dir(self.usage_dir)
+        fsync_directory(self.usage_dir)
         return written
 
     def load_load_history(self) -> dict:
@@ -537,6 +538,7 @@ class UsageAuditStore:
                 if not dry_run:
                     path.unlink(missing_ok=True)
                     _meta_path_for(path).unlink(missing_ok=True)
+                    fsync_directory(path.parent)
         return report
 
     def migrate_legacy(self, *, dry_run: bool = True) -> dict:
@@ -760,6 +762,7 @@ class UsageAuditStore:
             shutil.rmtree(self.usage_dir)
         for path in (self.events_path, self.rollups_path, self.legacy_state_path, self.legacy_load_path):
             path.unlink(missing_ok=True)
+        fsync_directory(self.data_dir)
         self._users = None
         self._workloads_by_fingerprint = None
         self._workloads_by_id = None
@@ -946,7 +949,7 @@ class UsageAuditStore:
                     count += 1
             _verify_gzip(tmp_path, digest.hexdigest(), count)
             os.replace(tmp_path, target)
-            _fsync_dir(target.parent)
+            fsync_directory(target.parent)
             _atomic_write_json(
                 _meta_path_for(target),
                 {
@@ -981,12 +984,14 @@ class UsageAuditStore:
                 and int(metadata.get("record_count", -1)) == source_count
             ):
                 path.unlink(missing_ok=True)
+                fsync_directory(path.parent)
                 return
             self.last_warnings.append(f"both open and closed partitions contain different data: {path}")
             return
         raw_records = list(self._read_jsonl(path))
         self._write_closed_partition(_tier_from_path(self.usage_dir, path), _partition_day(path), raw_records)
         path.unlink(missing_ok=True)
+        fsync_directory(path.parent)
 
     def _safe_to_remove_tier(self, tier: str, day: date) -> bool:
         if tier == "minute":
@@ -1103,7 +1108,7 @@ class UsageAuditStore:
         self.append_events(item for item in events if isinstance(item, dict))
         self.save_state(processes)
         self.transition_journal_path.unlink(missing_ok=True)
-        _fsync_dir(self.usage_dir)
+        fsync_directory(self.usage_dir)
 
     def _remember_users(self, records: Sequence[dict]) -> None:
         users = self._load_users()
@@ -1170,7 +1175,7 @@ class UsageAuditStore:
             os.fsync(fd)
         finally:
             os.close(fd)
-        _fsync_dir(self.usage_dir)
+        fsync_directory(self.usage_dir)
         self._workload_key = key
         return key
 
@@ -1238,7 +1243,7 @@ def _atomic_write_json(path: Path, payload: dict, mode: int, directory: Path, pr
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp_path, path)
-        _fsync_dir(directory)
+        fsync_directory(directory)
     finally:
         if fd >= 0:
             os.close(fd)
@@ -1268,7 +1273,7 @@ def _atomic_write_jsonl(path: Path, records: Sequence[dict], mode: int, director
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp_path, path)
-        _fsync_dir(directory)
+        fsync_directory(directory)
     finally:
         if fd >= 0:
             os.close(fd)
@@ -1517,14 +1522,3 @@ def _reverse_lines(path: Path, chunk_size: int = 64 * 1024) -> Iterator[bytes]:
             for line in reversed(parts):
                 if line:
                     yield line
-
-
-def _fsync_dir(path: Path) -> None:
-    try:
-        fd = os.open(str(path), os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)

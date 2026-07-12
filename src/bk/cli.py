@@ -403,6 +403,8 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
                 f"command={reservation['job'].get('summary', 'private command')}"
             )
             print("worker: keep `bk w` running before the scheduled start")
+    if store.last_warning:
+        print(f"warning: {store.last_warning}", file=sys.stderr)
     return 0
 
 
@@ -982,6 +984,8 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
     if isinstance(reservation.get("job"), dict):
         print(f"job: pending command={reservation['job'].get('summary', 'private command')}")
         print("worker: keep `bk w` running before the scheduled start")
+    if store.last_warning:
+        print(f"warning: {store.last_warning}", file=sys.stderr)
     return 0
 
 
@@ -1363,6 +1367,8 @@ def _edit_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         ),
     )
     _print_edit_result(config, result.reservation, result)
+    if store.last_warning:
+        print(f"warning: {store.last_warning}", file=sys.stderr)
     return 0
 
 
@@ -1447,6 +1453,8 @@ def _edit_interactive(config: Config, store: LedgerStore, reservation_id: str, a
         ),
     )
     _print_edit_result(config, result.reservation, result)
+    if store.last_warning:
+        print(f"warning: {store.last_warning}", file=sys.stderr)
     return 0
 
 

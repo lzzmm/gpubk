@@ -3,11 +3,13 @@ from __future__ import annotations
 import os
 import re
 import sys
+import tempfile
 from importlib import resources
 from pathlib import Path
 from typing import Mapping, Optional
 
 from .config import Config
+from .fileio import ensure_directory, fsync_directory
 from .models import BookingError
 
 
@@ -55,15 +57,24 @@ def install_user_unit(
     filename = _unit_filename(kind)
     directory = (target_dir or default_user_unit_dir()).expanduser()
     destination = directory / filename
-    if destination.exists() and not force:
+    if os.path.lexists(destination) and not force:
         raise BookingError(f"systemd unit already exists: {destination}; pass --force to replace it")
-    directory.mkdir(parents=True, exist_ok=True)
-    temporary = directory / f".{filename}.{os.getpid()}.tmp"
+    text = unit_text(kind, environment=environment)
+    ensure_directory(directory, 0o755)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{filename}.", suffix=".tmp", dir=str(directory))
+    temporary = Path(tmp_name)
     try:
-        temporary.write_text(unit_text(kind, environment=environment), encoding="utf-8")
-        temporary.chmod(0o644)
+        os.fchmod(fd, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fd = -1
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(temporary, destination)
+        fsync_directory(directory)
     finally:
+        if fd >= 0:
+            os.close(fd)
         temporary.unlink(missing_ok=True)
     return destination
 

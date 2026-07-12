@@ -15,6 +15,7 @@ from typing import Callable, Iterable, List, Optional, Tuple, TypeVar
 from .fileio import (
     ensure_directory,
     file_type_name,
+    fsync_directory,
     open_existing_regular,
     open_or_create_regular,
 )
@@ -174,7 +175,16 @@ class LedgerStore:
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
             self._validate_journal(journal)
-            self._write_journal(journal)
+            try:
+                self._write_journal(journal)
+            except OSError as exc:
+                if not self._journal_matches_transaction(transaction_id):
+                    raise
+                self._add_warning(
+                    "transaction accepted but deferred recovery is required after journal "
+                    f"directory sync failed: {exc}"
+                )
+                return result
 
             try:
                 self._apply_journal_unlocked(journal)
@@ -200,6 +210,8 @@ class LedgerStore:
             if self.backup_dir.exists():
                 for path in self.backup_dir.glob("ledger-*.json"):
                     path.unlink(missing_ok=True)
+                fsync_directory(self.backup_dir)
+            fsync_directory(self.data_dir)
             return {
                 "reservations": reservation_count,
                 "logs": log_count,
@@ -474,6 +486,18 @@ class LedgerStore:
         self._apply_journal_unlocked(journal)
         self._clear_journal_best_effort()
 
+    def _journal_matches_transaction(self, transaction_id: str) -> bool:
+        if not os.path.lexists(self.journal_path):
+            return False
+        try:
+            fd = open_existing_regular(self.journal_path)
+            with os.fdopen(fd, "r", encoding="utf-8") as fh:
+                journal = json.load(fh)
+            self._validate_journal(journal)
+        except (OSError, ValueError, json.JSONDecodeError, RecursionError):
+            return False
+        return journal.get("transaction_id") == transaction_id
+
     def _validate_journal(self, journal: dict) -> None:
         if not isinstance(journal, dict) or journal.get("version") != 1:
             raise ValueError("unsupported journal")
@@ -548,8 +572,12 @@ class LedgerStore:
 
     def _prune_backups(self) -> None:
         backups = sorted(self.backup_dir.glob("ledger-*.json"), reverse=True)
+        removed = False
         for path in backups[self.backup_keep :]:
             path.unlink(missing_ok=True)
+            removed = True
+        if removed:
+            fsync_directory(self.backup_dir)
 
     def _append_missing_logs(self, logs: List[dict]) -> None:
         event_ids = {str(item["event_id"]) for item in logs}
@@ -610,7 +638,7 @@ class LedgerStore:
     def _clear_journal_best_effort(self) -> None:
         try:
             self.journal_path.unlink(missing_ok=True)
-            _fsync_dir(self.data_dir)
+            fsync_directory(self.data_dir)
         except OSError as exc:
             self._add_warning(f"transaction committed but journal cleanup failed: {exc}")
 
@@ -701,7 +729,7 @@ def _atomic_write_json(
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp_path, path)
-        _fsync_dir(directory)
+        fsync_directory(directory)
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -712,14 +740,3 @@ def _line_count(path: Path) -> int:
     fd = open_existing_regular(path)
     with os.fdopen(fd, "rb") as fh:
         return sum(1 for _line in fh)
-
-
-def _fsync_dir(path: Path) -> None:
-    try:
-        fd = os.open(str(path), os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)

@@ -316,6 +316,28 @@ class UsageStoreTests(unittest.TestCase):
         self.assertEqual(len(recovered.recent_events(10)), 1)
         self.assertFalse(recovered.transition_journal_path.exists())
 
+    def test_state_transition_recovers_after_journal_directory_fsync_failure(self):
+        event = self._event(None)
+        processes = {"g0:p12:sabc": {"status": "ok"}}
+        self.store.ensure()
+
+        with mock.patch(
+            "bk.usage_store.fsync_directory",
+            side_effect=OSError("usage directory sync failed"),
+        ):
+            with self.assertRaisesRegex(OSError, "usage directory sync failed"):
+                self.store.commit_state_transition([event], processes)
+
+        self.assertTrue(self.store.transition_journal_path.exists())
+        self.assertEqual(self.store.recent_events(10), [])
+
+        recovered = UsageAuditStore(self.data_dir)
+        state = recovered.load_state()
+
+        self.assertEqual(state, processes)
+        self.assertEqual(len(recovered.recent_events(10)), 1)
+        self.assertFalse(recovered.transition_journal_path.exists())
+
     def _event(self, workload_id):
         return {
             "event": "process-start",
