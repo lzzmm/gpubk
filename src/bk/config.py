@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import difflib
 import json
+import math
 import os
 import shlex
 import stat
@@ -15,6 +17,60 @@ from .granularity import DEFAULT_SLOT_MINUTES, slot_seconds, validate_slot_minut
 DEFAULT_PRIVATE_FILE_MODE = 0o600
 DEFAULT_PRIVATE_DIR_MODE = 0o700
 MAX_CONFIG_FILE_BYTES = 1024 * 1024
+CONFIG_VERSION = 1
+MAX_GPU_COUNT = 1024
+MAX_SHARED_UNITS = 10_000
+MAX_QUEUE_SEARCH_HOURS = 10 * 365 * 24
+MAX_RETENTION_DAYS = 100 * 365
+MAX_USAGE_LOAD_WINDOW_MINUTES = 365 * 24 * 60
+MAX_LOCK_TIMEOUT_SECONDS = 60 * 60
+MAX_BACKUP_KEEP = 10_000
+MAX_TIMELINE_HOURS = 365 * 24
+MAX_MEMORY_MB = 16 * 1024 * 1024
+MAX_WORKER_POLL_SECONDS = 60 * 60
+MAX_WORKER_CLAIM_TIMEOUT_SECONDS = 7 * 24 * 60 * 60
+MAX_WORKER_RECOVERY_GRACE_SECONDS = 24 * 60 * 60
+MAX_ALLOCATOR_TIMEOUT_SECONDS = 5 * 60
+MAX_ALLOCATOR_WEIGHT = 1_000_000
+
+CONFIG_ENV_MAP = {
+    "gpu_count": "BK_GPU_COUNT",
+    "slot_minutes": "BK_SLOT_MINUTES",
+    "max_shared_users": "BK_MAX_SHARED_USERS",
+    "queue_search_hours": "BK_QUEUE_SEARCH_HOURS",
+    "ledger_retention_days": "BK_LEDGER_RETENTION_DAYS",
+    "usage_load_window_minutes": "BK_USAGE_LOAD_WINDOW_MINUTES",
+    "usage_minute_retention_days": "BK_USAGE_MINUTE_RETENTION_DAYS",
+    "usage_five_minute_retention_days": "BK_USAGE_FIVE_MINUTE_RETENTION_DAYS",
+    "usage_ten_minute_retention_days": "BK_USAGE_TEN_MINUTE_RETENTION_DAYS",
+    "usage_hourly_retention_days": "BK_USAGE_HOURLY_RETENTION_DAYS",
+    "usage_daily_retention_days": "BK_USAGE_DAILY_RETENTION_DAYS",
+    "usage_event_retention_days": "BK_USAGE_EVENT_RETENTION_DAYS",
+    "lock_timeout_seconds": "BK_LOCK_TIMEOUT_SECONDS",
+    "backup_keep": "BK_BACKUP_KEEP",
+    "timeline_hours": "BK_TIMELINE_HOURS",
+    "require_shared_memory": "BK_REQUIRE_SHARED_MEMORY",
+    "shared_memory_reserve_mb": "BK_SHARED_MEMORY_RESERVE_MB",
+    "job_log_retention_days": "BK_JOB_LOG_RETENTION_DAYS",
+    "job_log_max_mb": "BK_JOB_LOG_MAX_MB",
+    "job_log_total_max_mb": "BK_JOB_LOG_TOTAL_MAX_MB",
+    "worker_poll_seconds": "BK_WORKER_POLL_SECONDS",
+    "worker_claim_timeout_seconds": "BK_WORKER_CLAIM_TIMEOUT_SECONDS",
+    "worker_recovery_grace_seconds": "BK_WORKER_RECOVERY_GRACE_SECONDS",
+    "worker_live_guard": "BK_WORKER_LIVE_GUARD",
+    "file_mode": "BK_FILE_MODE",
+    "dir_mode": "BK_DIR_MODE",
+}
+CONFIG_FILE_KEYS = frozenset(
+    {
+        "config_version",
+        *CONFIG_ENV_MAP,
+        "job_log_dir",
+        "allocator_command",
+        "allocator_timeout_seconds",
+        "allocator_weight",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -33,7 +89,7 @@ class Config:
     usage_event_retention_days: int = 365
     lock_timeout_seconds: float = 10.0
     backup_keep: int = 10
-    timeline_hours: int = 24
+    timeline_hours: int = 2
     require_shared_memory: bool = False
     shared_memory_reserve_mb: int = 512
     job_log_dir: Optional[Path] = None
@@ -81,28 +137,68 @@ def _read_config_file(data_dir: Path) -> Dict[str, Any]:
             os.close(fd)
     if not isinstance(raw, dict):
         raise ValueError(f"{path} must contain a JSON object")
+    _validate_config_document(raw, path)
     return raw
 
 
-def _int_value(raw: Dict[str, Any], key: str, default: int) -> int:
+def _validate_config_document(raw: Dict[str, Any], path: Path) -> None:
+    version = raw.get("config_version", CONFIG_VERSION)
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ValueError(f"{path}: config_version must be the integer {CONFIG_VERSION}")
+    if version != CONFIG_VERSION:
+        raise ValueError(
+            f"{path}: unsupported config_version {version}; this GPUbk supports {CONFIG_VERSION}"
+        )
+    unknown = sorted(set(raw) - CONFIG_FILE_KEYS)
+    if not unknown:
+        return
+    key = unknown[0]
+    suggestion = difflib.get_close_matches(key, CONFIG_FILE_KEYS, n=1, cutoff=0.65)
+    hint = f"; did you mean {suggestion[0]!r}?" if suggestion else ""
+    raise ValueError(f"{path}: unknown config key {key!r}{hint}")
+
+
+def _int_value(
+    raw: Dict[str, Any],
+    key: str,
+    default: int,
+    *,
+    maximum: Optional[int] = None,
+) -> int:
     value = raw.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(f"{key} must be an integer")
     try:
         parsed = int(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{key} must be an integer") from exc
     if parsed < 1:
         raise ValueError(f"{key} must be >= 1")
+    if maximum is not None and parsed > maximum:
+        raise ValueError(f"{key} must be <= {maximum}")
     return parsed
 
 
-def _float_value(raw: Dict[str, Any], key: str, default: float) -> float:
+def _float_value(
+    raw: Dict[str, Any],
+    key: str,
+    default: float,
+    *,
+    maximum: Optional[float] = None,
+) -> float:
     value = raw.get(key, default)
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be a number")
     try:
         parsed = float(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{key} must be a number") from exc
+    if not math.isfinite(parsed):
+        raise ValueError(f"{key} must be finite")
     if parsed <= 0:
         raise ValueError(f"{key} must be > 0")
+    if maximum is not None and parsed > maximum:
+        raise ValueError(f"{key} must be <= {maximum}")
     return parsed
 
 
@@ -121,19 +217,31 @@ def _bool_value(raw: Dict[str, Any], key: str, default: bool) -> bool:
     raise ValueError(f"{key} must be a boolean")
 
 
-def _nonnegative_int_value(raw: Dict[str, Any], key: str, default: int) -> int:
+def _nonnegative_int_value(
+    raw: Dict[str, Any],
+    key: str,
+    default: int,
+    *,
+    maximum: Optional[int] = None,
+) -> int:
     value = raw.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(f"{key} must be an integer")
     try:
         parsed = int(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{key} must be an integer") from exc
     if parsed < 0:
         raise ValueError(f"{key} must be >= 0")
+    if maximum is not None and parsed > maximum:
+        raise ValueError(f"{key} must be <= {maximum}")
     return parsed
 
 
 def _mode_value(raw: Dict[str, Any], key: str, default: int, *, directory: bool) -> int:
     value = raw.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(f"{key} must be an octal mode such as 0600 or 2770")
     try:
         if isinstance(value, str):
             normalized = value.strip().lower()
@@ -153,7 +261,10 @@ def _mode_value(raw: Dict[str, Any], key: str, default: int, *, directory: bool)
 
 
 def _default_data_dir() -> Path:
-    data_home = Path(os.environ.get("XDG_DATA_HOME", "~/.local/share")).expanduser()
+    data_home = _path_value(
+        os.environ.get("XDG_DATA_HOME", "~/.local/share"),
+        "XDG_DATA_HOME",
+    )
     return data_home / "bk"
 
 
@@ -164,77 +275,103 @@ def _auto_gpu_count() -> int:
 
 
 def load_config() -> Config:
-    data_dir = Path(os.environ["BK_DATA_DIR"]).expanduser() if "BK_DATA_DIR" in os.environ else _default_data_dir()
+    data_dir = (
+        _path_value(os.environ["BK_DATA_DIR"], "BK_DATA_DIR")
+        if "BK_DATA_DIR" in os.environ
+        else _default_data_dir()
+    )
     raw = _read_config_file(data_dir)
 
-    env_map = {
-        "gpu_count": "BK_GPU_COUNT",
-        "slot_minutes": "BK_SLOT_MINUTES",
-        "max_shared_users": "BK_MAX_SHARED_USERS",
-        "queue_search_hours": "BK_QUEUE_SEARCH_HOURS",
-        "ledger_retention_days": "BK_LEDGER_RETENTION_DAYS",
-        "usage_load_window_minutes": "BK_USAGE_LOAD_WINDOW_MINUTES",
-        "usage_minute_retention_days": "BK_USAGE_MINUTE_RETENTION_DAYS",
-        "usage_five_minute_retention_days": "BK_USAGE_FIVE_MINUTE_RETENTION_DAYS",
-        "usage_ten_minute_retention_days": "BK_USAGE_TEN_MINUTE_RETENTION_DAYS",
-        "usage_hourly_retention_days": "BK_USAGE_HOURLY_RETENTION_DAYS",
-        "usage_daily_retention_days": "BK_USAGE_DAILY_RETENTION_DAYS",
-        "usage_event_retention_days": "BK_USAGE_EVENT_RETENTION_DAYS",
-        "lock_timeout_seconds": "BK_LOCK_TIMEOUT_SECONDS",
-        "backup_keep": "BK_BACKUP_KEEP",
-        "timeline_hours": "BK_TIMELINE_HOURS",
-        "require_shared_memory": "BK_REQUIRE_SHARED_MEMORY",
-        "shared_memory_reserve_mb": "BK_SHARED_MEMORY_RESERVE_MB",
-        "job_log_retention_days": "BK_JOB_LOG_RETENTION_DAYS",
-        "job_log_max_mb": "BK_JOB_LOG_MAX_MB",
-        "job_log_total_max_mb": "BK_JOB_LOG_TOTAL_MAX_MB",
-        "worker_poll_seconds": "BK_WORKER_POLL_SECONDS",
-        "worker_claim_timeout_seconds": "BK_WORKER_CLAIM_TIMEOUT_SECONDS",
-        "worker_recovery_grace_seconds": "BK_WORKER_RECOVERY_GRACE_SECONDS",
-        "worker_live_guard": "BK_WORKER_LIVE_GUARD",
-        "file_mode": "BK_FILE_MODE",
-        "dir_mode": "BK_DIR_MODE",
-    }
-    for key, env_name in env_map.items():
+    for key, env_name in CONFIG_ENV_MAP.items():
         if env_name in os.environ:
             raw[key] = os.environ[env_name]
 
     job_log_raw = os.environ.get("BK_JOB_LOG_DIR", raw.get("job_log_dir"))
-    if job_log_raw:
-        job_log_dir = Path(str(job_log_raw)).expanduser()
+    if job_log_raw is not None and job_log_raw != "":
+        job_log_dir = _path_value(job_log_raw, "job_log_dir")
     else:
-        state_home = Path(os.environ.get("XDG_STATE_HOME", "~/.local/state")).expanduser()
+        state_home = _path_value(
+            os.environ.get("XDG_STATE_HOME", "~/.local/state"),
+            "XDG_STATE_HOME",
+        )
         job_log_dir = state_home / "bk" / "jobs"
     allocator_raw = os.environ.get("BK_ALLOCATOR_COMMAND", raw.get("allocator_command"))
     allocator_command = _command_value(allocator_raw)
-    gpu_count = _int_value(raw, "gpu_count", 1) if "gpu_count" in raw else _auto_gpu_count()
+    gpu_count = (
+        _int_value(raw, "gpu_count", 1, maximum=MAX_GPU_COUNT)
+        if "gpu_count" in raw
+        else _bounded_detected_gpu_count(_auto_gpu_count())
+    )
 
     return Config(
         data_dir=data_dir,
         gpu_count=gpu_count,
         slot_minutes=validate_slot_minutes(raw.get("slot_minutes", DEFAULT_SLOT_MINUTES)),
-        max_shared_users=_int_value(raw, "max_shared_users", 2),
-        queue_search_hours=_int_value(raw, "queue_search_hours", 168),
-        ledger_retention_days=_nonnegative_int_value(raw, "ledger_retention_days", 90),
-        usage_load_window_minutes=_int_value(raw, "usage_load_window_minutes", 120),
-        usage_minute_retention_days=_nonnegative_int_value(raw, "usage_minute_retention_days", 30),
-        usage_five_minute_retention_days=_nonnegative_int_value(raw, "usage_five_minute_retention_days", 365),
-        usage_ten_minute_retention_days=_nonnegative_int_value(raw, "usage_ten_minute_retention_days", 1095),
-        usage_hourly_retention_days=_nonnegative_int_value(raw, "usage_hourly_retention_days", 1500),
-        usage_daily_retention_days=_nonnegative_int_value(raw, "usage_daily_retention_days", 0),
-        usage_event_retention_days=_nonnegative_int_value(raw, "usage_event_retention_days", 365),
-        lock_timeout_seconds=_float_value(raw, "lock_timeout_seconds", 10.0),
-        backup_keep=_int_value(raw, "backup_keep", 10),
-        timeline_hours=_int_value(raw, "timeline_hours", 24),
+        max_shared_users=_int_value(raw, "max_shared_users", 2, maximum=MAX_SHARED_UNITS),
+        queue_search_hours=_int_value(
+            raw, "queue_search_hours", 168, maximum=MAX_QUEUE_SEARCH_HOURS
+        ),
+        ledger_retention_days=_nonnegative_int_value(
+            raw, "ledger_retention_days", 90, maximum=MAX_RETENTION_DAYS
+        ),
+        usage_load_window_minutes=_int_value(
+            raw,
+            "usage_load_window_minutes",
+            120,
+            maximum=MAX_USAGE_LOAD_WINDOW_MINUTES,
+        ),
+        usage_minute_retention_days=_nonnegative_int_value(
+            raw, "usage_minute_retention_days", 30, maximum=MAX_RETENTION_DAYS
+        ),
+        usage_five_minute_retention_days=_nonnegative_int_value(
+            raw, "usage_five_minute_retention_days", 365, maximum=MAX_RETENTION_DAYS
+        ),
+        usage_ten_minute_retention_days=_nonnegative_int_value(
+            raw, "usage_ten_minute_retention_days", 1095, maximum=MAX_RETENTION_DAYS
+        ),
+        usage_hourly_retention_days=_nonnegative_int_value(
+            raw, "usage_hourly_retention_days", 1500, maximum=MAX_RETENTION_DAYS
+        ),
+        usage_daily_retention_days=_nonnegative_int_value(
+            raw, "usage_daily_retention_days", 0, maximum=MAX_RETENTION_DAYS
+        ),
+        usage_event_retention_days=_nonnegative_int_value(
+            raw, "usage_event_retention_days", 365, maximum=MAX_RETENTION_DAYS
+        ),
+        lock_timeout_seconds=_float_value(
+            raw, "lock_timeout_seconds", 10.0, maximum=MAX_LOCK_TIMEOUT_SECONDS
+        ),
+        backup_keep=_int_value(raw, "backup_keep", 10, maximum=MAX_BACKUP_KEEP),
+        timeline_hours=_int_value(raw, "timeline_hours", 2, maximum=MAX_TIMELINE_HOURS),
         require_shared_memory=_bool_value(raw, "require_shared_memory", False),
-        shared_memory_reserve_mb=_nonnegative_int_value(raw, "shared_memory_reserve_mb", 512),
+        shared_memory_reserve_mb=_nonnegative_int_value(
+            raw, "shared_memory_reserve_mb", 512, maximum=MAX_MEMORY_MB
+        ),
         job_log_dir=job_log_dir,
-        job_log_retention_days=_nonnegative_int_value(raw, "job_log_retention_days", 30),
-        job_log_max_mb=_nonnegative_int_value(raw, "job_log_max_mb", 64),
-        job_log_total_max_mb=_nonnegative_int_value(raw, "job_log_total_max_mb", 4096),
-        worker_poll_seconds=_float_value(raw, "worker_poll_seconds", 1.0),
-        worker_claim_timeout_seconds=_float_value(raw, "worker_claim_timeout_seconds", 30.0),
-        worker_recovery_grace_seconds=_float_value(raw, "worker_recovery_grace_seconds", 5.0),
+        job_log_retention_days=_nonnegative_int_value(
+            raw, "job_log_retention_days", 30, maximum=MAX_RETENTION_DAYS
+        ),
+        job_log_max_mb=_nonnegative_int_value(
+            raw, "job_log_max_mb", 64, maximum=MAX_MEMORY_MB
+        ),
+        job_log_total_max_mb=_nonnegative_int_value(
+            raw, "job_log_total_max_mb", 4096, maximum=MAX_MEMORY_MB
+        ),
+        worker_poll_seconds=_float_value(
+            raw, "worker_poll_seconds", 1.0, maximum=MAX_WORKER_POLL_SECONDS
+        ),
+        worker_claim_timeout_seconds=_float_value(
+            raw,
+            "worker_claim_timeout_seconds",
+            30.0,
+            maximum=MAX_WORKER_CLAIM_TIMEOUT_SECONDS,
+        ),
+        worker_recovery_grace_seconds=_float_value(
+            raw,
+            "worker_recovery_grace_seconds",
+            5.0,
+            maximum=MAX_WORKER_RECOVERY_GRACE_SECONDS,
+        ),
         worker_live_guard=_bool_value(raw, "worker_live_guard", True),
         file_mode=_mode_value(raw, "file_mode", DEFAULT_PRIVATE_FILE_MODE, directory=False),
         dir_mode=_mode_value(raw, "dir_mode", DEFAULT_PRIVATE_DIR_MODE, directory=True),
@@ -249,6 +386,7 @@ def load_config() -> Config:
             },
             "allocator_timeout_seconds",
             3.0,
+            maximum=MAX_ALLOCATOR_TIMEOUT_SECONDS,
         ),
         allocator_weight=_float_value(
             {
@@ -260,8 +398,26 @@ def load_config() -> Config:
             },
             "allocator_weight",
             5.0,
+            maximum=MAX_ALLOCATOR_WEIGHT,
         ),
     )
+
+
+def _bounded_detected_gpu_count(value: int) -> int:
+    if value < 1 or value > MAX_GPU_COUNT:
+        raise ValueError(f"detected gpu_count must be between 1 and {MAX_GPU_COUNT}")
+    return value
+
+
+def _path_value(value: Any, key: str) -> Path:
+    if not isinstance(value, (str, os.PathLike)):
+        raise ValueError(f"{key} must be a filesystem path")
+    text = os.fspath(value)
+    if not isinstance(text, str):
+        raise ValueError(f"{key} must be a text filesystem path")
+    if not text or "\x00" in text or len(text) > 4096:
+        raise ValueError(f"{key} must be a non-empty path of at most 4096 characters")
+    return Path(text).expanduser()
 
 
 def _command_value(value: Any) -> Optional[Tuple[str, ...]]:
@@ -277,4 +433,8 @@ def _command_value(value: Any) -> Optional[Tuple[str, ...]]:
         raise ValueError("allocator_command must contain 1-64 arguments")
     if any("\x00" in item for item in argv):
         raise ValueError("allocator_command contains a NUL byte")
+    if any(len(item.encode("utf-8")) > 4096 for item in argv):
+        raise ValueError("allocator_command arguments must not exceed 4096 bytes")
+    if sum(len(item.encode("utf-8")) + 1 for item in argv) > 64 * 1024:
+        raise ValueError("allocator_command must not exceed 64 KiB")
     return tuple(argv)

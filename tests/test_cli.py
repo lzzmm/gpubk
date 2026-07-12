@@ -111,6 +111,49 @@ class CliTests(unittest.TestCase):
             self.assertIn("0    unknown", result.stdout)
             self.assertIn("1    unknown", result.stdout)
 
+    def test_config_report_is_read_only_and_redacts_allocator_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "absent"
+            result = self.run_bk(
+                ["config", "--compact"],
+                data_dir,
+                {
+                    "BK_SLOT_MINUTES": "10",
+                    "BK_TIMELINE_HOURS": "4",
+                    "BK_ALLOCATOR_COMMAND": "allocator --token secret-value",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(data_dir.exists())
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["schema_version"], "gpubk.config.v1")
+            self.assertEqual(payload["effective"]["slot_minutes"], 10)
+            self.assertEqual(payload["effective"]["timeline_hours"], 4)
+            self.assertTrue(payload["effective"]["allocator_command_configured"])
+            self.assertNotIn("secret-value", result.stdout)
+            self.assertEqual(payload["ledger_policy"]["status"], "unbound")
+            self.assertIn("BK_SLOT_MINUTES", payload["environment_overrides"])
+
+    def test_config_report_detects_bound_policy_match_and_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            created = self.run_bk(["1", "30m", "--quiet"], data_dir)
+            matching = self.run_bk(["cfg", "--json"], data_dir)
+            mismatch = self.run_bk(
+                ["config", "--json"],
+                data_dir,
+                {"BK_SLOT_MINUTES": "10"},
+            )
+
+            self.assertEqual(created.returncode, 0, created.stderr)
+            self.assertEqual(matching.returncode, 0, matching.stderr)
+            self.assertEqual(json.loads(matching.stdout)["ledger_policy"]["status"], "match")
+            self.assertEqual(mismatch.returncode, 2, mismatch.stderr)
+            mismatch_payload = json.loads(mismatch.stdout)
+            self.assertEqual(mismatch_payload["ledger_policy"]["status"], "mismatch")
+            self.assertIn("granularity", mismatch_payload["ledger_policy"]["message"])
+
     def test_plain_interactive_shell_can_create_booking(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.run_bk_with_input([], Path(tmp), "1 30m --gpu 0\nlist\nquit\n")
@@ -1153,6 +1196,17 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("2h/cell | 12 cells", result.stdout)
             self.assertTrue(all(len(line) <= 72 for line in result.stdout.splitlines()), result.stdout)
+
+    def test_configured_timeline_hours_controls_default_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_bk(
+                ["tl"],
+                Path(tmp),
+                {"BK_GPU_COUNT": "2", "BK_TIMELINE_HOURS": "4", "COLUMNS": "100"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("5m/cell | 48 cells", result.stdout)
 
     def test_verbose_booking_restores_load_score_details(self):
         with tempfile.TemporaryDirectory() as tmp:

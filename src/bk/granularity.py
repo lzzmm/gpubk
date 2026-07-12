@@ -9,7 +9,7 @@ VALID_SLOT_MINUTES = tuple(value for value in range(1, 61) if 60 % value == 0)
 
 
 def validate_slot_minutes(value: object) -> int:
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
         raise ValueError("slot_minutes must be an integer")
     try:
         parsed = int(value)

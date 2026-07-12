@@ -64,6 +64,7 @@ bk e 1 --at "tomorrow 09:00"
 bk d 1
 bk lg --limit 100                # 当前 UID 最近的操作记录
 bk lg --limit 20 --json          # 有界、机器可读的审计事件
+bk config                         # 查看最终生效配置与台账策略
 bk doctor                         # 只读检查台账
 ```
 
@@ -290,10 +291,14 @@ export BK_DATA_DIR=/data2/shared/bk
 
 ```json
 {
+  "config_version": 1,
   "gpu_count": 8,
   "slot_minutes": 5,
   "max_shared_users": 4,
   "queue_search_hours": 168,
+  "timeline_hours": 2,
+  "lock_timeout_seconds": 10,
+  "backup_keep": 10,
   "ledger_retention_days": 90,
   "usage_load_window_minutes": 120,
   "usage_minute_retention_days": 30,
@@ -307,6 +312,8 @@ export BK_DATA_DIR=/data2/shared/bk
   "job_log_retention_days": 30,
   "job_log_max_mb": 64,
   "job_log_total_max_mb": 4096,
+  "worker_poll_seconds": 1,
+  "worker_claim_timeout_seconds": 30,
   "worker_recovery_grace_seconds": 5,
   "worker_live_guard": true,
   "file_mode": "0660",
@@ -326,6 +333,18 @@ sudo chmod 0644 /data2/shared/bk/config.json
 之间能够整除一小时的整数。单用户或测试环境可用 `BK_SLOT_MINUTES` 覆盖。多人服务器
 应把它放在 root 管理的配置文件里：第一次写入会将该值绑定到台账，使用其他粒度的
 客户端会被拒绝。
+
+以下命令只读显示最终生效值，不会创建目录或修改台账：
+
+```bash
+bk config
+bk config --json
+```
+
+环境变量覆盖文件值，单次命令参数再覆盖对应默认值。新配置应声明
+`"config_version": 1`，旧的无版本配置仍可兼容读取。未知字段、错误类型、NaN/Infinity、
+不安全路径和越界数值会直接报错，不再静默忽略。JSON 报告只列出当前生效的环境变量名，
+不会输出外部分配器命令内容。
 
 调度策略、保留周期、worker 时序、外部分配器和显示默认值可以配置；schema 版本、
 事务持久性、路径与权限校验、记录大小上限等防损坏约束属于实现安全边界，不开放为

@@ -30,6 +30,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.dir_mode, 0o700)
             self.assertEqual(config.slot_minutes, 5)
             self.assertEqual(config.slot_seconds, 300)
+            self.assertEqual(config.timeline_hours, 2)
             self.assertTrue(config.worker_live_guard)
             self.assertEqual(config.job_log_retention_days, 30)
             self.assertEqual(config.job_log_max_mb, 64)
@@ -221,6 +222,80 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual(config.allocator_command, (sys.executable, "-m", "example_allocator"))
             self.assertEqual(config.allocator_weight, 7.5)
+
+    def test_unknown_config_key_is_rejected_with_typo_hint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps({"max_share_users": 4}), encoding="utf-8")
+            path.chmod(0o600)
+
+            with mock.patch.dict("os.environ", {"BK_DATA_DIR": tmp}, clear=True):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "unknown config key 'max_share_users'.*max_shared_users",
+                ):
+                    load_config()
+
+    def test_config_version_is_optional_but_newer_versions_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps({"config_version": 1, "gpu_count": 3}), encoding="utf-8")
+            path.chmod(0o600)
+            with mock.patch.dict("os.environ", {"BK_DATA_DIR": tmp}, clear=True):
+                self.assertEqual(load_config().gpu_count, 3)
+
+            path.write_text(json.dumps({"config_version": 2}), encoding="utf-8")
+            with mock.patch.dict("os.environ", {"BK_DATA_DIR": tmp}, clear=True):
+                with self.assertRaisesRegex(ValueError, "unsupported config_version 2"):
+                    load_config()
+
+    def test_integer_fields_reject_booleans_and_fractional_numbers(self):
+        for key, value in (("gpu_count", True), ("slot_minutes", 5.0)):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "config.json"
+                path.write_text(json.dumps({key: value}), encoding="utf-8")
+                path.chmod(0o600)
+                with mock.patch.dict("os.environ", {"BK_DATA_DIR": tmp}, clear=True):
+                    with self.assertRaisesRegex(ValueError, "integer"):
+                        load_config()
+
+    def test_float_fields_reject_nonfinite_and_excessive_values(self):
+        cases = (
+            ({"BK_LOCK_TIMEOUT_SECONDS": "nan"}, "finite"),
+            ({"BK_ALLOCATOR_TIMEOUT_SECONDS": "inf"}, "finite"),
+            ({"BK_GPU_COUNT": "1025"}, "<= 1024"),
+            ({"BK_QUEUE_SEARCH_HOURS": str(10 * 365 * 24 + 1)}, "<= 87600"),
+        )
+        for environment, message in cases:
+            with self.subTest(environment=environment), tempfile.TemporaryDirectory() as tmp:
+                values = {"BK_DATA_DIR": tmp, **environment}
+                with mock.patch.dict("os.environ", values, clear=True):
+                    with self.assertRaisesRegex(ValueError, message):
+                        load_config()
+
+    def test_paths_and_allocator_arguments_are_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps({"job_log_dir": "bad\x00path"}), encoding="utf-8")
+            path.chmod(0o600)
+            with mock.patch.dict("os.environ", {"BK_DATA_DIR": tmp}, clear=True):
+                with self.assertRaisesRegex(ValueError, "filesystem path|non-empty path"):
+                    load_config()
+
+            path.write_text(json.dumps({"job_log_dir": False}), encoding="utf-8")
+            with mock.patch.dict("os.environ", {"BK_DATA_DIR": tmp}, clear=True):
+                with self.assertRaisesRegex(ValueError, "filesystem path"):
+                    load_config()
+
+            path.unlink()
+
+            with mock.patch.dict(
+                "os.environ",
+                {"BK_DATA_DIR": tmp, "BK_ALLOCATOR_COMMAND": "x" * 4097},
+                clear=True,
+            ):
+                with self.assertRaisesRegex(ValueError, "4096 bytes"):
+                    load_config()
 
 
 if __name__ == "__main__":

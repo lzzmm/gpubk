@@ -65,6 +65,7 @@ bk e 1 --at "tomorrow 09:00"
 bk d 1
 bk lg --limit 100                # recent operations for this UID
 bk lg --limit 20 --json          # bounded machine-readable audit events
+bk config                         # inspect effective configuration and policy
 bk doctor                         # read-only ledger checks
 ```
 
@@ -320,10 +321,14 @@ Put a root-owned `config.json` in that directory:
 
 ```json
 {
+  "config_version": 1,
   "gpu_count": 8,
   "slot_minutes": 5,
   "max_shared_users": 4,
   "queue_search_hours": 168,
+  "timeline_hours": 2,
+  "lock_timeout_seconds": 10,
+  "backup_keep": 10,
   "ledger_retention_days": 90,
   "usage_load_window_minutes": 120,
   "usage_minute_retention_days": 30,
@@ -337,6 +342,8 @@ Put a root-owned `config.json` in that directory:
   "job_log_retention_days": 30,
   "job_log_max_mb": 64,
   "job_log_total_max_mb": 4096,
+  "worker_poll_seconds": 1,
+  "worker_claim_timeout_seconds": 30,
   "worker_recovery_grace_seconds": 5,
   "worker_live_guard": true,
   "file_mode": "0660",
@@ -358,6 +365,20 @@ defines whole shared capacity units per GPU. Old reservations without a
 overrides it for single-user or test setups. On a shared server, keep this in the
 root-owned file: the ledger binds the value on first write and rejects clients
 using another grid.
+
+Inspect the resolved settings without creating or changing data:
+
+```bash
+bk config
+bk config --json
+```
+
+Environment variables override file values, and a command flag overrides the
+corresponding default for that invocation. New files should declare
+`"config_version": 1`; unversioned files remain readable for compatibility.
+Unknown keys, wrong types, non-finite numbers, unsafe paths, and excessive
+values are rejected instead of ignored. The JSON report lists active override
+names but never prints the external allocator command.
 
 Scheduling policy, retention, worker timing, allocator integration, and display
 defaults are configurable. Schema versions, transaction durability, path and

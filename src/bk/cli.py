@@ -13,7 +13,7 @@ from typing import List, Optional
 
 from . import __version__
 from .advisor import GpuAdvice, build_gpu_advice
-from .config import Config, load_config
+from .config import CONFIG_ENV_MAP, CONFIG_VERSION, Config, load_config
 from .fileio import open_existing_regular
 from .gpu import snapshot
 from .identity import current_actor
@@ -144,6 +144,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
         if head == "service":
             return _service_command(argv[1:], config)
+        if head in {"config", "cfg"}:
+            return _config_command(argv[1:], config, store)
         if head in {"add", "a"}:
             return _add_interactive(config, store)
         if head in {"edit", "e"}:
@@ -254,6 +256,9 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
         return True
     if head in {"doctor", "dr"}:
         _doctor_command(args[1:], config, store)
+        return True
+    if head in {"config", "cfg"}:
+        _config_command(args[1:], config, store)
         return True
     if head in {"del", "delete", "cancel", "d", "rm"}:
         _delete_command(args[1:], config, store)
@@ -922,6 +927,142 @@ def _service_command(argv: List[str], config: Config) -> int:
     if args.kind == "monitor":
         print("shared server note: run exactly one trusted monitor writer; do not enable one per user")
     return 0
+
+
+def _config_command(argv: List[str], config: Config, store: LedgerStore) -> int:
+    parser = argparse.ArgumentParser(prog="bk config")
+    parser.add_argument("--json", action="store_true", help="emit a stable machine-readable report")
+    parser.add_argument("--compact", action="store_true", help="emit compact JSON")
+    args = parser.parse_args(argv)
+    config_path = config.data_dir / "config.json"
+    policy = {
+        "status": "unbound",
+        "bound": False,
+        "matches": None,
+        "message": None,
+    }
+    warning = None
+    try:
+        ledger = store.load_read_only()
+        warning = store.last_warning
+        if ledger.get("policy") is not None:
+            policy["bound"] = True
+            try:
+                validate_ledger_policy(ledger, config)
+                policy["status"] = "match"
+                policy["matches"] = True
+            except BookingError as exc:
+                policy["status"] = "mismatch"
+                policy["matches"] = False
+                policy["message"] = str(exc)
+    except (BookingError, OSError, ValueError) as exc:
+        policy["status"] = "unreadable"
+        policy["matches"] = False
+        policy["message"] = f"{type(exc).__name__}: {exc}"
+
+    environment_names = {
+        "BK_DATA_DIR",
+        "BK_JOB_LOG_DIR",
+        "BK_ALLOCATOR_COMMAND",
+        "BK_ALLOCATOR_TIMEOUT_SECONDS",
+        "BK_ALLOCATOR_WEIGHT",
+        *CONFIG_ENV_MAP.values(),
+    }
+    report = {
+        "schema_version": "gpubk.config.v1",
+        "kind": "configuration",
+        "config_version": CONFIG_VERSION,
+        "config_file": {
+            "path": str(config_path),
+            "present": os.path.lexists(config_path),
+        },
+        "environment_overrides": sorted(name for name in environment_names if name in os.environ),
+        "effective": _effective_config(config),
+        "ledger_policy": policy,
+        "warning": warning,
+    }
+    healthy = policy["status"] in {"unbound", "match"}
+    if args.json or args.compact:
+        print(
+            json.dumps(
+                report,
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=None if args.compact else 2,
+                separators=(",", ":") if args.compact else None,
+            )
+        )
+        return 0 if healthy else 2
+
+    effective = report["effective"]
+    print("GPUbk configuration")
+    print(
+        f"source: {config_path} "
+        f"({'present' if report['config_file']['present'] else 'defaults/environment'})"
+    )
+    overrides = ", ".join(report["environment_overrides"]) or "none"
+    print(f"environment overrides: {overrides}")
+    print(
+        f"scheduling: GPUs={effective['gpu_count']} slice={effective['slot_minutes']}m "
+        f"shared={effective['max_shared_users']} queue={effective['queue_search_hours']}h"
+    )
+    print(
+        f"storage: data={effective['data_dir']} modes={effective['file_mode']}/"
+        f"{effective['dir_mode']} backups={effective['backup_keep']}"
+    )
+    print(
+        f"worker: poll={effective['worker_poll_seconds']}s "
+        f"claim={effective['worker_claim_timeout_seconds']}s "
+        f"live-guard={'on' if effective['worker_live_guard'] else 'off'}"
+    )
+    print(
+        f"allocator: {'configured' if effective['allocator_command_configured'] else 'builtin'} "
+        f"timeout={effective['allocator_timeout_seconds']}s"
+    )
+    policy_text = str(policy["status"])
+    if policy["message"]:
+        policy_text += f" ({policy['message']})"
+    print(f"ledger policy: {policy_text}")
+    if warning:
+        print(f"warning: {warning}")
+    print("Use `bk config --json` for every effective setting.")
+    return 0 if healthy else 2
+
+
+def _effective_config(config: Config) -> dict:
+    return {
+        "data_dir": str(config.data_dir),
+        "gpu_count": config.gpu_count,
+        "slot_minutes": config.slot_minutes,
+        "max_shared_users": config.max_shared_users,
+        "queue_search_hours": config.queue_search_hours,
+        "ledger_retention_days": config.ledger_retention_days,
+        "usage_load_window_minutes": config.usage_load_window_minutes,
+        "usage_minute_retention_days": config.usage_minute_retention_days,
+        "usage_five_minute_retention_days": config.usage_five_minute_retention_days,
+        "usage_ten_minute_retention_days": config.usage_ten_minute_retention_days,
+        "usage_hourly_retention_days": config.usage_hourly_retention_days,
+        "usage_daily_retention_days": config.usage_daily_retention_days,
+        "usage_event_retention_days": config.usage_event_retention_days,
+        "lock_timeout_seconds": config.lock_timeout_seconds,
+        "backup_keep": config.backup_keep,
+        "timeline_hours": config.timeline_hours,
+        "require_shared_memory": config.require_shared_memory,
+        "shared_memory_reserve_mb": config.shared_memory_reserve_mb,
+        "job_log_dir": str(config.job_log_dir) if config.job_log_dir is not None else None,
+        "job_log_retention_days": config.job_log_retention_days,
+        "job_log_max_mb": config.job_log_max_mb,
+        "job_log_total_max_mb": config.job_log_total_max_mb,
+        "worker_poll_seconds": config.worker_poll_seconds,
+        "worker_claim_timeout_seconds": config.worker_claim_timeout_seconds,
+        "worker_recovery_grace_seconds": config.worker_recovery_grace_seconds,
+        "worker_live_guard": config.worker_live_guard,
+        "file_mode": f"{config.file_mode:04o}",
+        "dir_mode": f"{config.dir_mode:04o}",
+        "allocator_command_configured": config.allocator_command is not None,
+        "allocator_timeout_seconds": config.allocator_timeout_seconds,
+        "allocator_weight": config.allocator_weight,
+    }
 
 
 def _add_interactive(config: Config, store: LedgerStore) -> int:
@@ -1914,7 +2055,7 @@ def _split_job_command(argv: List[str]) -> tuple[List[str], Optional[List[str]]]
 
 def _json_requested(argv: List[str]) -> bool:
     booking_args = argv[: argv.index("--")] if "--" in argv else argv
-    return "--json" in booking_args
+    return "--json" in booking_args or "--compact" in booking_args
 
 
 def _print_booking_advice(
@@ -2122,7 +2263,7 @@ BOOK
 
 VIEW
   bk st                           compact live status
-  bk tl [2h] [--step 5m]         fine-grained aligned timeline
+  bk tl [window] [--step auto]   fine-grained aligned timeline
   bk slots 2 1h                  read-only earliest alternatives
   bk l                            active reservations
   bk t                            full-screen TUI
@@ -2146,6 +2287,7 @@ AGENTS AND ADMIN
   bk agent context               stable machine-readable context
   bk agent recommend 2 1h       read-only legal placement
   bk mcp / bk skill install      MCP server or bundled Codex skill
+  bk config [--json]            inspect effective config and policy
   bk doctor --probe --strict     verify deployment prerequisites
   bk reset --yes                 explicitly clear data
 
@@ -2182,6 +2324,7 @@ def _print_shell_help() -> None:
   d <number|short_id>       cancel your reservation
   l | list                  list active reservations
   lg | log [--limit 100]    show your recent operation log
+  cfg | config              inspect effective configuration and ledger policy
   dr | doctor               report policy or deployment issues
   m | monitor               continuously audit GPU process usage
   u                          summarize this UID's last 24h usage
@@ -2232,7 +2375,11 @@ def _status_command(
         parser.add_argument("-v", "--verbose", action="store_true", help="show processes and all reservations")
     args = parser.parse_args(argv)
 
-    window_raw = args.window or (getattr(args, "window_arg", None) if timeline_only else None) or "2h"
+    window_raw = (
+        args.window
+        or (getattr(args, "window_arg", None) if timeline_only else None)
+        or f"{config.timeline_hours}h"
+    )
     window_seconds = parse_duration_seconds(window_raw)
     step_seconds = _resolve_timeline_step(args.step, window_seconds, config.slot_seconds)
     start = _floor_timeline_start(
