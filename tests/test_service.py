@@ -81,6 +81,8 @@ class AgentServiceTests(unittest.TestCase):
         self.assertTrue(context["capabilities"]["private_job_spec_cleanup"])
         self.assertTrue(context["capabilities"]["bounded_private_job_logs"])
         self.assertTrue(context["capabilities"]["private_job_log_cleanup"])
+        self.assertTrue(context["capabilities"]["bounded_personal_audit_log"])
+        self.assertEqual(context["capabilities"]["audit_api_schema"], "gpubk.audit.v1")
         self.assertEqual(
             context["capabilities"]["private_job_spec_orphan_grace_seconds"],
             24 * 60 * 60,

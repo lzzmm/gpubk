@@ -45,7 +45,7 @@ from .service import (
     submit_cancellation,
     submit_edit,
 )
-from .storage import LedgerStore
+from .storage import AUDIT_SCHEMA_VERSION, LedgerStore
 from .timeparse import (
     format_local,
     format_local_range,
@@ -151,7 +151,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if head == "reset":
             return _reset_command(argv[1:], config, store)
         if head in {"log", "lg"}:
-            return _log_command(config, store)
+            return _log_command(argv[1:], store)
         if head in {"doctor", "dr"}:
             return _doctor_command(argv[1:], config, store)
         if head in {"list", "ls", "l"}:
@@ -247,7 +247,7 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
         _list_command(args[1:], config, store)
         return True
     if head in {"log", "logs", "lg"}:
-        _log_command(config, store)
+        _log_command(args[1:], store)
         return True
     if head in {"doctor", "dr"}:
         _doctor_command(args[1:], config, store)
@@ -1460,27 +1460,83 @@ def _print_edit_result(config: Config, reservation: dict, result) -> None:
     )
 
 
-def _log_command(config: Config, store: LedgerStore) -> int:
+def _log_command(argv: List[str], store: LedgerStore) -> int:
+    parser = argparse.ArgumentParser(prog="bk log")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+        help="maximum recent records for this UID (default: 100, max: 1000)",
+    )
+    parser.add_argument("--json", action="store_true", help="emit a stable machine-readable result")
+    args = parser.parse_args(argv)
+    if args.limit < 1 or args.limit > 1000:
+        raise ValueError("--limit must be between 1 and 1000")
+
     uid = _current_actor().uid
-    if not store.log_path.exists():
-        return 0
-    fd = open_existing_regular(store.log_path)
-    with os.fdopen(fd, "r", encoding="utf-8") as fh:
-        for line in fh:
-            item = json.loads(line)
-            if int(item.get("uid")) != uid:
-                continue
-            when = format_local(item["ts"]) if item.get("ts") else ""
-            time_range = ""
-            if item.get("start_at") and item.get("end_at"):
-                time_range = f" {format_local_range(item['start_at'], item['end_at'])}"
-            print(
-                f"{when} {item['action']} {item['result']} "
-                f"{str(item.get('reservation_id', ''))[:8]} mode={item.get('mode')} "
-                f"share={item.get('share_units', '-') or '-'} "
-                f"gpu={','.join(map(str, item.get('gpus', [])))}{time_range}"
+    events = store.recent_logs(uid, args.limit)
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "schema_version": AUDIT_SCHEMA_VERSION,
+                    "kind": "operation-log",
+                    "uid": uid,
+                    "limit": args.limit,
+                    "events": events,
+                    "warning": store.last_warning,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
             )
+        )
+        return 0
+
+    for item in events:
+        when = _safe_log_time(item.get("ts"))
+        time_range = _safe_log_range(item.get("start_at"), item.get("end_at"))
+        gpus = item.get("gpus")
+        gpu_text = (
+            ",".join(_safe_log_text(value, 8) for value in gpus[:64])
+            if isinstance(gpus, list)
+            else "-"
+        )
+        print(
+            f"{when} {_safe_log_text(item.get('action'), 32)} "
+            f"{_safe_log_text(item.get('result'), 32)} "
+            f"{_safe_log_text(item.get('reservation_id'), 8)} "
+            f"mode={_safe_log_text(item.get('mode'), 16)} "
+            f"share={_safe_log_text(item.get('share_units'), 16)} "
+            f"gpu={gpu_text or '-'}{time_range}"
+        )
+    if store.last_warning:
+        print(f"warning: {store.last_warning}", file=sys.stderr)
     return 0
+
+
+def _safe_log_time(value: object) -> str:
+    if not isinstance(value, str) or not value:
+        return "-"
+    try:
+        return format_local(value)
+    except (TypeError, ValueError):
+        return "invalid-time"
+
+
+def _safe_log_range(start: object, end: object) -> str:
+    if not isinstance(start, str) or not isinstance(end, str):
+        return ""
+    try:
+        return f" {format_local_range(start, end)}"
+    except (TypeError, ValueError):
+        return " invalid-range"
+
+
+def _safe_log_text(value: object, width: int) -> str:
+    if value is None or value == "":
+        return "-"
+    text = "".join(character if character.isprintable() else "?" for character in str(value))
+    return text[:width]
 
 
 def _list_command(argv: List[str], config: Config, store: LedgerStore) -> int:
@@ -2033,7 +2089,7 @@ MANAGE
   bk e ID --duration 2h          direct edit
   bk e ID --at 20:00             move using local time
   bk d <number|short_id>         cancel
-  bk lg                           personal operation log
+  bk lg [--limit 100] [--json]    recent personal operation log
 
 JOBS AND USAGE
   bk w                            run this UID's due jobs
@@ -2081,7 +2137,7 @@ def _print_shell_help() -> None:
   e <number|short_id>       modify your reservation
   d <number|short_id>       cancel your reservation
   l | list                  list active reservations
-  lg | log                  show your operation log
+  lg | log [--limit 100]    show your recent operation log
   dr | doctor               report policy or deployment issues
   m | monitor               continuously audit GPU process usage
   u                          summarize this UID's last 24h usage

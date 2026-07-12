@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import errno
 import gzip
 import hashlib
 import hmac
@@ -19,8 +18,8 @@ from .fileio import (
     ensure_directory,
     file_type_name,
     open_existing_regular,
-    open_or_create_regular,
 )
+from .jsonl import JsonlFormatError, append_json_objects
 from .storage import FileLock
 from .timeparse import parse_iso, to_iso, utc_now
 from .usage_schema import (
@@ -276,7 +275,7 @@ class UsageAuditStore:
             return existing
         workload_id = max(self._workloads_by_id, default=0) + 1
         record = encode_workload(workload_id, fingerprint, descriptor, utc_now())
-        self._append_jsonl(self.workloads_path, [record], self.usage_dir)
+        self._append_jsonl(self.workloads_path, [record])
         self._workloads_by_fingerprint[fingerprint] = workload_id
         self._workloads_by_id[workload_id] = record
         return workload_id
@@ -798,7 +797,7 @@ class UsageAuditStore:
     def _append_partition(self, tier: str, day: date, records: Sequence[dict]) -> int:
         path = self._partition_path(tier, day)
         ensure_directory(path.parent, self.dir_mode)
-        return self._append_jsonl(path, records, path.parent)
+        return self._append_jsonl(path, records)
 
     def _append_event_partition(self, day: date, records: Sequence[dict]) -> int:
         existing_ids = set()
@@ -821,41 +820,27 @@ class UsageAuditStore:
                 existing_ids.add(event_id)
         return self._append_partition("events", day, filtered)
 
-    def _append_jsonl(self, path: Path, records: Sequence[dict], directory: Path) -> int:
+    def _append_jsonl(self, path: Path, records: Sequence[dict]) -> int:
         if not records:
             return 0
-        serialized = []
-        total_bytes = 0
-        for record in records:
-            line = (
-                json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
-            ).encode("utf-8")
-            if len(line) > MAX_USAGE_LINE_BYTES:
-                raise ValueError("usage record exceeds the 1 MiB limit")
-            serialized.append(line)
-            total_bytes += len(line)
-        ensure_directory(directory, self.dir_mode)
-        fd = open_or_create_regular(path, os.O_RDWR | os.O_APPEND, self.file_mode)
         try:
-            original_size = _repair_jsonl_tail(fd, path, self.last_warnings)
-            size_limit = MAX_DICTIONARY_BYTES if path == self.workloads_path else MAX_PARTITION_UNCOMPRESSED_BYTES
-            if original_size + total_bytes > size_limit:
-                raise UsageFormatError(f"usage file exceeds its safety limit: {path}")
-            try:
-                _write_jsonl_batch(fd, serialized)
-                os.fsync(fd)
-            except BaseException:
-                try:
-                    os.ftruncate(fd, original_size)
-                    os.fsync(fd)
-                except OSError as rollback_error:
-                    self.last_warnings.append(
-                        f"could not roll back a failed usage append in {path}: {rollback_error}"
-                    )
-                raise
-        finally:
-            os.close(fd)
-        return len(records)
+            result = append_json_objects(
+                path,
+                records,
+                file_mode=self.file_mode,
+                dir_mode=self.dir_mode,
+                max_line_bytes=MAX_USAGE_LINE_BYTES,
+                max_file_bytes=(
+                    MAX_DICTIONARY_BYTES
+                    if path == self.workloads_path
+                    else MAX_PARTITION_UNCOMPRESSED_BYTES
+                ),
+                record_name="usage",
+            )
+        except JsonlFormatError as exc:
+            raise UsageFormatError(str(exc)) from exc
+        self.last_warnings.extend(result.warnings)
+        return result.count
 
     def _merge_plain_partition(self, tier: str, day: date, records: Sequence[dict], key_fn) -> None:
         path = self._partition_path(tier, day)
@@ -1236,62 +1221,6 @@ def _in_range(value: datetime, start: Optional[datetime], end: Optional[datetime
     if start is not None and normalized < start.astimezone(timezone.utc):
         return False
     return end is None or normalized <= end.astimezone(timezone.utc)
-
-
-def _repair_jsonl_tail(fd: int, path: Path, warnings: List[str]) -> int:
-    size = os.fstat(fd).st_size
-    if size == 0 or os.pread(fd, 1, size - 1) == b"\n":
-        return size
-
-    read_size = min(size, MAX_USAGE_LINE_BYTES + 1)
-    tail_start = size - read_size
-    tail = os.pread(fd, read_size, tail_start)
-    separator = tail.rfind(b"\n")
-    if separator >= 0:
-        record_start = tail_start + separator + 1
-        fragment = tail[separator + 1 :]
-    elif tail_start == 0:
-        record_start = 0
-        fragment = tail
-    else:
-        raise UsageFormatError(f"unterminated usage record exceeds the 1 MiB limit: {path}")
-
-    if len(fragment) + 1 > MAX_USAGE_LINE_BYTES:
-        raise UsageFormatError(f"unterminated usage record exceeds the 1 MiB limit: {path}")
-    try:
-        value = json.loads(fragment)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        value = None
-    if isinstance(value, dict):
-        _write_all(fd, b"\n")
-        os.fsync(fd)
-        warnings.append(f"restored a missing final newline in {path}")
-        return size + 1
-
-    os.ftruncate(fd, record_start)
-    os.fsync(fd)
-    warnings.append(f"discarded an incomplete trailing usage record in {path}")
-    return record_start
-
-
-def _write_jsonl_batch(fd: int, lines: Sequence[bytes]) -> None:
-    chunk = bytearray()
-    for line in lines:
-        if chunk and len(chunk) + len(line) > 1024 * 1024:
-            _write_all(fd, chunk)
-            chunk.clear()
-        chunk.extend(line)
-    if chunk:
-        _write_all(fd, chunk)
-
-
-def _write_all(fd: int, payload: bytes | bytearray) -> None:
-    remaining = memoryview(payload)
-    while remaining:
-        written = os.write(fd, remaining)
-        if written <= 0:
-            raise OSError(errno.EIO, "short write while appending usage data")
-        remaining = remaining[written:]
 
 
 def _atomic_write_json(path: Path, payload: dict, mode: int, directory: Path, prefix: str) -> None:

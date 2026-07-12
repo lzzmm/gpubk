@@ -1,5 +1,6 @@
 import json
 import multiprocessing
+import os
 import stat
 import tempfile
 import unittest
@@ -255,6 +256,108 @@ class LedgerStorageTests(unittest.TestCase):
             self.assertEqual(len(lines), 1)
             self.assertEqual(json.loads(lines[0])["event_id"], "event-one")
 
+    def test_recovery_deduplicates_an_audit_batch_larger_than_one_mebibyte(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LedgerStore(Path(tmp))
+            logs = [
+                {
+                    "event_id": f"event-{index}",
+                    "transaction_id": "large-transaction",
+                    "uid": 1001,
+                    "action": "test",
+                    "result": "ok",
+                    "message": str(index) * 450_000,
+                }
+                for index in range(3)
+            ]
+            journal = {
+                "version": 1,
+                "transaction_id": "large-transaction",
+                "created_at": "2030-01-01T00:00:00Z",
+                "ledger": None,
+                "logs": logs,
+            }
+            store.ensure()
+            store._write_journal(journal)
+            store._append_missing_logs(logs)
+            self.assertGreater(store.log_path.stat().st_size, 1024 * 1024)
+
+            store.load()
+
+            events = [json.loads(line) for line in store.log_path.read_bytes().splitlines()]
+            self.assertEqual([item["event_id"] for item in events], [
+                "event-0",
+                "event-1",
+                "event-2",
+            ])
+            self.assertFalse(store.journal_path.exists())
+
+    def test_audit_append_discards_only_an_incomplete_trailing_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LedgerStore(Path(tmp))
+            first = {"uid": 1001, "action": "add", "result": "created"}
+            second = {"uid": 1001, "action": "edit", "result": "updated"}
+
+            store.transaction(lambda ledger: (ledger, "first", [first], False))
+            with store.log_path.open("ab") as fh:
+                fh.write(b'{"partial"')
+
+            result = store.transaction(lambda ledger: (ledger, "second", [second], False))
+
+            self.assertEqual(result, "second")
+            events = [json.loads(line) for line in store.log_path.read_bytes().splitlines()]
+            self.assertEqual([item["action"] for item in events], ["add", "edit"])
+            self.assertIn("discarded an incomplete trailing audit record", store.last_warning)
+            self.assertFalse(store.journal_path.exists())
+
+    def test_audit_append_restores_a_valid_final_record_missing_newline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LedgerStore(Path(tmp))
+            first = {"uid": 1001, "action": "add", "result": "created"}
+            second = {"uid": 1001, "action": "edit", "result": "updated"}
+
+            store.transaction(lambda ledger: (ledger, None, [first], False))
+            store.log_path.write_bytes(store.log_path.read_bytes().removesuffix(b"\n"))
+            store.transaction(lambda ledger: (ledger, None, [second], False))
+
+            events = [json.loads(line) for line in store.log_path.read_bytes().splitlines()]
+            self.assertEqual([item["action"] for item in events], ["add", "edit"])
+            self.assertIn("restored a missing final newline", store.last_warning)
+
+    def test_failed_audit_append_keeps_journal_and_recovers_exactly_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store = LedgerStore(data_dir)
+            first = {"uid": 1001, "action": "add", "result": "created"}
+            second = {"uid": 1001, "action": "edit", "result": "updated"}
+            store.transaction(lambda ledger: (ledger, None, [first], False))
+            original = store.log_path.read_bytes()
+
+            real_write = os.write
+            calls = 0
+
+            def fail_after_partial_write(fd, payload):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return real_write(fd, bytes(payload[:7]))
+                raise OSError("simulated audit disk failure")
+
+            with mock.patch("bk.jsonl.os.write", side_effect=fail_after_partial_write):
+                result = store.transaction(lambda ledger: (ledger, "accepted", [second], False))
+
+            self.assertEqual(result, "accepted")
+            self.assertEqual(store.log_path.read_bytes(), original)
+            self.assertTrue(store.journal_path.exists())
+            self.assertIn("deferred recovery", store.last_warning)
+
+            recovered = LedgerStore(data_dir)
+            recovered.load()
+            events = [json.loads(line) for line in recovered.log_path.read_bytes().splitlines()]
+            self.assertEqual([item["action"] for item in events], ["add", "edit"])
+            self.assertEqual(len({item["event_id"] for item in events}), 2)
+            self.assertFalse(recovered.journal_path.exists())
+
     def test_invalid_journal_is_not_silently_discarded(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LedgerStore(Path(tmp))
@@ -265,6 +368,44 @@ class LedgerStorageTests(unittest.TestCase):
                 store.load()
 
             self.assertTrue(store.journal_path.exists())
+
+    def test_invalid_journal_log_identity_is_rejected_before_ledger_apply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LedgerStore(Path(tmp))
+            store.ensure()
+            journal = {
+                "version": 1,
+                "transaction_id": "tx-invalid-log",
+                "created_at": "2030-01-01T00:00:00Z",
+                "ledger": {
+                    "version": 1,
+                    "last_transaction_id": "tx-invalid-log",
+                    "reservations": [{"id": "must-not-apply"}],
+                },
+                "logs": [{"transaction_id": "tx-invalid-log", "action": "add"}],
+            }
+            store.journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+            with self.assertRaisesRegex(OSError, "event ID is invalid"):
+                store.load()
+
+            self.assertFalse(store.ledger_path.exists())
+            self.assertTrue(store.journal_path.exists())
+
+    def test_oversized_audit_event_is_rejected_before_journal_or_ledger_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LedgerStore(Path(tmp))
+
+            def mutate(ledger):
+                ledger["reservations"].append({"id": "must-not-apply"})
+                return ledger, None, [{"action": "add", "message": "x" * (1024 * 1024)}], True
+
+            with self.assertRaisesRegex(ValueError, "audit record exceeds"):
+                store.transaction(mutate)
+
+            self.assertFalse(store.ledger_path.exists())
+            self.assertFalse(store.log_path.exists())
+            self.assertFalse(store.journal_path.exists())
 
     def test_invalid_ledger_without_backup_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -330,6 +471,17 @@ class LedgerStorageTests(unittest.TestCase):
 
             self.assertEqual(stat.S_IMODE(store.data_dir.stat().st_mode), 0o700)
             self.assertEqual(stat.S_IMODE(store.log_path.stat().st_mode), 0o600)
+
+    def test_reset_counts_and_removes_audit_lines_with_invalid_utf8(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LedgerStore(Path(tmp))
+            store.ensure()
+            store.log_path.write_bytes(b"valid\n\xff\n")
+
+            result = store.reset()
+
+            self.assertEqual(result["logs"], 2)
+            self.assertFalse(store.log_path.exists())
 
     def test_cross_process_booking_transaction_never_oversells_shared_capacity(self):
         with tempfile.TemporaryDirectory() as tmp:

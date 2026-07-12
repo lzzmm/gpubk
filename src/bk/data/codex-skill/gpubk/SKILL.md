@@ -25,6 +25,7 @@ bk agent recommend 2 1h30m --mode shared --mem 12g --share 1/2 --compact
 bk 2 1h30m --mem 12g --share 1/2 --op-id <stable-id> --json
 bk agent edit <short-id> --duration 2h --op-id <stable-edit-id> --compact
 bk agent cancel <short-id> --compact
+bk log --limit 100 --json
 ```
 
 Read [references/protocol.md](references/protocol.md) when implementing an integration or interpreting every field.
@@ -72,6 +73,8 @@ GPUbk sets `CUDA_VISIBLE_DEVICES`; do not add physical GPU IDs to the training c
 - `pending` with `launch_guard_state=waiting`: the reservation is active, but a live process or VRAM check blocked launch. Report `message`; do not bypass the guard unless the user explicitly accepts that collision risk.
 - Cancellation results include `private_job_cleanup`; cancellation remains committed when cleanup
   reports a warning. Surface that warning instead of retrying the destructive operation.
+- `bk log --json` returns only the current UID's bounded recent audit tail. Surface a non-null
+  warning because it may indicate a damaged tail or that the 64 MiB scan ceiling was reached.
 
 For edits, an explicit `start` is exact and does not move unless `allow_queue=true` was explicitly
 requested. Keep `bk worker` running for scheduled commands. Use `list_gpu_reservations`,

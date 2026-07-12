@@ -22,7 +22,7 @@ from .scheduler import (
     shared_memory_headroom_for_reservation,
 )
 from .sharing import normalize_share_units, reservation_share_units, share_text
-from .storage import LedgerStore
+from .storage import AUDIT_SCHEMA_VERSION, LedgerStore
 from .timeparse import normalize_queue_start, parse_iso, to_iso, utc_now
 from .worker import (
     JOB_SPEC_ORPHAN_GRACE_SECONDS,
@@ -337,6 +337,8 @@ def build_agent_context(
             "private_job_spec_orphan_grace_seconds": JOB_SPEC_ORPHAN_GRACE_SECONDS,
             "bounded_private_job_logs": True,
             "private_job_log_cleanup": True,
+            "bounded_personal_audit_log": True,
+            "audit_api_schema": AUDIT_SCHEMA_VERSION,
             "versioned_usage_history": True,
             "usage_api_schema": "gpubk.usage.v1",
             "external_allocator_is_advisory": True,

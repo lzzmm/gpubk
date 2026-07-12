@@ -374,6 +374,101 @@ class CliTests(unittest.TestCase):
             self.assertIn("right", result.stdout)
             self.assertIn("third", result.stdout)
 
+    def test_log_tail_is_uid_filtered_bounded_and_machine_readable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            log_path = data_dir / "ops.log"
+            events = [
+                {
+                    "ts": "2030-01-01T00:00:00Z",
+                    "uid": os.getuid(),
+                    "action": "add",
+                    "result": "created",
+                    "reservation_id": "first-event",
+                },
+                {
+                    "ts": "2030-01-01T00:01:00Z",
+                    "uid": os.getuid() + 1,
+                    "action": "add",
+                    "result": "created",
+                    "reservation_id": "other-event",
+                },
+                {
+                    "ts": "2030-01-01T00:02:00Z",
+                    "uid": os.getuid(),
+                    "action": "edit",
+                    "result": "updated",
+                    "reservation_id": "latest-event",
+                    "message": "x" * 5000,
+                    "unknown_nested": [[0] * 1000],
+                },
+            ]
+            log_path.write_bytes(
+                b"".join(json.dumps(item).encode() + b"\n" for item in events)
+                + b"not-json\n"
+            )
+            log_path.chmod(0o600)
+
+            result = self.run_bk(["log", "--limit", "1", "--json"], data_dir)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["schema_version"], "gpubk.audit.v1")
+            self.assertEqual(payload["uid"], os.getuid())
+            self.assertEqual(len(payload["events"]), 1)
+            self.assertEqual(payload["events"][0]["reservation_id"], "latest-event")
+            self.assertEqual(len(payload["events"][0]["message"]), 4096)
+            self.assertNotIn("unknown_nested", payload["events"][0])
+            self.assertIn("malformed audit record", payload["warning"])
+
+    def test_log_plain_output_survives_invalid_optional_fields_and_escapes_controls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            log_path = data_dir / "ops.log"
+            log_path.write_text(
+                json.dumps(
+                    {
+                        "ts": "bad-time",
+                        "uid": os.getuid(),
+                        "action": "add\u001b[31m",
+                        "result": None,
+                        "gpus": "bad",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            log_path.chmod(0o600)
+
+            result = self.run_bk(["lg"], data_dir)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("invalid-time", result.stdout)
+            self.assertIn("add?[31m", result.stdout)
+            self.assertNotIn("\x1b", result.stdout)
+            self.assertIn("gpu=-", result.stdout)
+
+    def test_doctor_reports_interrupted_audit_tail_without_repairing_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            log_path = data_dir / "ops.log"
+            log_path.write_bytes(
+                json.dumps({"uid": os.getuid(), "action": "add"}).encode() + b"\n{"
+            )
+            log_path.chmod(0o600)
+            original = log_path.read_bytes()
+
+            result = self.run_bk(["doctor", "--json", "--strict"], data_dir)
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            payload = json.loads(result.stdout)
+            issue = next(
+                item for item in payload["storage_issues"] if item["type"] == "audit-log-tail"
+            )
+            self.assertIn("malformed audit record", issue["message"])
+            self.assertIn("not newline-terminated", issue["message"])
+            self.assertEqual(log_path.read_bytes(), original)
+
     def test_doctor_json_is_read_only_without_explicit_probe(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "not-created"

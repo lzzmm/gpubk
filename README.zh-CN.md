@@ -62,6 +62,8 @@ bk l
 bk e 1 --duration 2h
 bk e 1 --at "tomorrow 09:00"
 bk d 1
+bk lg --limit 100                # 当前 UID 最近的操作记录
+bk lg --limit 20 --json          # 有界、机器可读的审计事件
 bk doctor                         # 只读检查台账
 ```
 

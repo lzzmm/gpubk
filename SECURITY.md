@@ -33,6 +33,9 @@ Supported security boundaries:
   fields block compaction instead of being discarded.
 - Open telemetry partitions validate complete batches before append, roll back detected
   partial writes, and repair only the final interrupted JSONL fragment after a crash.
+- Audit events use the same validated append and rollback path. `bk log` scans at most
+  64 MiB from the tail, filters by the process UID, bounds output, and treats malformed
+  records as warnings; read-only doctor checks report an interrupted tail without repairing it.
 
 Administrator responsibilities:
 

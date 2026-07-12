@@ -18,11 +18,34 @@ from .fileio import (
     open_existing_regular,
     open_or_create_regular,
 )
+from .jsonl import (
+    JsonlTailResult,
+    append_json_objects,
+    encode_json_object_line,
+    read_json_objects_tail,
+)
 from .models import BookingError
 from .policy import ledger_storage_modes
 
 
 T = TypeVar("T")
+AUDIT_SCHEMA_VERSION = "gpubk.audit.v1"
+MAX_AUDIT_LINE_BYTES = 1024 * 1024
+MAX_AUDIT_SCAN_BYTES = 64 * 1024 * 1024
+AUDIT_TEXT_LIMITS = {
+    "ts": 64,
+    "username": 256,
+    "action": 64,
+    "reservation_id": 128,
+    "op_id": 256,
+    "mode": 32,
+    "start_at": 64,
+    "end_at": 64,
+    "result": 64,
+    "message": 4096,
+    "transaction_id": 128,
+    "event_id": 128,
+}
 
 
 def _empty_ledger() -> dict:
@@ -150,12 +173,13 @@ class LedgerStore:
                 "logs": prepared_logs,
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
+            self._validate_journal(journal)
             self._write_journal(journal)
 
             try:
                 self._apply_journal_unlocked(journal)
             except OSError as exc:
-                self.last_warning = f"transaction accepted but deferred recovery is required: {exc}"
+                self._add_warning(f"transaction accepted but deferred recovery is required: {exc}")
                 return result
 
             self._clear_journal_best_effort()
@@ -298,7 +322,67 @@ class LedgerStore:
                         "actual": f"{actual:04o}",
                     }
                 )
+
+        unsafe_log = any(
+            item.get("path") == str(self.log_path)
+            and item.get("type") in {"file-type", "path-stat"}
+            for item in issues
+        )
+        if os.path.lexists(self.log_path) and not unsafe_log:
+            try:
+                tail = read_json_objects_tail(
+                    self.log_path,
+                    limit=1,
+                    max_line_bytes=MAX_AUDIT_LINE_BYTES,
+                    max_scan_bytes=MAX_AUDIT_SCAN_BYTES,
+                )
+            except (OSError, ValueError) as exc:
+                issues.append(
+                    {
+                        "type": "audit-log-read",
+                        "path": str(self.log_path),
+                        "message": str(exc),
+                    }
+                )
+            else:
+                details = _audit_tail_details(tail)
+                if details:
+                    issues.append(
+                        {
+                            "type": "audit-log-tail",
+                            "path": str(self.log_path),
+                            "message": "; ".join(details),
+                        }
+                    )
         return issues
+
+    def recent_logs(self, uid: int, limit: int = 100) -> List[dict]:
+        self.last_warning = None
+        if not os.path.lexists(self.log_path):
+            return []
+
+        invalid_uid_records = 0
+
+        def belongs_to_uid(item: dict) -> bool:
+            nonlocal invalid_uid_records
+            try:
+                return int(item["uid"]) == uid
+            except (KeyError, TypeError, ValueError):
+                invalid_uid_records += 1
+                return False
+
+        tail = read_json_objects_tail(
+            self.log_path,
+            limit=limit,
+            max_line_bytes=MAX_AUDIT_LINE_BYTES,
+            predicate=belongs_to_uid,
+            transform=lambda item: _audit_event_view(item, uid),
+            max_scan_bytes=MAX_AUDIT_SCAN_BYTES,
+        )
+        details = _audit_tail_details(tail, invalid_uid_records=invalid_uid_records)
+        if details:
+            self._add_warning("; ".join(details))
+        return list(tail.records)
 
     def _lock(self) -> FileLock:
         return FileLock(
@@ -319,7 +403,7 @@ class LedgerStore:
         except (json.JSONDecodeError, OSError, ValueError) as exc:
             restored = self._load_latest_backup()
             if restored is not None:
-                self.last_warning = f"ledger is invalid; loaded the latest valid backup: {exc}"
+                self._add_warning(f"ledger is invalid; loaded the latest valid backup: {exc}")
                 data = restored
             else:
                 raise LedgerCorruptionError(
@@ -405,6 +489,22 @@ class LedgerStore:
         logs = journal.get("logs")
         if not isinstance(logs, list) or not all(isinstance(item, dict) for item in logs):
             raise ValueError("journal logs are invalid")
+        event_ids = set()
+        for item in logs:
+            event_id = item.get("event_id")
+            if not isinstance(event_id, str) or not event_id or len(event_id) > 128:
+                raise ValueError("journal log event ID is invalid")
+            if event_id in event_ids:
+                raise ValueError("journal log event IDs must be unique")
+            event_ids.add(event_id)
+            if item.get("transaction_id") != transaction_id:
+                raise ValueError("journal log transaction ID mismatch")
+            encode_json_object_line(
+                item,
+                max_line_bytes=MAX_AUDIT_LINE_BYTES,
+                record_name="journal audit",
+                compact=False,
+            )
 
     def _apply_journal_unlocked(self, journal: dict) -> None:
         ledger = journal.get("ledger")
@@ -422,7 +522,7 @@ class LedgerStore:
             try:
                 self._write_backup(ledger)
             except OSError as exc:
-                self.last_warning = f"ledger committed but backup failed: {exc}"
+                self._add_warning(f"ledger committed but backup failed: {exc}")
 
     def _atomic_write_ledger(self, ledger: dict) -> None:
         self._validate_ledger(ledger)
@@ -453,39 +553,53 @@ class LedgerStore:
 
     def _append_missing_logs(self, logs: List[dict]) -> None:
         event_ids = {str(item["event_id"]) for item in logs}
-        existing = self._recent_event_ids(event_ids)
+        batch_bytes = 1 + sum(
+            len(
+                encode_json_object_line(
+                    item,
+                    max_line_bytes=MAX_AUDIT_LINE_BYTES,
+                    record_name="audit",
+                    compact=False,
+                )
+            )
+            for item in logs
+        )
+        existing = self._recent_event_ids(event_ids, batch_bytes)
         missing = [item for item in logs if str(item["event_id"]) not in existing]
         if not missing:
             return
-        fd = open_or_create_regular(self.log_path, os.O_WRONLY | os.O_APPEND, self.file_mode)
-        with os.fdopen(fd, "a", encoding="utf-8") as fh:
-            for item in missing:
-                fh.write(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
+        try:
+            result = append_json_objects(
+                self.log_path,
+                missing,
+                file_mode=self.file_mode,
+                dir_mode=self.dir_mode,
+                max_line_bytes=MAX_AUDIT_LINE_BYTES,
+                max_file_bytes=None,
+                record_name="audit",
+                compact=False,
+            )
+        except ValueError as exc:
+            raise OSError(f"cannot append audit log: {exc}") from exc
+        if result.warnings:
+            self._add_warning(*result.warnings)
 
-    def _recent_event_ids(self, wanted: set[str], tail_bytes: int = 1024 * 1024) -> set[str]:
+    def _recent_event_ids(self, wanted: set[str], tail_bytes: int) -> set[str]:
         if not wanted or not self.log_path.exists():
             return set()
-        found = set()
-        fd = open_existing_regular(self.log_path)
-        with os.fdopen(fd, "rb") as fh:
-            size = fh.seek(0, os.SEEK_END)
-            start = max(0, size - tail_bytes)
-            fh.seek(start)
-            if start:
-                fh.readline()
-            for raw_line in fh:
-                try:
-                    item = json.loads(raw_line)
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    continue
-                event_id = str(item.get("event_id", ""))
-                if event_id in wanted:
-                    found.add(event_id)
-                    if found == wanted:
-                        break
-        return found
+
+        def is_wanted(item: dict) -> bool:
+            return str(item.get("event_id", "")) in wanted
+
+        tail = read_json_objects_tail(
+            self.log_path,
+            limit=len(wanted),
+            max_line_bytes=MAX_AUDIT_LINE_BYTES,
+            predicate=is_wanted,
+            transform=lambda item: {"event_id": str(item.get("event_id", ""))},
+            max_scan_bytes=max(1, tail_bytes),
+        )
+        return {str(item.get("event_id", "")) for item in tail.records}
 
     def _validate_existing_log_unlocked(self) -> None:
         if not os.path.lexists(self.log_path):
@@ -498,7 +612,14 @@ class LedgerStore:
             self.journal_path.unlink(missing_ok=True)
             _fsync_dir(self.data_dir)
         except OSError as exc:
-            self.last_warning = f"transaction committed but journal cleanup failed: {exc}"
+            self._add_warning(f"transaction committed but journal cleanup failed: {exc}")
+
+    def _add_warning(self, *messages: str) -> None:
+        values = []
+        if self.last_warning:
+            values.append(self.last_warning)
+        values.extend(message for message in messages if message)
+        self.last_warning = "; ".join(dict.fromkeys(values)) or None
 
 
 def _prepare_logs(logs: List[dict], transaction_id: str) -> List[dict]:
@@ -511,6 +632,51 @@ def _prepare_logs(logs: List[dict], transaction_id: str) -> List[dict]:
     return prepared
 
 
+def _audit_tail_details(
+    tail: JsonlTailResult,
+    *,
+    invalid_uid_records: int = 0,
+) -> List[str]:
+    details = []
+    malformed = tail.invalid_records + invalid_uid_records
+    if malformed:
+        details.append(f"found {malformed} malformed audit record(s)")
+    if tail.oversized_records:
+        details.append(f"found {tail.oversized_records} oversized audit record(s)")
+    if tail.final_newline_missing:
+        details.append("the final audit record is not newline-terminated")
+    if tail.scan_truncated:
+        details.append("the audit scan reached its 64 MiB safety limit")
+    return details
+
+
+def _audit_event_view(item: dict, uid: int) -> dict:
+    view = {"uid": uid}
+    for key, limit in AUDIT_TEXT_LIMITS.items():
+        value = item.get(key)
+        view[key] = value[:limit] if isinstance(value, str) else None
+
+    raw_gpus = item.get("gpus")
+    view["gpus"] = (
+        [
+            value
+            for value in raw_gpus[:256]
+            if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 1_000_000
+        ]
+        if isinstance(raw_gpus, list)
+        else []
+    )
+    share_units = item.get("share_units")
+    view["share_units"] = (
+        share_units
+        if isinstance(share_units, int)
+        and not isinstance(share_units, bool)
+        and 0 < share_units <= 1_000_000
+        else None
+    )
+    return view
+
+
 def _atomic_write_json(
     path: Path,
     value: dict,
@@ -519,7 +685,9 @@ def _atomic_write_json(
     *,
     prefix: str,
 ) -> None:
-    payload = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    payload = (
+        json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2, sort_keys=True) + "\n"
+    )
     stat = shutil.disk_usage(directory)
     if stat.free < max(len(payload) * 2, 1024 * 1024):
         raise OSError(errno.ENOSPC, "not enough free space for safe file transaction")
@@ -542,7 +710,7 @@ def _line_count(path: Path) -> int:
     if not path.exists():
         return 0
     fd = open_existing_regular(path)
-    with os.fdopen(fd, "r", encoding="utf-8") as fh:
+    with os.fdopen(fd, "rb") as fh:
         return sum(1 for _line in fh)
 
 

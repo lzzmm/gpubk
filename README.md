@@ -63,6 +63,8 @@ bk l
 bk e 1 --duration 2h
 bk e 1 --at "tomorrow 09:00"
 bk d 1
+bk lg --limit 100                # recent operations for this UID
+bk lg --limit 20 --json          # bounded machine-readable audit events
 bk doctor                         # read-only ledger checks
 ```
 

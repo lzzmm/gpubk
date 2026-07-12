@@ -2,7 +2,8 @@
 
 ## JSON CLI
 
-All machine responses use `schema_version: "bk.agent.v1"`.
+Booking and allocation responses use `schema_version: "bk.agent.v1"`. The personal
+audit-tail response uses `schema_version: "gpubk.audit.v1"`.
 
 ```bash
 bk agent context --compact
@@ -13,6 +14,7 @@ bk agent cancel RESERVATION --compact
 bk l --json
 bk j --json
 bk j --cleanup --json
+bk log --limit 100 --json
 bk usage me --since 24h --json --compact
 bk usage samples --since 2d --resolution 5m --json --compact
 ```
@@ -51,6 +53,10 @@ applies a 24-hour grace period to unreferenced specs, and applies the configured
 only to terminal private job logs.
 `private_job_cleanup` reports `removed`, `retained`, `deferred_orphans`, `failed`, and `warnings`.
 `private_job_log_cleanup` additionally reports retained/removed bytes and unresolved quota excess.
+
+`bk log --json` returns `kind=operation-log`, the process `uid`, the requested `limit`, recent
+matching `events` in chronological order, and a nullable `warning`. It reads backward with bounded
+memory, scans at most 64 MiB, skips malformed records, and never accepts a UID argument.
 
 `share` accepts whole units, an exactly representable fraction, or a percentage. `share_with=N` reserves all but `N` minimum units. These values control scheduling admission and inferred VRAM, not hardware-enforced compute bandwidth. Explicit `expected_memory` remains the actual per-GPU estimate and is not multiplied by share units.
 
