@@ -192,6 +192,64 @@ class ScheduledJobTests(unittest.TestCase):
             7.5,
         )
 
+    def test_worker_reaps_term_ignoring_child_when_reconciliation_crashes(self):
+        pid_path = self.work_dir / "reconcile-crash-child.pid"
+        reservation = self.booking(
+            command=[
+                sys.executable,
+                "-c",
+                (
+                    "import os,pathlib,signal,time\n"
+                    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                    f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid()), encoding='utf-8')\n"
+                    "while True: time.sleep(1)\n"
+                ),
+            ]
+        )
+        config = replace(self.config, worker_termination_grace_seconds=0.1)
+        original_reconcile = worker_module._reconcile_running
+
+        def fail_after_child_is_ready(*args, **kwargs):
+            running = args[2]
+            if running and pid_path.exists():
+                raise OSError("simulated ledger outage")
+            return original_reconcile(*args, **kwargs)
+
+        child_pid = None
+        try:
+            started = time.monotonic()
+            with mock.patch(
+                "bk.worker._reconcile_running",
+                side_effect=fail_after_child_is_ready,
+            ), self.assertRaisesRegex(OSError, "simulated ledger outage"):
+                run_worker(
+                    config,
+                    self.store,
+                    self.actor,
+                    once=True,
+                    poll_seconds=0.1,
+                    quiet=True,
+                )
+
+            elapsed = time.monotonic() - started
+            self.assertGreaterEqual(elapsed, 0.08)
+            self.assertLess(elapsed, 3.0)
+            child_pid = int(pid_path.read_text(encoding="utf-8"))
+            with self.assertRaises(ProcessLookupError):
+                os.kill(child_pid, 0)
+            stored = next(
+                item
+                for item in self.store.load()["reservations"]
+                if item["id"] == reservation["id"]
+            )
+            self.assertEqual(stored["job"]["status"], "running")
+        finally:
+            if child_pid is not None:
+                try:
+                    os.killpg(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
     def test_worker_rolls_high_volume_output_without_blocking_the_job(self):
         config = replace(self.config, job_log_max_mb=1)
         reservation = self.booking(

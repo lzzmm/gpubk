@@ -476,17 +476,12 @@ def run_worker(
         try:
             try:
                 if running:
-                    _stop_running_jobs(running, utc_now())
-                    deadline = (
-                        time.monotonic()
-                        + config.worker_termination_grace_seconds
+                    _shutdown_running_jobs(
+                        running,
+                        reconcile,
+                        config.worker_termination_grace_seconds,
+                        quiet=quiet,
                     )
-                    while running and time.monotonic() < deadline:
-                        reconcile(utc_now())
-                        time.sleep(0.05)
-                    for item in running.values():
-                        _kill_process_group(item.process)
-                    reconcile(utc_now())
                 _cleanup_job_specs_best_effort(config, store, actor, utc_now(), quiet)
                 _cleanup_job_logs_best_effort(config, store, actor, utc_now(), quiet)
             finally:
@@ -1220,6 +1215,68 @@ def _stop_running_jobs(
             continue
         reason = "deadline" if current >= item.end_at else "worker-stop"
         _request_termination(item, reason)
+
+
+def _shutdown_running_jobs(
+    running: Dict[str, RunningJob],
+    reconcile: Callable[[datetime], None],
+    grace_seconds: float,
+    *,
+    quiet: bool,
+) -> None:
+    """Stop every child even when ledger reconciliation is unavailable."""
+    _stop_running_jobs(running, utc_now())
+    deadline = time.monotonic() + grace_seconds
+    reconciliation_errors: List[Exception] = []
+    reconciliation_available = True
+    while running and time.monotonic() < deadline:
+        if reconciliation_available:
+            try:
+                reconcile(utc_now())
+            except Exception as exc:
+                reconciliation_errors.append(exc)
+                reconciliation_available = False
+        if running:
+            if not reconciliation_available and not any(
+                _process_group_alive(item.process) for item in running.values()
+            ):
+                break
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+    if running:
+        _kill_and_reap_running_jobs(tuple(running.values()))
+        try:
+            reconcile(utc_now())
+        except Exception as exc:
+            reconciliation_errors.append(exc)
+
+    if reconciliation_errors and not quiet:
+        names = ", ".join(dict.fromkeys(type(exc).__name__ for exc in reconciliation_errors))
+        print(
+            "warning: worker state reconciliation failed during shutdown "
+            f"({names}); forced process cleanup was still applied"
+        )
+
+
+def _kill_and_reap_running_jobs(
+    jobs: Sequence[RunningJob],
+    timeout_seconds: float = 1.0,
+) -> None:
+    for item in jobs:
+        _kill_process_group(item.process)
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        alive = False
+        for item in jobs:
+            item.process.poll()
+            if _process_group_alive(item.process):
+                alive = True
+                _kill_process_group(item.process)
+        if not alive or time.monotonic() >= deadline:
+            break
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    for item in jobs:
+        item.process.poll()
 
 
 def _request_termination(item: RunningJob, reason: str) -> None:

@@ -34,6 +34,9 @@ Supported security boundaries:
 - Scheduled process groups receive TERM during the configured final grace window and KILL at the
   reservation deadline, so graceful shutdown time is charged to the current booking rather than
   leaking into the next one. Cancellation and worker shutdown use a bounded post-event grace.
+- Fatal worker cleanup force-kills and reaps supervised process groups without depending on a
+  successful ledger read. If durable state cannot be updated, restart recovery keeps the job
+  uncertain instead of claiming completion or retrying automatically.
 - The default launch guard passes the stable UUIDs from that same NVML snapshot to
   `CUDA_VISIBLE_DEVICES`, because NVML indices are not guaranteed to match CUDA ordinals.
   Missing identifiers fail closed on real NVML devices; disabling the guard explicitly accepts

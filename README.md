@@ -266,6 +266,10 @@ Processes recorded on another host are never signalled locally. A concurrent
 worker exits with status `75`; the bundled systemd unit does not restart-loop on
 that status. During an upgrade, active jobs created by a pre-lease worker are
 left untouched and block new claims until they finish or their reservation ends.
+If the current worker itself loses ledger access while supervising a command,
+its final process-group KILL and reap no longer depends on another successful
+ledger read. The unchanged durable job state is intentionally recovered as
+`uncertain` after restart rather than being reported as completed or retried.
 
 `bk worker --status` reports `running`, `stopped`, `not-seen`, or an unsafe/
 unavailable state without creating or modifying private storage. `running` is

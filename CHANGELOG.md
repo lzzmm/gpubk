@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Force-kill and reap locally supervised job groups even when a worker crashes through an
+  unavailable ledger reconciliation path, leaving durable state for explicit uncertain recovery
+  instead of allowing a TERM-ignoring command to escape the failed worker.
 - Let the plain CLI timeline select past intervals and render retained expired reservations,
   matching the TUI history view while continuing to hide cancelled bookings.
 - Enforce scheduled-command reservation boundaries by sending TERM during a configurable
