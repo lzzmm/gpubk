@@ -344,6 +344,8 @@ def build_agent_context(
             "queue_search_hours": config.queue_search_hours,
             "ledger_retention_days": config.ledger_retention_days,
             "worker_live_guard": config.worker_live_guard,
+            "worker_max_parallel": config.worker_max_parallel,
+            "worker_effective_max_parallel": config.effective_worker_max_parallel,
             "worker_recovery_grace_seconds": config.worker_recovery_grace_seconds,
             "worker_busy_exit_code": WORKER_BUSY_EXIT_CODE,
             "worker_waiting_exit_code": WORKER_WAITING_EXIT_CODE,

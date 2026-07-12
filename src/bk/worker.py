@@ -300,7 +300,11 @@ def run_worker(
     poll = config.worker_poll_seconds if poll_seconds is None else float(poll_seconds)
     if poll < 0.1:
         raise ValueError("worker poll interval must be >= 0.1 seconds")
-    parallel = max_parallel if max_parallel is not None else max(1, config.gpu_count)
+    parallel = (
+        max_parallel
+        if max_parallel is not None
+        else config.effective_worker_max_parallel
+    )
     if parallel < 1:
         raise ValueError("worker max parallel jobs must be >= 1")
 
@@ -336,7 +340,10 @@ def run_worker(
         counts["terminated_groups"] = recovery.terminated_groups
         legacy_blocked = recovery.legacy_active_jobs
         if not quiet:
-            print(f"worker started: uid={actor.uid} poll={poll:g}s logs={log_dir}")
+            print(
+                f"worker started: uid={actor.uid} poll={poll:g}s "
+                f"parallel={parallel} logs={log_dir}"
+            )
             if recovery.examined:
                 print(
                     f"recovery: examined={recovery.examined} "

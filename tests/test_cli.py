@@ -125,6 +125,9 @@ class CliTests(unittest.TestCase):
                     "BK_MONITOR_INTERVAL_SECONDS": "5",
                     "BK_MONITOR_ROLLUP_SECONDS": "300",
                     "BK_TUI_REFRESH_SECONDS": "2.5",
+                    "BK_GPU_COUNT": "8",
+                    "BK_MAX_SHARED_USERS": "4",
+                    "BK_WORKER_MAX_PARALLEL": "20",
                     "BK_ALLOCATOR_COMMAND": "allocator --token secret-value",
                 },
             )
@@ -138,12 +141,15 @@ class CliTests(unittest.TestCase):
             self.assertEqual(payload["effective"]["monitor_interval_seconds"], 5.0)
             self.assertEqual(payload["effective"]["monitor_rollup_seconds"], 300)
             self.assertEqual(payload["effective"]["tui_refresh_seconds"], 2.5)
+            self.assertEqual(payload["effective"]["worker_max_parallel"], 20)
+            self.assertEqual(payload["effective"]["worker_effective_max_parallel"], 20)
             self.assertTrue(payload["effective"]["allocator_command_configured"])
             self.assertNotIn("secret-value", result.stdout)
             self.assertEqual(payload["ledger_policy"]["status"], "unbound")
             self.assertIn("BK_SLOT_MINUTES", payload["environment_overrides"])
             self.assertIn("BK_MONITOR_INTERVAL_SECONDS", payload["environment_overrides"])
             self.assertIn("BK_TUI_REFRESH_SECONDS", payload["environment_overrides"])
+            self.assertIn("BK_WORKER_MAX_PARALLEL", payload["environment_overrides"])
 
     def test_config_report_detects_bound_policy_match_and_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:

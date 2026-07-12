@@ -238,6 +238,13 @@ the reservation ends; `bk worker --once` returns `3` when work is waiting.
 `worker_live_guard=false` disables this protection and should only be used for
 an explicitly accepted compatibility case.
 
+The worker can start multiple due commands concurrently, including legal shared
+reservations on the same GPU. Its effective limit is the smaller of
+`worker_max_parallel` (default 64) and `gpu_count * max_shared_users`; this keeps
+normal shared capacity from being accidentally serialized while retaining an
+administrator-controlled process safety cap. `bk worker --max-parallel N`
+overrides the cap for that invocation. `bk config` reports both values.
+
 Only one worker can hold a UID's private job directory. The kernel releases its
 lease after a crash, so the next worker can recover durable `claimed` or
 `running` records without racing a healthy worker. On Linux, recovery reads only
@@ -449,6 +456,7 @@ group-writable ledger directory:
   "job_log_max_mb": 64,
   "job_log_total_max_mb": 4096,
   "worker_poll_seconds": 1,
+  "worker_max_parallel": 64,
   "worker_claim_timeout_seconds": 30,
   "worker_recovery_grace_seconds": 5,
   "worker_live_guard": true,
@@ -518,7 +526,7 @@ Unknown keys, wrong types, non-finite numbers, unsafe paths, and excessive
 values are rejected instead of ignored. The JSON report lists active override
 names but never prints the external allocator command.
 
-Scheduling policy, retention, worker timing, allocator integration, and display
+Scheduling policy, retention, worker timing and concurrency, allocator integration, and display
 defaults are configurable. Schema versions, transaction durability, path and
 permission checks, record-size limits, and other corruption defenses are fixed
 implementation safeguards rather than administrator tuning knobs.

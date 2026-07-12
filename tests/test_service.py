@@ -102,6 +102,8 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(context["policy"]["job_log_retention_days"], 30)
         self.assertEqual(context["policy"]["job_log_max_mb"], 64)
         self.assertEqual(context["policy"]["job_log_total_max_mb"], 4096)
+        self.assertEqual(context["policy"]["worker_max_parallel"], 64)
+        self.assertEqual(context["policy"]["worker_effective_max_parallel"], 4)
         self.assertEqual(context["policy"]["worker_recovery_grace_seconds"], 5.0)
         self.assertEqual(
             context["policy"]["monitoring"],

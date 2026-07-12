@@ -1149,6 +1149,8 @@ def _config_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     )
     print(
         f"worker: poll={effective['worker_poll_seconds']}s "
+        f"parallel={effective['worker_effective_max_parallel']}/"
+        f"{effective['worker_max_parallel']} "
         f"claim={effective['worker_claim_timeout_seconds']}s "
         f"live-guard={'on' if effective['worker_live_guard'] else 'off'}"
     )
@@ -1201,6 +1203,8 @@ def _effective_config(config: Config) -> dict:
         "job_log_max_mb": config.job_log_max_mb,
         "job_log_total_max_mb": config.job_log_total_max_mb,
         "worker_poll_seconds": config.worker_poll_seconds,
+        "worker_max_parallel": config.worker_max_parallel,
+        "worker_effective_max_parallel": config.effective_worker_max_parallel,
         "worker_claim_timeout_seconds": config.worker_claim_timeout_seconds,
         "worker_recovery_grace_seconds": config.worker_recovery_grace_seconds,
         "worker_live_guard": config.worker_live_guard,

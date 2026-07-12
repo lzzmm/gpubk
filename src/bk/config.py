@@ -29,6 +29,8 @@ MAX_BACKUP_KEEP = 10_000
 MAX_TIMELINE_HOURS = 365 * 24
 MAX_MEMORY_MB = 16 * 1024 * 1024
 MAX_WORKER_POLL_SECONDS = 60 * 60
+DEFAULT_WORKER_MAX_PARALLEL = 64
+MAX_WORKER_MAX_PARALLEL = 4096
 MAX_WORKER_CLAIM_TIMEOUT_SECONDS = 7 * 24 * 60 * 60
 MAX_WORKER_RECOVERY_GRACE_SECONDS = 24 * 60 * 60
 MAX_ALLOCATOR_TIMEOUT_SECONDS = 5 * 60
@@ -62,6 +64,7 @@ CONFIG_ENV_MAP = {
     "job_log_max_mb": "BK_JOB_LOG_MAX_MB",
     "job_log_total_max_mb": "BK_JOB_LOG_TOTAL_MAX_MB",
     "worker_poll_seconds": "BK_WORKER_POLL_SECONDS",
+    "worker_max_parallel": "BK_WORKER_MAX_PARALLEL",
     "worker_claim_timeout_seconds": "BK_WORKER_CLAIM_TIMEOUT_SECONDS",
     "worker_recovery_grace_seconds": "BK_WORKER_RECOVERY_GRACE_SECONDS",
     "worker_live_guard": "BK_WORKER_LIVE_GUARD",
@@ -124,6 +127,7 @@ class Config:
     tui_refresh_seconds: float = 1.0
     monitor_uid: Optional[int] = None
     config_owner_uid: Optional[int] = None
+    worker_max_parallel: int = DEFAULT_WORKER_MAX_PARALLEL
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "slot_minutes", validate_slot_minutes(self.slot_minutes))
@@ -148,10 +152,20 @@ class Config:
             "config_owner_uid",
             validate_optional_uid(self.config_owner_uid, "config_owner_uid"),
         )
+        object.__setattr__(
+            self,
+            "worker_max_parallel",
+            validate_worker_max_parallel(self.worker_max_parallel),
+        )
 
     @property
     def slot_seconds(self) -> int:
         return slot_seconds(self.slot_minutes)
+
+    @property
+    def effective_worker_max_parallel(self) -> int:
+        scheduling_capacity = self.gpu_count * self.max_shared_users
+        return max(1, min(self.worker_max_parallel, scheduling_capacity))
 
     @property
     def config_path(self) -> Path:
@@ -220,6 +234,16 @@ def validate_tui_refresh_seconds(value: object) -> float:
     if parsed > MAX_TUI_REFRESH_SECONDS:
         raise ValueError(f"tui_refresh_seconds must be <= {MAX_TUI_REFRESH_SECONDS:g}")
     return parsed
+
+
+def validate_worker_max_parallel(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("worker_max_parallel must be an integer")
+    if value < 1:
+        raise ValueError("worker_max_parallel must be >= 1")
+    if value > MAX_WORKER_MAX_PARALLEL:
+        raise ValueError(f"worker_max_parallel must be <= {MAX_WORKER_MAX_PARALLEL}")
+    return value
 
 
 def validate_optional_uid(value: object, key: str) -> Optional[int]:
@@ -527,6 +551,12 @@ def load_config() -> Config:
         ),
         worker_poll_seconds=_float_value(
             raw, "worker_poll_seconds", 1.0, maximum=MAX_WORKER_POLL_SECONDS
+        ),
+        worker_max_parallel=_int_value(
+            raw,
+            "worker_max_parallel",
+            DEFAULT_WORKER_MAX_PARALLEL,
+            maximum=MAX_WORKER_MAX_PARALLEL,
         ),
         worker_claim_timeout_seconds=_float_value(
             raw,

@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Let the scheduled-command worker run legal same-GPU shared reservations concurrently instead
+  of serializing them by physical GPU count, with a configurable safety cap and topology-bounded
+  effective limit exposed to operators and Agents.
 - Align read-only recommendations, TUI previews, and writes around the same wall-clock
   expiration boundary: ignore legacy records that already ended, still queue behind live
   non-aligned records, and reject new exact starts before the current booking slice without

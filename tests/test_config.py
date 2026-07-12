@@ -38,6 +38,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.config_path, Path(tmp) / "bk" / "config.json")
             self.assertEqual(config.timeline_hours, 2)
             self.assertTrue(config.worker_live_guard)
+            self.assertEqual(config.worker_max_parallel, 64)
+            self.assertEqual(config.effective_worker_max_parallel, 2)
             self.assertEqual(config.job_log_retention_days, 30)
             self.assertEqual(config.job_log_max_mb, 64)
             self.assertEqual(config.job_log_total_max_mb, 4096)
@@ -225,6 +227,7 @@ class ConfigTests(unittest.TestCase):
             config_path.write_text(
                 json.dumps(
                     {
+                        "gpu_count": 8,
                         "file_mode": "0660",
                         "dir_mode": "2770",
                         "slot_minutes": 10,
@@ -236,6 +239,7 @@ class ConfigTests(unittest.TestCase):
                         "usage_hourly_retention_days": 1500,
                         "usage_daily_retention_days": 0,
                         "usage_event_retention_days": 365,
+                        "worker_max_parallel": 12,
                         "worker_live_guard": False,
                         "monitor_interval_seconds": 5,
                         "monitor_rollup_seconds": 300,
@@ -260,6 +264,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.usage_hourly_retention_days, 1500)
             self.assertEqual(config.usage_daily_retention_days, 0)
             self.assertEqual(config.usage_event_retention_days, 365)
+            self.assertEqual(config.worker_max_parallel, 12)
+            self.assertEqual(config.effective_worker_max_parallel, 12)
             self.assertFalse(config.worker_live_guard)
             self.assertEqual(config.monitor_interval_seconds, 5.0)
             self.assertEqual(config.monitor_rollup_seconds, 300)
@@ -505,6 +511,7 @@ class ConfigTests(unittest.TestCase):
                     "BK_JOB_LOG_RETENTION_DAYS": "0",
                     "BK_JOB_LOG_MAX_MB": "8",
                     "BK_JOB_LOG_TOTAL_MAX_MB": "512",
+                    "BK_WORKER_MAX_PARALLEL": "3",
                     "BK_WORKER_RECOVERY_GRACE_SECONDS": "0.25",
                 },
                 clear=True,
@@ -514,7 +521,33 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.job_log_retention_days, 0)
             self.assertEqual(config.job_log_max_mb, 8)
             self.assertEqual(config.job_log_total_max_mb, 512)
+            self.assertEqual(config.worker_max_parallel, 3)
+            self.assertEqual(config.effective_worker_max_parallel, 2)
             self.assertEqual(config.worker_recovery_grace_seconds, 0.25)
+
+    def test_worker_parallel_limit_is_bounded_by_config_and_shared_topology(self):
+        topology_limited = Config(
+            Path("/tmp/bk-worker-topology-limit"),
+            gpu_count=2,
+            max_shared_users=4,
+            worker_max_parallel=64,
+        )
+        configured_limited = Config(
+            Path("/tmp/bk-worker-config-limit"),
+            gpu_count=8,
+            max_shared_users=4,
+            worker_max_parallel=3,
+        )
+
+        self.assertEqual(topology_limited.effective_worker_max_parallel, 8)
+        self.assertEqual(configured_limited.effective_worker_max_parallel, 3)
+
+        for invalid in (False, 0, 4097):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError,
+                "worker_max_parallel",
+            ):
+                Config(Path("/tmp/bk-worker-invalid-limit"), worker_max_parallel=invalid)
 
     def test_monitor_cadence_can_be_overridden_by_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -648,6 +681,8 @@ class ConfigTests(unittest.TestCase):
             ({"BK_ALLOCATOR_TIMEOUT_SECONDS": "inf"}, "finite"),
             ({"BK_GPU_COUNT": "1025"}, "<= 1024"),
             ({"BK_QUEUE_SEARCH_HOURS": str(10 * 365 * 24 + 1)}, "<= 87600"),
+            ({"BK_WORKER_MAX_PARALLEL": "0"}, ">= 1"),
+            ({"BK_WORKER_MAX_PARALLEL": "4097"}, "<= 4096"),
         )
         for environment, message in cases:
             with self.subTest(environment=environment), tempfile.TemporaryDirectory() as tmp:

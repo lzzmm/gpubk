@@ -212,6 +212,11 @@ bk 1 30m -- sh -lc 'python train.py > train.log 2>&1'
 worker 会在预约窗口内持续重试；`bk worker --once` 有等待任务时返回状态码 `3`。
 只有明确接受兼容性风险时才应设置 `worker_live_guard=false`。
 
+worker 可以并发启动多条到期命令，包括同一 GPU 上合法的 shared 预约。实际并发上限
+取 `worker_max_parallel`（默认 64）与 `gpu_count * max_shared_users` 的较小值，既不会再
+按物理 GPU 张数错误地串行化 shared 任务，也保留管理员控制的进程安全上限。
+`bk worker --max-parallel N` 可覆盖单次运行；`bk config` 会同时显示配置值和实际值。
+
 同一个 UID 的私有任务目录同时只允许一个 worker 持有租约；worker 崩溃后内核会自动
 释放锁，因此新 worker 可以恢复持久化的 `claimed` / `running` 状态而不会与健康 worker
 竞争。Linux 上只检查同 UID 的 `/proc` 记录，精确匹配 `BK_RESERVATION_ID`，并在发送
@@ -393,6 +398,7 @@ sudo install -d -m 0755 -o root -g root /etc/gpubk
   "job_log_max_mb": 64,
   "job_log_total_max_mb": 4096,
   "worker_poll_seconds": 1,
+  "worker_max_parallel": 64,
   "worker_claim_timeout_seconds": 30,
   "worker_recovery_grace_seconds": 5,
   "worker_live_guard": true,
@@ -450,7 +456,7 @@ bk config --json
 不安全路径和越界数值会直接报错，不再静默忽略。JSON 报告只列出当前生效的环境变量名，
 不会输出外部分配器命令内容。
 
-调度策略、保留周期、worker 时序、外部分配器和显示默认值可以配置；schema 版本、
+调度策略、保留周期、worker 时序与并发、外部分配器和显示默认值可以配置；schema 版本、
 事务持久性、路径与权限校验、记录大小上限等防损坏约束属于实现安全边界，不开放为
 管理员调优项。
 

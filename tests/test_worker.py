@@ -107,6 +107,71 @@ class ScheduledJobTests(unittest.TestCase):
         self.assertEqual(output["rid"], mine["id"])
         self.assertFalse(job_spec_path(self.config, mine["job"]["spec_id"]).exists())
 
+    def test_worker_runs_legal_same_gpu_shared_jobs_concurrently_by_default(self):
+        self.config = replace(self.config, max_shared_users=4)
+        expected = 4
+
+        def rendezvous_command(index):
+            script = (
+                "import pathlib,sys,time\n"
+                f"root = pathlib.Path({str(self.work_dir)!r})\n"
+                f"mine = root / 'shared-ready-{index}'\n"
+                "mine.write_text('ready', encoding='utf-8')\n"
+                "deadline = time.monotonic() + 2.0\n"
+                f"while len(list(root.glob('shared-ready-*'))) < {expected} "
+                "and time.monotonic() < deadline:\n"
+                "    time.sleep(0.02)\n"
+                f"raise SystemExit(0 if len(list(root.glob('shared-ready-*'))) == {expected} else 7)\n"
+            )
+            return [sys.executable, "-c", script]
+
+        reservations = [
+            self.booking(command=rendezvous_command(index))
+            for index in range(expected)
+        ]
+
+        summary = run_worker(
+            self.config,
+            self.store,
+            self.actor,
+            once=True,
+            poll_seconds=0.1,
+            quiet=True,
+        )
+
+        ledger = self.store.load()
+        by_id = {item["id"]: item for item in ledger["reservations"]}
+        self.assertEqual(summary.started, expected)
+        self.assertEqual(summary.succeeded, expected)
+        self.assertTrue(
+            all(by_id[reservation["id"]]["job"]["status"] == "succeeded" for reservation in reservations)
+        )
+
+    def test_worker_uses_configured_parallel_cap_unless_cli_overrides_it(self):
+        config = replace(
+            self.config,
+            gpu_count=4,
+            max_shared_users=4,
+            worker_max_parallel=3,
+        )
+        cases = ((None, 3), (7, 7))
+        for override, expected in cases:
+            with self.subTest(override=override), mock.patch(
+                "bk.worker.claim_due_jobs",
+                return_value=[],
+            ) as claim:
+                run_worker(
+                    config,
+                    self.store,
+                    self.actor,
+                    once=True,
+                    poll_seconds=0.1,
+                    max_parallel=override,
+                    quiet=True,
+                )
+
+                self.assertEqual(claim.call_args.kwargs["limit"], expected)
+
     def test_worker_rolls_high_volume_output_without_blocking_the_job(self):
         config = replace(self.config, job_log_max_mb=1)
         reservation = self.booking(
