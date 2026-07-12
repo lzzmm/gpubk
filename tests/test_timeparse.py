@@ -29,6 +29,11 @@ class TimeParsingTests(unittest.TestCase):
 
         self.assertEqual(parse_friendly_start("+30m", now), datetime(2030, 1, 1, 13, 15, tzinfo=timezone.utc))
 
+    def test_friendly_relative_time_does_not_drop_fractional_seconds(self):
+        now = datetime(2030, 1, 1, 12, 40, 0, 1, tzinfo=timezone.utc)
+
+        self.assertEqual(parse_friendly_start("+30m", now), datetime(2030, 1, 1, 13, 15, tzinfo=timezone.utc))
+
     def test_queue_start_floors_now_but_ceils_a_future_value(self):
         now = datetime(2030, 1, 1, 12, 41, 23, tzinfo=timezone.utc)
 
@@ -36,6 +41,15 @@ class TimeParsingTests(unittest.TestCase):
         self.assertEqual(
             normalize_queue_start(now + timedelta(minutes=1), now),
             datetime(2030, 1, 1, 12, 45, tzinfo=timezone.utc),
+        )
+
+    def test_queue_start_ceils_fractional_future_boundary(self):
+        now = datetime(2030, 1, 1, 12, 40, tzinfo=timezone.utc)
+        future = datetime(2030, 1, 1, 12, 45, 0, 1, tzinfo=timezone.utc)
+
+        self.assertEqual(
+            normalize_queue_start(future, now),
+            datetime(2030, 1, 1, 12, 50, tzinfo=timezone.utc),
         )
 
     def test_friendly_clock_and_calendar_forms_are_aligned(self):

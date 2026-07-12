@@ -37,7 +37,7 @@ def parse_start(value: str) -> datetime:
 
 def parse_friendly_start(value: str, now: datetime | None = None) -> datetime:
     raw = value.strip()
-    current = (now or utc_now()).astimezone(timezone.utc).replace(microsecond=0)
+    current = (now if now is not None else datetime.now(timezone.utc)).astimezone(timezone.utc)
     if not raw or raw.lower() == "now":
         return _floor_five_minutes(current)
     if raw.startswith("+"):
@@ -103,8 +103,8 @@ def parse_friendly_start(value: str, now: datetime | None = None) -> datetime:
 
 
 def normalize_queue_start(value: datetime, now: datetime | None = None) -> datetime:
-    start = value.astimezone(timezone.utc).replace(microsecond=0)
-    current = (now or utc_now()).astimezone(timezone.utc).replace(microsecond=0)
+    start = value.astimezone(timezone.utc)
+    current = (now or utc_now()).astimezone(timezone.utc)
     if start <= current:
         return _floor_five_minutes(current)
     return _ceil_five_minutes(start)
@@ -129,16 +129,18 @@ def _validate_friendly_boundary(value: datetime) -> datetime:
 
 
 def _floor_five_minutes(value: datetime) -> datetime:
-    timestamp = int(value.timestamp())
-    return datetime.fromtimestamp(timestamp - (timestamp % 300), timezone.utc)
+    normalized = value.astimezone(timezone.utc)
+    return normalized.replace(
+        minute=normalized.minute - (normalized.minute % 5),
+        second=0,
+        microsecond=0,
+    )
 
 
 def _ceil_five_minutes(value: datetime) -> datetime:
-    timestamp = int(value.timestamp())
-    remainder = timestamp % 300
-    if remainder:
-        timestamp += 300 - remainder
-    return datetime.fromtimestamp(timestamp, timezone.utc)
+    normalized = value.astimezone(timezone.utc)
+    floored = _floor_five_minutes(normalized)
+    return floored if normalized == floored else floored + timedelta(minutes=5)
 
 
 def format_local(value: Union[datetime, str]) -> str:
