@@ -142,10 +142,11 @@ class UsageAuditStore:
         self._workload_key: Optional[bytes] = None
 
     def ensure(self) -> None:
-        ensure_directory(self.data_dir, self.dir_mode)
-        ensure_directory(self.usage_dir, self.dir_mode)
-        ensure_directory(self.migrations_dir, self.dir_mode)
-        if self.meta_path.exists():
+        ensure_directory(self.data_dir, self.dir_mode, require_mode=True)
+        ensure_directory(self.usage_dir, self.dir_mode, require_mode=True)
+        ensure_directory(self.migrations_dir, self.dir_mode, require_mode=True)
+        self._validate_core_files_for_write()
+        if os.path.lexists(self.meta_path):
             self._validate_meta(self._read_json(self.meta_path))
             return
         payload = {
@@ -168,7 +169,7 @@ class UsageAuditStore:
         _atomic_write_json(self.meta_path, payload, self.file_mode, self.usage_dir, ".store.")
 
     def lock(self, timeout_seconds: Optional[float] = None) -> FileLock:
-        ensure_directory(self.data_dir, self.dir_mode)
+        ensure_directory(self.data_dir, self.dir_mode, require_mode=True)
         timeout = self.lock_timeout_seconds if timeout_seconds is None else timeout_seconds
         return FileLock(self.lock_path, timeout, self.file_mode, self.dir_mode)
 
@@ -536,8 +537,18 @@ class UsageAuditStore:
                 relative = str(path.relative_to(self.usage_dir))
                 report["removed"].append(relative)
                 if not dry_run:
+                    self._ensure_usage_directory(path.parent)
+                    source_fd = open_existing_regular(path, expected_mode=self.file_mode)
+                    os.close(source_fd)
+                    metadata_path = _meta_path_for(path)
+                    if os.path.lexists(metadata_path):
+                        metadata_fd = open_existing_regular(
+                            metadata_path,
+                            expected_mode=self.file_mode,
+                        )
+                        os.close(metadata_fd)
                     path.unlink(missing_ok=True)
-                    _meta_path_for(path).unlink(missing_ok=True)
+                    metadata_path.unlink(missing_ok=True)
                     fsync_directory(path.parent)
         return report
 
@@ -799,7 +810,7 @@ class UsageAuditStore:
 
     def _append_partition(self, tier: str, day: date, records: Sequence[dict]) -> int:
         path = self._partition_path(tier, day)
-        ensure_directory(path.parent, self.dir_mode)
+        self._ensure_usage_directory(path.parent)
         return self._append_jsonl(path, records)
 
     def _append_event_partition(self, day: date, records: Sequence[dict]) -> int:
@@ -854,7 +865,7 @@ class UsageAuditStore:
         merged = {key_fn(item): item for item in existing}
         for record in records:
             merged.setdefault(key_fn(record), record)
-        ensure_directory(path.parent, self.dir_mode)
+        self._ensure_usage_directory(path.parent)
         _atomic_write_jsonl(path, list(merged.values()), self.file_mode, path.parent)
 
     def _partition_path(self, tier: str, day: date) -> Path:
@@ -924,8 +935,11 @@ class UsageAuditStore:
     def _write_closed_partition(self, tier: str, day: date, records: Sequence[dict]) -> Path:
         plain = self._partition_path(tier, day)
         target = plain.with_suffix(plain.suffix + ".gz")
-        ensure_directory(target.parent, self.dir_mode)
+        self._ensure_usage_directory(target.parent)
         if target.exists() and _meta_path_for(target).exists():
+            for existing in (target, _meta_path_for(target)):
+                fd = open_existing_regular(existing, expected_mode=self.file_mode)
+                os.close(fd)
             return target
         fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
         tmp_path = Path(tmp_name)
@@ -975,6 +989,9 @@ class UsageAuditStore:
     def _seal_partition(self, path: Path) -> None:
         if not path.name.endswith(".jsonl"):
             return
+        self._ensure_usage_directory(path.parent)
+        source_fd = open_existing_regular(path, expected_mode=self.file_mode)
+        os.close(source_fd)
         target = path.with_suffix(path.suffix + ".gz")
         if target.exists() and _meta_path_for(target).exists():
             metadata = self._read_json(_meta_path_for(target))
@@ -1155,7 +1172,7 @@ class UsageAuditStore:
         if self._workload_key is not None:
             return self._workload_key
         if self.key_path.exists():
-            fd = open_existing_regular(self.key_path)
+            fd = open_existing_regular(self.key_path, expected_mode=0o600)
             with os.fdopen(fd, "rb") as fh:
                 key = fh.read(64)
             if len(key) != 32:
@@ -1178,6 +1195,33 @@ class UsageAuditStore:
         fsync_directory(self.usage_dir)
         self._workload_key = key
         return key
+
+    def _validate_core_files_for_write(self) -> None:
+        expected_modes = {
+            self.meta_path: self.file_mode,
+            self.state_path: self.file_mode,
+            self.transition_journal_path: self.file_mode,
+            self.load_path: self.file_mode,
+            self.users_path: self.file_mode,
+            self.workloads_path: self.file_mode,
+            self.key_path: 0o600,
+        }
+        for path, expected_mode in expected_modes.items():
+            if not os.path.lexists(path):
+                continue
+            fd = open_existing_regular(path, expected_mode=expected_mode)
+            os.close(fd)
+
+    def _ensure_usage_directory(self, path: Path) -> None:
+        try:
+            relative = path.relative_to(self.usage_dir)
+        except ValueError as exc:
+            raise UsageFormatError(f"usage path escapes the store: {path}") from exc
+        ensure_directory(self.usage_dir, self.dir_mode, require_mode=True)
+        current = self.usage_dir
+        for part in relative.parts:
+            current /= part
+            ensure_directory(current, self.dir_mode, require_mode=True)
 
     def _legacy_visible(self) -> bool:
         marker = self.migrations_dir / "legacy-v1.json"
@@ -1232,6 +1276,9 @@ def _atomic_write_json(path: Path, payload: dict, mode: int, directory: Path, pr
     metadata = directory.lstat()
     if not stat.S_ISDIR(metadata.st_mode):
         raise NotADirectoryError(f"refusing non-directory path: {directory}")
+    if os.path.lexists(path):
+        existing_fd = open_existing_regular(path, expected_mode=mode)
+        os.close(existing_fd)
     fd, tmp_name = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=str(directory))
     tmp_path = Path(tmp_name)
     try:
@@ -1254,6 +1301,9 @@ def _atomic_write_jsonl(path: Path, records: Sequence[dict], mode: int, director
     metadata = directory.lstat()
     if not stat.S_ISDIR(metadata.st_mode):
         raise NotADirectoryError(f"refusing non-directory path: {directory}")
+    if os.path.lexists(path):
+        existing_fd = open_existing_regular(path, expected_mode=mode)
+        os.close(existing_fd)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(directory))
     tmp_path = Path(tmp_name)
     try:
@@ -1463,6 +1513,16 @@ def _usage_path_health(
                 "path": str(path),
                 "expected": expected_type,
                 "actual": actual_type,
+            },
+            False,
+        )
+    if expected_type == "regular-file" and metadata.st_nlink != 1:
+        return (
+            {
+                "type": "usage-file-links",
+                "path": str(path),
+                "expected": 1,
+                "actual": metadata.st_nlink,
             },
             False,
         )

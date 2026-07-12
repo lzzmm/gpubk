@@ -8,7 +8,10 @@ Supported security boundaries:
 
 - MCP, CLI, TUI, and worker identity comes from the local process UID.
 - Shared-ledger writes use an advisory lock, WAL journal, atomic replacement, and idempotent audit events.
-- Shared data files reject symbolic links, FIFOs, devices, and other non-regular leaf files before reading or writing.
+- Shared data files reject symbolic links, hard-linked aliases, FIFOs, devices, and other
+  unsafe leaf files before reading or writing.
+- Write paths require the configured file and directory modes exactly. Permission drift fails
+  closed without silently running `chmod`; `bk doctor` reports the path for administrator repair.
 - Scheduled command arguments live in UID-owned `0600` specs, not the shared ledger.
 - Terminal and expired private command specs are pruned by the owning UID; unreferenced specs
   receive a 24-hour race-safety grace period.

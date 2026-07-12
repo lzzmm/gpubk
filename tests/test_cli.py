@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from bk.cli import main as bk_main
+from bk.fileio import ensure_directory
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -314,7 +315,8 @@ class CliTests(unittest.TestCase):
             now = ceil_5m(datetime.now(timezone.utc).replace(microsecond=0))
             existing_end = now + timedelta(hours=1)
             data_dir.mkdir(parents=True, exist_ok=True)
-            (data_dir / "ledger.json").write_text(
+            ledger_path = data_dir / "ledger.json"
+            ledger_path.write_text(
                 json.dumps(
                     {
                         "version": 1,
@@ -337,6 +339,7 @@ class CliTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            ledger_path.chmod(0o600)
 
             first = self.run_bk(["1", "30m", "--gpu", "0"], data_dir)
             self.assertEqual(first.returncode, 0, first.stderr)
@@ -559,6 +562,29 @@ class CliTests(unittest.TestCase):
             self.assertIn("ledger-read", issue_types)
             self.assertFalse(payload["healthy"])
             self.assertEqual(target.read_bytes(), original)
+
+    def test_doctor_reports_hard_linked_ledger_without_reading_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            ledger = data_dir / "ledger.json"
+            ledger.write_text(
+                json.dumps({"version": 1, "reservations": []}),
+                encoding="utf-8",
+            )
+            ledger.chmod(0o600)
+            alias = data_dir / "ledger-alias"
+            os.link(ledger, alias)
+            original = alias.read_bytes()
+
+            result = self.run_bk(["doctor", "--json", "--strict"], data_dir)
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            payload = json.loads(result.stdout)
+            issue_types = {item["type"] for item in payload["storage_issues"]}
+            self.assertIn("file-links", issue_types)
+            self.assertIn("ledger-read", issue_types)
+            self.assertFalse(payload["healthy"])
+            self.assertEqual(alias.read_bytes(), original)
 
     def test_doctor_reports_usage_directory_symlink_as_json(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1175,8 +1201,9 @@ class CliTests(unittest.TestCase):
             )
             today = datetime.now(timezone.utc).date()
             partition = data_dir / f"usage/minute/{today:%Y}/{today:%m}/{today.isoformat()}.v1.jsonl"
-            partition.parent.mkdir(parents=True)
+            ensure_directory(partition.parent, 0o700, require_mode=True)
             partition.write_bytes(b'{"interrupted"')
+            partition.chmod(0o600)
 
             monitor = self.run_bk(
                 ["monitor", "--once"],

@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -84,6 +85,40 @@ class UsageStoreTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), original)
         self.assertEqual(len(self.store.recent_rollups(10)), 1)
 
+    def test_append_rejects_partition_mode_drift_without_mutation(self):
+        self.store.append_rollups([self._rollup_at(0)])
+        path = self.store._partition_path("minute", self.at.date())
+        original = path.read_bytes()
+        path.chmod(0o644)
+
+        with self.assertRaisesRegex(PermissionError, "expected 0600"):
+            self.store.append_rollups([self._rollup_at(1)])
+
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o644)
+
+    def test_append_rejects_ancestor_directory_mode_drift_without_mutation(self):
+        self.store.append_rollups([self._rollup_at(0)])
+        path = self.store._partition_path("minute", self.at.date())
+        original = path.read_bytes()
+        tier_dir = self.store.usage_dir / "minute"
+        tier_dir.chmod(0o755)
+
+        with self.assertRaisesRegex(PermissionError, "expected 0700"):
+            self.store.append_rollups([self._rollup_at(1)])
+
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(stat.S_IMODE(tier_dir.stat().st_mode), 0o755)
+
+    def test_writer_rejects_core_file_mode_drift(self):
+        self.store.ensure()
+        self.store.meta_path.chmod(0o644)
+
+        with self.assertRaisesRegex(PermissionError, "expected 0600"):
+            self.store.append_rollups([self._rollup_at(0)])
+
+        self.assertFalse(self.store._partition_path("minute", self.at.date()).exists())
+
     def test_append_refuses_to_create_a_partition_the_reader_cannot_open(self):
         self.store.append_rollups([self._rollup_at(0)])
         path = self.store._partition_path("minute", self.at.date())
@@ -139,6 +174,20 @@ class UsageStoreTests(unittest.TestCase):
         self.assertEqual(by_path[str(self.store.meta_path)]["actual"], "symbolic-link")
         self.assertEqual(target.read_text(encoding="utf-8"), "keep")
 
+    def test_health_rejects_hard_linked_usage_file(self):
+        self.store.ensure()
+        alias = self.data_dir / "store-alias"
+        os.link(self.store.meta_path, alias)
+
+        issues = self.store.health_issues()
+        by_path = {item.get("path"): item for item in issues}
+
+        self.assertEqual(by_path[str(self.store.meta_path)]["type"], "usage-file-links")
+        self.assertEqual(by_path[str(self.store.meta_path)]["actual"], 2)
+        with self.assertRaisesRegex(OSError, "2 hard links"):
+            self.store.append_rollups([self._rollup_at(0)])
+        self.assertFalse(self.store._partition_path("minute", self.at.date()).exists())
+
     def test_shared_mode_health_accepts_private_workload_key(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = UsageAuditStore(
@@ -148,6 +197,23 @@ class UsageStoreTests(unittest.TestCase):
             )
             store.register_workload(1001, describe_workload("python train.py"))
 
+            self.assertEqual(store.health_issues(), [])
+
+    def test_shared_mode_applies_exact_mode_to_partition_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = UsageAuditStore(
+                Path(tmp) / "shared",
+                file_mode=0o660,
+                dir_mode=0o2770,
+            )
+            store.append_rollups([self._rollup_at(0)])
+            partition = store._partition_path("minute", self.at.date())
+
+            self.assertEqual(stat.S_IMODE(partition.stat().st_mode), 0o660)
+            cursor = partition.parent
+            while cursor != store.usage_dir:
+                self.assertEqual(stat.S_IMODE(cursor.stat().st_mode), 0o2770)
+                cursor = cursor.parent
             self.assertEqual(store.health_issues(), [])
 
     def test_maintenance_builds_all_resolutions_before_removing_old_minutes(self):
@@ -248,8 +314,9 @@ class UsageStoreTests(unittest.TestCase):
 
     def test_newer_store_format_refuses_writes(self):
         usage_dir = self.data_dir / "usage"
-        usage_dir.mkdir()
-        (usage_dir / "store.json").write_text(
+        usage_dir.mkdir(mode=0o700)
+        store_path = usage_dir / "store.json"
+        store_path.write_text(
             json.dumps(
                 {
                     "format": "gpubk.usage",
@@ -260,14 +327,16 @@ class UsageStoreTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        store_path.chmod(0o600)
 
         with self.assertRaisesRegex(UsageFormatError, "newer gpubk"):
             self.store.append_events([self._event(None)])
 
     def test_same_major_store_can_require_a_newer_writer_minor(self):
         usage_dir = self.data_dir / "usage"
-        usage_dir.mkdir()
-        (usage_dir / "store.json").write_text(
+        usage_dir.mkdir(mode=0o700)
+        store_path = usage_dir / "store.json"
+        store_path.write_text(
             json.dumps(
                 {
                     "format": "gpubk.usage",
@@ -279,13 +348,14 @@ class UsageStoreTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        store_path.chmod(0o600)
 
         with self.assertRaisesRegex(UsageFormatError, "newer gpubk"):
             self.store.append_events([self._event(None)])
 
     def test_store_can_require_a_newer_reader_without_risking_partial_decode(self):
         usage_dir = self.data_dir / "usage"
-        usage_dir.mkdir()
+        usage_dir.mkdir(mode=0o700)
         (usage_dir / "store.json").write_text(
             json.dumps(
                 {

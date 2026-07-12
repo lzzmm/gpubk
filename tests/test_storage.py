@@ -96,6 +96,18 @@ class LedgerStorageTests(unittest.TestCase):
             with FileLock(path, timeout_seconds=0):
                 pass
 
+    def test_file_lock_rejects_existing_mode_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ledger.lock"
+            path.write_text("keep", encoding="utf-8")
+            path.chmod(0o644)
+
+            with self.assertRaisesRegex(PermissionError, "expected 0600"):
+                with FileLock(path, timeout_seconds=0):
+                    pass
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "keep")
+
     def test_empty_load_is_side_effect_free(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "not-created"
@@ -137,10 +149,41 @@ class LedgerStorageTests(unittest.TestCase):
             self.assertFalse(store.ledger_path.exists())
             self.assertEqual(target.read_text(encoding="utf-8"), "keep")
 
+    def test_transaction_rejects_ledger_mode_drift_before_mutator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LedgerStore(Path(tmp))
+            store.ledger_path.write_text(
+                json.dumps({"version": 1, "reservations": []}),
+                encoding="utf-8",
+            )
+            store.ledger_path.chmod(0o644)
+            mutator = mock.Mock()
+
+            with self.assertRaisesRegex(PermissionError, "expected 0600"):
+                store.transaction(mutator)
+
+            mutator.assert_not_called()
+            self.assertEqual(stat.S_IMODE(store.ledger_path.stat().st_mode), 0o644)
+
+    def test_transaction_rejects_hard_linked_log_before_mutator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LedgerStore(Path(tmp))
+            store.log_path.write_text('{"action":"keep"}\n', encoding="utf-8")
+            store.log_path.chmod(0o600)
+            alias = Path(tmp) / "outside-alias"
+            os.link(store.log_path, alias)
+            mutator = mock.Mock()
+
+            with self.assertRaisesRegex(OSError, "2 hard links"):
+                store.transaction(mutator)
+
+            mutator.assert_not_called()
+            self.assertEqual(alias.read_text(encoding="utf-8"), '{"action":"keep"}\n')
+
     def test_symbolic_link_backup_directory_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"
-            data_dir.mkdir()
+            data_dir.mkdir(mode=0o700)
             target = Path(tmp) / "outside"
             target.mkdir()
             (data_dir / "backups").symlink_to(target, target_is_directory=True)
@@ -173,6 +216,28 @@ class LedgerStorageTests(unittest.TestCase):
             self.assertEqual(by_path[str(data_dir / "backups")]["type"], "directory-type")
             self.assertEqual(outside_file.read_text(encoding="utf-8"), "keep")
             self.assertEqual(list(outside_dir.iterdir()), [])
+
+    def test_health_reports_hard_linked_managed_files_and_backups(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store = LedgerStore(data_dir)
+            store.ensure()
+            store.log_path.write_text("{}\n", encoding="utf-8")
+            store.log_path.chmod(0o600)
+            os.link(store.log_path, data_dir / "log-alias")
+            backup = store.backup_dir / "ledger-one.json"
+            backup.write_text('{"version":1,"reservations":[]}\n', encoding="utf-8")
+            backup.chmod(0o600)
+            os.link(backup, data_dir / "backup-alias")
+
+            issues = store.health_issues()
+            linked_paths = {
+                item["path"]
+                for item in issues
+                if item.get("type") == "file-links"
+            }
+
+            self.assertEqual(linked_paths, {str(store.log_path), str(backup)})
 
     def test_read_only_load_clears_a_stale_warning(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -417,6 +482,7 @@ class LedgerStorageTests(unittest.TestCase):
             store = LedgerStore(Path(tmp))
             store.ensure()
             store.journal_path.write_text("not-json", encoding="utf-8")
+            store.journal_path.chmod(0o600)
 
             with self.assertRaisesRegex(OSError, "invalid transaction journal"):
                 store.load()
@@ -439,6 +505,7 @@ class LedgerStorageTests(unittest.TestCase):
                 "logs": [{"transaction_id": "tx-invalid-log", "action": "add"}],
             }
             store.journal_path.write_text(json.dumps(journal), encoding="utf-8")
+            store.journal_path.chmod(0o600)
 
             with self.assertRaisesRegex(OSError, "event ID is invalid"):
                 store.load()
@@ -466,6 +533,7 @@ class LedgerStorageTests(unittest.TestCase):
             store = LedgerStore(Path(tmp))
             store.ensure()
             store.ledger_path.write_text("not-json", encoding="utf-8")
+            store.ledger_path.chmod(0o600)
             original = store.ledger_path.read_bytes()
             mutator = mock.Mock()
 
@@ -498,6 +566,7 @@ class LedgerStorageTests(unittest.TestCase):
             store = LedgerStore(Path(tmp))
             store.ensure()
             store.ledger_path.write_text("not-json", encoding="utf-8")
+            store.ledger_path.chmod(0o600)
             journal = {
                 "version": 1,
                 "transaction_id": "repair-transaction",
@@ -531,11 +600,31 @@ class LedgerStorageTests(unittest.TestCase):
             store = LedgerStore(Path(tmp))
             store.ensure()
             store.log_path.write_bytes(b"valid\n\xff\n")
+            store.log_path.chmod(0o600)
 
             result = store.reset()
 
             self.assertEqual(result["logs"], 2)
             self.assertFalse(store.log_path.exists())
+
+    def test_reset_rejects_backup_mode_drift_before_clearing_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LedgerStore(Path(tmp))
+
+            def mutate(ledger):
+                ledger["reservations"].append({"id": "keep"})
+                return ledger, None, [], True
+
+            store.transaction(mutate)
+            original = store.ledger_path.read_bytes()
+            backup = next(store.backup_dir.glob("ledger-*.json"))
+            backup.chmod(0o644)
+
+            with self.assertRaisesRegex(PermissionError, "expected 0600"):
+                store.reset()
+
+            self.assertEqual(store.ledger_path.read_bytes(), original)
+            self.assertTrue(backup.exists())
 
     def test_cross_process_booking_transaction_never_oversells_shared_capacity(self):
         with tempfile.TemporaryDirectory() as tmp:

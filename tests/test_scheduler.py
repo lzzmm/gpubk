@@ -591,6 +591,8 @@ class SchedulerModeTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.store.log_path.write_text('{"event_id":"historic-audit"}\n', encoding="utf-8")
+        self.store.ledger_path.chmod(0o600)
+        self.store.log_path.chmod(0o600)
         config = replace(self.config, ledger_retention_days=30)
 
         created = add_booking(self.store, config, self.request(2000, MODE_SHARED))
@@ -619,6 +621,7 @@ class SchedulerModeTests(unittest.TestCase):
             json.dumps({"version": 1, "reservations": [record]}),
             encoding="utf-8",
         )
+        self.store.ledger_path.chmod(0o600)
 
         add_booking(self.store, self.config, self.request(2000, MODE_SHARED))
 

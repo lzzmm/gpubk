@@ -1651,7 +1651,7 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         str(store.ledger_path),
     }
     unsafe_ledger_path = any(
-        item.get("type") in {"directory-type", "file-type", "path-stat"}
+        item.get("type") in {"directory-type", "file-type", "file-links", "path-stat"}
         and item.get("path") in managed_ledger_paths
         for item in storage_issues
     )

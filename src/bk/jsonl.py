@@ -66,7 +66,7 @@ def append_json_objects(
         serialized.append(line)
         total_bytes += len(line)
 
-    ensure_directory(path.parent, dir_mode)
+    ensure_directory(path.parent, dir_mode, require_mode=True)
     fd = open_or_create_regular(path, os.O_RDWR | os.O_APPEND, file_mode)
     warnings = []
     try:

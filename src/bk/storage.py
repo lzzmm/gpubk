@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import shutil
+import stat
 import tempfile
 import time
 import uuid
@@ -72,7 +73,7 @@ class FileLock:
         self._fh = None
 
     def __enter__(self):
-        ensure_directory(self.path.parent, self.dir_mode)
+        ensure_directory(self.path.parent, self.dir_mode, require_mode=True)
         fd = open_or_create_regular(self.path, os.O_RDWR, self.file_mode)
         self._fh = os.fdopen(fd, "r+", encoding="utf-8")
         deadline = time.monotonic() + self.timeout_seconds
@@ -136,13 +137,15 @@ class LedgerStore:
         self.last_warning: Optional[str] = None
 
     def ensure(self) -> None:
-        ensure_directory(self.data_dir, self.dir_mode)
-        ensure_directory(self.backup_dir, self.dir_mode)
+        ensure_directory(self.data_dir, self.dir_mode, require_mode=True)
+        ensure_directory(self.backup_dir, self.dir_mode, require_mode=True)
 
     def load(self) -> dict:
         self.last_warning = None
-        if self.journal_path.exists():
+        if os.path.lexists(self.journal_path):
+            self.ensure()
             with self._lock():
+                self._validate_managed_files_unlocked()
                 self._recover_journal_unlocked()
         return self._load_unlocked()
 
@@ -154,10 +157,11 @@ class LedgerStore:
     def transaction(self, mutator: Callable[[dict], Tuple[dict, T, Iterable[dict], bool]]) -> T:
         self.ensure()
         self.last_warning = None
+        self._preflight_storage_policy_on_mode_mismatch()
         with self._lock():
+            self._validate_managed_files_unlocked()
             self._recover_journal_unlocked()
-            self._validate_existing_log_unlocked()
-            ledger = self._load_unlocked()
+            ledger = self._load_unlocked(require_modes=True)
             new_ledger, result, logs, changed = mutator(ledger)
             log_items = list(logs)
             if not changed and not log_items:
@@ -197,18 +201,24 @@ class LedgerStore:
 
     def reset(self) -> dict:
         self.ensure()
+        self._preflight_storage_policy_on_mode_mismatch()
         with self._lock():
+            self._validate_managed_files_unlocked()
             self._recover_journal_unlocked()
-            previous = self._load_unlocked()
+            previous = self._load_unlocked(require_modes=True)
             reservation_count = len(previous.get("reservations", []))
             log_count = _line_count(self.log_path)
-            backup_count = len(list(self.backup_dir.glob("ledger-*.json"))) if self.backup_dir.exists() else 0
+            backup_paths = list(self.backup_dir.glob("ledger-*.json")) if self.backup_dir.exists() else []
+            for path in backup_paths:
+                fd = open_existing_regular(path, expected_mode=self.file_mode)
+                os.close(fd)
+            backup_count = len(backup_paths)
 
             self._atomic_write_ledger(_empty_ledger())
             self.log_path.unlink(missing_ok=True)
             self.journal_path.unlink(missing_ok=True)
             if self.backup_dir.exists():
-                for path in self.backup_dir.glob("ledger-*.json"):
+                for path in backup_paths:
                     path.unlink(missing_ok=True)
                 fsync_directory(self.backup_dir)
             fsync_directory(self.data_dir)
@@ -252,6 +262,7 @@ class LedgerStore:
                 }
             )
 
+        backup_dir_safe = False
         if os.path.lexists(self.backup_dir):
             try:
                 metadata = self.backup_dir.lstat()
@@ -275,6 +286,7 @@ class LedgerStore:
                         }
                     )
                 else:
+                    backup_dir_safe = True
                     actual = metadata.st_mode & 0o7777
                     if actual != self.dir_mode:
                         issues.append(
@@ -334,6 +346,70 @@ class LedgerStore:
                         "actual": f"{actual:04o}",
                     }
                 )
+            if metadata.st_nlink != 1:
+                issues.append(
+                    {
+                        "type": "file-links",
+                        "path": str(path),
+                        "expected": 1,
+                        "actual": metadata.st_nlink,
+                    }
+                )
+
+        if backup_dir_safe:
+            try:
+                backup_paths = list(self.backup_dir.glob("ledger-*.json"))
+            except OSError as exc:
+                issues.append(
+                    {
+                        "type": "path-scan",
+                        "path": str(self.backup_dir),
+                        "message": str(exc),
+                    }
+                )
+            else:
+                for path in backup_paths:
+                    try:
+                        metadata = path.lstat()
+                    except OSError as exc:
+                        issues.append(
+                            {
+                                "type": "path-stat",
+                                "path": str(path),
+                                "message": str(exc),
+                            }
+                        )
+                        continue
+                    actual_type = file_type_name(metadata.st_mode)
+                    if actual_type != "regular-file":
+                        issues.append(
+                            {
+                                "type": "file-type",
+                                "path": str(path),
+                                "expected": "regular-file",
+                                "actual": actual_type,
+                            }
+                        )
+                        continue
+                    actual_mode = metadata.st_mode & 0o777
+                    if actual_mode != self.file_mode:
+                        issues.append(
+                            {
+                                "type": "file-mode",
+                                "path": str(path),
+                                "expected": f"{self.file_mode:04o}",
+                                "actual": f"{actual_mode:04o}",
+                            }
+                        )
+                    if metadata.st_nlink != 1:
+                        issues.append(
+                            {
+                                "type": "file-links",
+                                "path": str(path),
+                                "expected": 1,
+                                "actual": metadata.st_nlink,
+                            }
+                        )
 
         unsafe_log = any(
             item.get("path") == str(self.log_path)
@@ -404,8 +480,8 @@ class LedgerStore:
             self.dir_mode,
         )
 
-    def _load_unlocked(self) -> dict:
-        if not self.ledger_path.exists():
+    def _load_unlocked(self, *, require_modes: bool = False) -> dict:
+        if not os.path.lexists(self.ledger_path):
             return _empty_ledger()
         try:
             fd = open_existing_regular(self.ledger_path)
@@ -413,7 +489,7 @@ class LedgerStore:
                 data = json.load(fh)
             self._validate_ledger(data)
         except (json.JSONDecodeError, OSError, ValueError) as exc:
-            restored = self._load_latest_backup()
+            restored = self._load_latest_backup(require_modes=require_modes)
             if restored is not None:
                 self._add_warning(f"ledger is invalid; loaded the latest valid backup: {exc}")
                 data = restored
@@ -440,13 +516,19 @@ class LedgerStore:
                 f"ledger={configured[0]}/{configured[1]} local={actual[0]}/{actual[1]}",
             )
 
-    def _load_latest_backup(self) -> Optional[dict]:
-        if not self.backup_dir.exists():
+    def _load_latest_backup(self, *, require_modes: bool = False) -> Optional[dict]:
+        if not os.path.lexists(self.backup_dir):
             return None
+        metadata = self.backup_dir.lstat()
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise OSError(errno.ENOTDIR, f"refusing non-directory backup path: {self.backup_dir}")
         backups = sorted(self.backup_dir.glob("ledger-*.json"), reverse=True)
         for path in backups:
             try:
-                fd = open_existing_regular(path)
+                fd = open_existing_regular(
+                    path,
+                    expected_mode=self.file_mode if require_modes else None,
+                )
                 with os.fdopen(fd, "r", encoding="utf-8") as fh:
                     data = json.load(fh)
                 self._validate_ledger(data)
@@ -474,10 +556,10 @@ class LedgerStore:
         )
 
     def _recover_journal_unlocked(self) -> None:
-        if not self.journal_path.exists():
+        if not os.path.lexists(self.journal_path):
             return
         try:
-            fd = open_existing_regular(self.journal_path)
+            fd = open_existing_regular(self.journal_path, expected_mode=self.file_mode)
             with os.fdopen(fd, "r", encoding="utf-8") as fh:
                 journal = json.load(fh)
             self._validate_journal(journal)
@@ -490,7 +572,7 @@ class LedgerStore:
         if not os.path.lexists(self.journal_path):
             return False
         try:
-            fd = open_existing_regular(self.journal_path)
+            fd = open_existing_regular(self.journal_path, expected_mode=self.file_mode)
             with os.fdopen(fd, "r", encoding="utf-8") as fh:
                 journal = json.load(fh)
             self._validate_journal(journal)
@@ -534,7 +616,7 @@ class LedgerStore:
         ledger = journal.get("ledger")
         if ledger is not None:
             try:
-                current = self._load_unlocked()
+                current = self._load_unlocked(require_modes=True)
             except LedgerCorruptionError:
                 current = _empty_ledger()
             if current.get("last_transaction_id") != journal["transaction_id"]:
@@ -574,6 +656,8 @@ class LedgerStore:
         backups = sorted(self.backup_dir.glob("ledger-*.json"), reverse=True)
         removed = False
         for path in backups[self.backup_keep :]:
+            fd = open_existing_regular(path, expected_mode=self.file_mode)
+            os.close(fd)
             path.unlink(missing_ok=True)
             removed = True
         if removed:
@@ -629,11 +713,26 @@ class LedgerStore:
         )
         return {str(item.get("event_id", "")) for item in tail.records}
 
-    def _validate_existing_log_unlocked(self) -> None:
-        if not os.path.lexists(self.log_path):
+    def _validate_managed_files_unlocked(self) -> None:
+        for path in (self.ledger_path, self.log_path, self.journal_path):
+            if not os.path.lexists(path):
+                continue
+            fd = open_existing_regular(path, expected_mode=self.file_mode)
+            os.close(fd)
+
+    def _preflight_storage_policy_on_mode_mismatch(self) -> None:
+        if os.path.lexists(self.journal_path) or not os.path.lexists(self.ledger_path):
             return
-        fd = open_existing_regular(self.log_path, os.O_WRONLY | os.O_APPEND)
-        os.close(fd)
+        for path in (self.ledger_path, self.lock_path, self.log_path):
+            if not os.path.lexists(path):
+                continue
+            try:
+                metadata = path.lstat()
+            except OSError:
+                return
+            if stat.S_ISREG(metadata.st_mode) and stat.S_IMODE(metadata.st_mode) != self.file_mode:
+                self._load_unlocked()
+                return
 
     def _clear_journal_best_effort(self) -> None:
         try:
@@ -719,6 +818,10 @@ def _atomic_write_json(
     stat = shutil.disk_usage(directory)
     if stat.free < max(len(payload) * 2, 1024 * 1024):
         raise OSError(errno.ENOSPC, "not enough free space for safe file transaction")
+
+    if os.path.lexists(path):
+        existing_fd = open_existing_regular(path, expected_mode=file_mode)
+        os.close(existing_fd)
 
     fd, tmp_name = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=str(directory))
     tmp_path = Path(tmp_name)

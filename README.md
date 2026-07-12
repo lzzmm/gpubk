@@ -368,9 +368,9 @@ removes its files. A simulation or `nvidia-smi` fallback is a strict-mode warnin
 In JSON, `healthy` covers read-only ledger checks; `ready` remains `null` until
 `--probe` supplies deployment evidence.
 Plain `doctor` never initializes storage, acquires a lock, recovers a pending
-transaction, or follows a symbolic link at a managed path. It reports those
-conditions for an administrator to resolve. Only explicit `--probe` writes
-temporary files.
+transaction, or follows a symbolic link or hard-linked alias at a managed path.
+It also reports permission drift; write commands fail closed instead of silently
+changing modes. Only explicit `--probe` writes temporary files.
 For NFS/FUSE used by multiple hosts, additionally verify locking from a second
 host because one machine cannot prove cross-host lock propagation. Every writer
 must use GPUbk.
