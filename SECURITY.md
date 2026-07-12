@@ -51,6 +51,9 @@ Supported security boundaries:
   from bypassing GPUbk and modifying group-writable files directly.
 - Applied telemetry maintenance and migration commands use the same writer role; dry-run
   inspection and public usage queries remain available to ordinary users.
+- `bk reset` is disabled whenever the configured data-directory mode is writable by group
+  or other users. Shared data removal requires an administrator-controlled offline procedure
+  after stopping writers and taking a backup.
 
 Administrator responsibilities:
 

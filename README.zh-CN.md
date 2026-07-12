@@ -401,6 +401,10 @@ BK_DATA_DIR=/data2/shared/bk BK_CONFIG_FILE=/etc/gpubk/config.json \
   bk doctor --probe --json --strict
 ```
 
+共享数据目录模式下会禁用 `bk reset`。需要退役或重建共享台账时，管理员必须先停止
+所有 GPUbk 写入者并完成备份，再通过受控的文件系统流程处理。该命令仅保留给私有目录
+和可丢弃的模拟数据。
+
 预检会创建随机命名的临时文件，验证同目录原子替换与目录 fsync、同机跨进程
 `flock`、配置权限、剩余空间和真实 GPU 探测，随后删除所有临时文件。模拟环境或
 `nvidia-smi` 回退在 strict 模式下会作为警告失败。JSON 中的 `healthy` 只表示只读

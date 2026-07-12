@@ -452,6 +452,11 @@ BK_DATA_DIR=/data2/shared/bk BK_CONFIG_FILE=/etc/gpubk/config.json \
   bk doctor --probe --json --strict
 ```
 
+`bk reset` is intentionally disabled for a shared data-directory mode. To retire
+or rebuild a shared ledger, stop all GPUbk writers, back it up, and use an
+administrator-controlled filesystem procedure. The command remains available
+for private and disposable simulation directories.
+
 The probe creates randomly named temporary files, verifies same-directory atomic
 replace and directory fsync, checks same-host cross-process `flock`, confirms
 configured modes and free space, probes the real GPU telemetry source, and then

@@ -2017,8 +2017,17 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
 
 def _reset_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     parser = argparse.ArgumentParser(prog="bk reset")
-    parser.add_argument("--yes", action="store_true", help="required to reset without an interactive confirmation")
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="required to reset a private/test data directory without confirmation",
+    )
     args = parser.parse_args(argv)
+    if config.dir_mode & 0o022:
+        raise BookingError(
+            "bk reset is disabled for shared data directories; stop writers, back up the "
+            "data, and use an administrator-controlled maintenance procedure"
+        )
     if not args.yes:
         answer = input(f"Clear all bk data in {store.data_dir}? Type reset to continue: ").strip()
         if answer != "reset":
@@ -2343,7 +2352,7 @@ AGENTS AND ADMIN
   bk mcp / bk skill install      MCP server or bundled Codex skill
   bk config [--json]            inspect effective config and policy
   bk doctor --probe --strict     verify deployment prerequisites
-  bk reset --yes                 explicitly clear data
+  bk reset --yes                 private/test only; never shared
 
 TIME AND POLICY
   Duration syntax: 30m, 1h30m, 1d; value must fit the configured slice.
@@ -2394,7 +2403,7 @@ def _print_shell_help() -> None:
   agent recommend 2 1h      compute a read-only legal placement
   agent edit ID --duration 2h --op-id KEY
   agent cancel ID           cancel with structured JSON output
-  reset --yes               clear ledger, logs, and backups in this data dir
+  reset --yes               private/test only; never shared
   t | tui                   open full-screen TUI
   quit                      exit
 """

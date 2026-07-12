@@ -13,6 +13,9 @@
 5. Test the new wheel in a separate virtual environment and an isolated
    `BK_DATA_DIR` before changing the shared installation.
 
+Do not use `bk reset` to prepare a shared upgrade. It is disabled for shared
+directory modes; preserve and migrate the existing data instead.
+
 If an older shared deployment keeps `config.json` inside its group-writable data
 directory, move a reviewed copy to a non-writable administrator directory before
 starting 0.2.x:

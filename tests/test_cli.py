@@ -1902,6 +1902,29 @@ class CliTests(unittest.TestCase):
             self.assertFalse((data_dir / "usage-rollups.jsonl").exists())
             self.assertFalse((data_dir / "usage-state.json").exists())
 
+    def test_reset_is_disabled_for_shared_data_without_modifying_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "shared"
+            environment = {"BK_FILE_MODE": "0660", "BK_DIR_MODE": "2770"}
+            create = self.run_bk(["1", "30m"], data_dir, environment)
+            self.assertEqual(create.returncode, 0, create.stderr)
+            before = {
+                str(path.relative_to(data_dir)): path.read_bytes()
+                for path in data_dir.rglob("*")
+                if path.is_file()
+            }
+
+            reset = self.run_bk(["reset", "--yes"], data_dir, environment)
+
+            self.assertEqual(reset.returncode, 2)
+            self.assertIn("disabled for shared data directories", reset.stderr)
+            after = {
+                str(path.relative_to(data_dir)): path.read_bytes()
+                for path in data_dir.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(after, before)
+
 
 if __name__ == "__main__":
     unittest.main()
