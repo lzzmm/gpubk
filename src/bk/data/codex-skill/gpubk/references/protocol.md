@@ -26,7 +26,10 @@ Recommendation fields:
 
 - `available`: whether the requested semantics have a legal slot.
 - `recommendation.gpus`, `start_at`, `end_at`, `queued`, `confidence`.
-- Context GPU entries include model name, temperature, live status, physical VRAM, and recent load history.
+- Context GPU entries include model name, temperature, live status, physical VRAM, recent load
+  history, and additive `capabilities.process_telemetry` /
+  `capabilities.process_utilization` booleans. Treat missing process capability as unknown state,
+  never as proof that a GPU has no processes.
 - Context `policy.monitoring` reports the effective sample and rollup cadence; consumers must
   not infer finer telemetry precision. `writer_uid` identifies the configured telemetry role,
   not the Agent caller.

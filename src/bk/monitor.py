@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .config import Config, validate_monitor_timing
-from .gpu import GpuSnapshot, snapshot
+from .gpu import GpuSnapshot, has_process_telemetry, has_process_utilization, snapshot
 from .models import BookingError
 from .scheduler import list_active
 from .storage import LedgerStore
@@ -109,11 +109,17 @@ class UsageMonitor:
         self._next_maintenance_check: Optional[datetime] = None
         self._retention_policy = UsageRetentionPolicy.from_config(config)
         self._reported_sink_warnings = 0
+        self._process_telemetry_gap: frozenset[int] = frozenset()
+        self._process_utilization_gap: frozenset[int] = frozenset()
 
     def collect(self, sampled_at: Optional[datetime] = None) -> MonitorSample:
         sampled_at = sampled_at or utc_now()
         warnings = self._maintain_storage(sampled_at)
         devices = self.snapshot_provider(self.config)
+        process_gap, utilization_gap = _telemetry_capability_gaps(
+            devices, self.config.gpu_count
+        )
+        warnings.extend(self._telemetry_gap_warnings(process_gap, utilization_gap))
         reservations = list_active(self.ledger_store.load(), sampled_at)
         usage_by_gpu = classify_process_usage(devices, reservations, sampled_at)
         workload_ids = _register_sample_workloads(
@@ -123,6 +129,9 @@ class UsageMonitor:
             self._workload_cache,
         )
         current_state = _build_process_state(usage_by_gpu, self.previous_state, sampled_at, workload_ids)
+        current_state = _preserve_unobserved_process_state(
+            current_state, self.previous_state, process_gap
+        )
         events = _state_events(self.previous_state, current_state, sampled_at)
         if current_state != self.previous_state:
             self.audit_store.commit_state_transition(events, current_state)
@@ -144,6 +153,33 @@ class UsageMonitor:
             rollups_flushed=flushed,
             warnings=tuple(dict.fromkeys(warnings)),
         )
+
+    def _telemetry_gap_warnings(
+        self,
+        process_gap: frozenset[int],
+        utilization_gap: frozenset[int],
+    ) -> List[str]:
+        warnings = []
+        if process_gap != self._process_telemetry_gap:
+            if process_gap:
+                warnings.append(
+                    "process telemetry unavailable for GPU(s) "
+                    + ",".join(str(gpu) for gpu in sorted(process_gap))
+                    + "; preserving prior process state"
+                )
+            elif self._process_telemetry_gap:
+                warnings.append("process telemetry restored for all configured GPUs")
+            self._process_telemetry_gap = process_gap
+        if utilization_gap != self._process_utilization_gap:
+            if utilization_gap:
+                warnings.append(
+                    "per-process utilization unavailable for GPU(s) "
+                    + ",".join(str(gpu) for gpu in sorted(utilization_gap))
+                )
+            elif self._process_utilization_gap:
+                warnings.append("per-process utilization restored for all configured GPUs")
+            self._process_utilization_gap = utilization_gap
+        return warnings
 
     def _maintain_storage(self, sampled_at: datetime) -> List[str]:
         if self._next_maintenance_check is not None and sampled_at < self._next_maintenance_check:
@@ -473,6 +509,42 @@ def _optional_positive_int(value) -> Optional[int]:
 
 def _process_sample_key(gpu: int, pid: int, start_id: str) -> Tuple[int, int, str]:
     return gpu, pid, start_id
+
+
+def _telemetry_capability_gaps(
+    devices: Sequence[GpuSnapshot], gpu_count: int
+) -> Tuple[frozenset[int], frozenset[int]]:
+    by_index = {device.index: device for device in devices}
+    process_gap = set()
+    utilization_gap = set()
+    for gpu in range(gpu_count):
+        device = by_index.get(gpu)
+        if (
+            device is None
+            or device.source == "none"
+            or not has_process_telemetry(device)
+        ):
+            process_gap.add(gpu)
+        elif not has_process_utilization(device):
+            utilization_gap.add(gpu)
+    return frozenset(process_gap), frozenset(utilization_gap)
+
+
+def _preserve_unobserved_process_state(
+    current: Dict[str, dict],
+    previous: Dict[str, dict],
+    process_gap: frozenset[int],
+) -> Dict[str, dict]:
+    if not process_gap:
+        return current
+    for key, item in previous.items():
+        try:
+            gpu = int(item.get("gpu", -1))
+        except (TypeError, ValueError):
+            continue
+        if gpu in process_gap:
+            current.setdefault(key, item)
+    return current
 
 
 def _build_process_state(

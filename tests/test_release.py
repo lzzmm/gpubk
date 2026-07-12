@@ -148,6 +148,9 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("bandit -q -r src/bk --severity-level medium", workflow)
         self.assertIn("validate-pyproject pyproject.toml", workflow)
         self.assertIn("check-wheel-contents dist/*.whl", workflow)
+        self.assertIn("gpu-extra:", workflow)
+        self.assertIn("python -m pip install '.[gpu]'", workflow)
+        self.assertIn("nvmlDeviceGetProcessUtilization", workflow)
 
     def test_release_uses_trusted_publishers_and_one_promoted_artifact(self):
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")

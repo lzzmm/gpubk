@@ -672,6 +672,30 @@ class CliTests(unittest.TestCase):
             self.assertFalse(payload["ready"])
             self.assertEqual(list(data_dir.glob(".gpubk-probe-*")), [])
 
+    def test_doctor_probe_rejects_configured_gpu_topology_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "probe-data"
+            simulation = Path(tmp) / "gpu-sim.json"
+            simulation.write_text(
+                json.dumps({"gpus": [{"index": 0, "name": "only-one"}]}),
+                encoding="utf-8",
+            )
+
+            result = self.run_bk(
+                ["doctor", "--probe", "--json", "--strict"],
+                data_dir,
+                {"BK_GPU_SIM_FILE": str(simulation), "BK_GPU_COUNT": "2"},
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            payload = json.loads(result.stdout)
+            gpu = next(item for item in payload["probes"] if item["name"] == "gpu-telemetry")
+            self.assertEqual(gpu["status"], "fail")
+            self.assertIn("topology", gpu["message"])
+            self.assertEqual(gpu["configured_device_count"], 2)
+            self.assertEqual(gpu["indices"], [0])
+            self.assertFalse(payload["ready"])
+
     def test_doctor_reports_ledger_symlink_as_json_without_following_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"

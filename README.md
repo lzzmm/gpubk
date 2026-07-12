@@ -277,10 +277,16 @@ bk u samples --since 2d --resolution 5m --json
 bk u events --user me --since 7d
 ```
 
-NVML is initialized once and device handles are reused. The monitor records
-bounded scheduling load plus sparse per-user history and process start, stop,
-authorization, and workload changes. It does not append a full snapshot every
-second. Without NVML, GPUbk falls back to `nvidia-smi` with less process detail.
+NVML is initialized once and device handles are reused. A failed initialization
+or stale device handle enters a short backoff and is rebuilt, so a transient
+driver fault does not permanently degrade a long-running monitor. The monitor
+records bounded scheduling load plus sparse per-user history and process start,
+stop, authorization, and workload changes. It does not append a full snapshot
+every second. Without NVML, GPUbk falls back to `nvidia-smi` for device metrics.
+Because that fallback has no trustworthy process list, GPUbk preserves the last
+observed process state and reports the telemetry gap instead of manufacturing
+stop/start events. The gap and per-process utilization capabilities are exposed
+in monitor warnings and Agent GPU details.
 The default cadence is a 2-second sample folded into 60-second records. Set
 `monitor_interval_seconds` and `monitor_rollup_seconds` in the trusted config to
 tune this for the server; the rollup must be an exact multiple of the sample
@@ -491,7 +497,10 @@ for private and disposable simulation directories.
 The probe creates randomly named temporary files, verifies same-directory atomic
 replace and directory fsync, checks same-host cross-process `flock`, confirms
 configured modes and free space, probes the real GPU telemetry source, and then
-removes its files. A simulation or `nvidia-smi` fallback is a strict-mode warning.
+removes its files. GPU indices must exactly match `0..gpu_count-1`; every NVML
+device must report usable memory, a process list, and per-process utilization.
+A topology mismatch or missing process list fails the probe. Missing per-process
+utilization, simulation, or an `nvidia-smi` fallback is a strict-mode warning.
 In JSON, `healthy` covers read-only ledger checks; `ready` remains `null` until
 `--probe` supplies deployment evidence.
 Plain `doctor` never initializes storage, acquires a lock, recovers a pending

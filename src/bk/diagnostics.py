@@ -16,7 +16,7 @@ from .fileio import (
     open_existing_regular,
     open_or_create_regular,
 )
-from .gpu import snapshot
+from .gpu import has_process_telemetry, has_process_utilization, snapshot
 from .storage import FileLock
 
 
@@ -202,24 +202,79 @@ def _probe_gpu(config: Config) -> dict:
         devices = snapshot(config)
     except Exception as exc:
         return _result("gpu-telemetry", "fail", f"GPU probe failed: {exc}")
+    indices = [device.index for device in devices]
     sources = sorted({device.source for device in devices})
     details = {
         "device_count": len(devices),
-        "indices": [device.index for device in devices],
+        "configured_device_count": config.gpu_count,
+        "indices": indices,
         "sources": sources,
     }
     if not devices or sources == ["none"]:
         return _result("gpu-telemetry", "fail", "no usable GPU telemetry source", **details)
-    if "nvml" in sources:
-        return _result("gpu-telemetry", "pass", "NVML device and process telemetry is available", **details)
-    if "nvidia-smi" in sources:
+    expected_indices = list(range(config.gpu_count))
+    if indices != expected_indices:
+        return _result(
+            "gpu-telemetry",
+            "fail",
+            "configured GPU topology does not match detected devices",
+            expected_indices=expected_indices,
+            **details,
+        )
+    if len(sources) != 1:
+        return _result(
+            "gpu-telemetry",
+            "fail",
+            "GPU telemetry is incomplete or uses mixed sources",
+            **details,
+        )
+    source = sources[0]
+    if source == "nvml":
+        invalid_memory = [device.index for device in devices if device.memory_total_mb <= 0]
+        if invalid_memory:
+            return _result(
+                "gpu-telemetry",
+                "fail",
+                "NVML did not report usable memory capacity for every configured GPU",
+                invalid_memory_indices=invalid_memory,
+                **details,
+            )
+        process_gap = [
+            device.index for device in devices if not has_process_telemetry(device)
+        ]
+        if process_gap:
+            return _result(
+                "gpu-telemetry",
+                "fail",
+                "NVML process telemetry is unavailable for configured GPUs",
+                process_telemetry_unavailable_indices=process_gap,
+                **details,
+            )
+        utilization_gap = [
+            device.index for device in devices if not has_process_utilization(device)
+        ]
+        if utilization_gap:
+            return _result(
+                "gpu-telemetry",
+                "warn",
+                "NVML works, but per-process utilization is unavailable",
+                process_utilization_unavailable_indices=utilization_gap,
+                **details,
+            )
+        return _result(
+            "gpu-telemetry",
+            "pass",
+            "NVML device, process, and per-process utilization telemetry is available",
+            **details,
+        )
+    if source == "nvidia-smi":
         return _result(
             "gpu-telemetry",
             "warn",
             "nvidia-smi fallback works, but process utilization detail is reduced",
             **details,
         )
-    if "simulation" in sources:
+    if source == "simulation":
         return _result("gpu-telemetry", "warn", "simulation is active; real GPU telemetry was not tested", **details)
     return _result("gpu-telemetry", "fail", "unexpected GPU telemetry source", **details)
 

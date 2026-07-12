@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Recover NVML after transient initialization or stale-handle failures, parse `nvidia-smi` as bounded CSV, preserve UID attribution when process commands are restricted, and prevent fallback telemetry gaps from creating false process lifecycle events.
+- Require deployment probes to match the complete configured GPU topology and expose independent process-list and per-process-utilization capabilities to operators and Agents.
+- Exercise the optional `nvidia-ml-py` dependency and no-GPU degradation path in a dedicated CI job so hardware-adapter API drift cannot hide behind core-only tests.
 - Separate trusted `BK_CONFIG_FILE` from the group-writable ledger, pin and validate its complete directory chain, and capture the canonical path in generated services.
 - Make monitor sampling and rollup cadence configurable with validated timing relationships, CLI overrides, and Agent-visible effective policy.
 - Apply the configured scheduling-load window to historical placement scores instead of silently truncating prediction input to 30 minutes.

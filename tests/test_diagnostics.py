@@ -40,6 +40,90 @@ class DeploymentDiagnosticsTests(unittest.TestCase):
             self.assertEqual(gpu["status"], "warn")
             self.assertFalse(probes_ready(checks))
 
+    def test_configured_gpu_count_must_match_detected_topology(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp) / "data", gpu_count=2)
+            devices = [GpuSnapshot(0, "gpu0", memory_total_mb=24000, source="nvml")]
+
+            with mock.patch("bk.diagnostics.snapshot", return_value=devices):
+                checks = run_deployment_probes(config)
+
+            gpu = next(item for item in checks if item["name"] == "gpu-telemetry")
+            self.assertEqual(gpu["status"], "fail")
+            self.assertIn("topology", gpu["message"])
+            self.assertEqual(gpu["configured_device_count"], 2)
+            self.assertEqual(gpu["indices"], [0])
+            self.assertEqual(gpu["expected_indices"], [0, 1])
+            self.assertFalse(probes_ready(checks))
+
+    def test_nvml_requires_usable_memory_capacity_for_every_gpu(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp) / "data", gpu_count=1)
+            devices = [GpuSnapshot(0, "gpu0", memory_total_mb=0, source="nvml")]
+
+            with mock.patch("bk.diagnostics.snapshot", return_value=devices):
+                checks = run_deployment_probes(config)
+
+            gpu = next(item for item in checks if item["name"] == "gpu-telemetry")
+            self.assertEqual(gpu["status"], "fail")
+            self.assertEqual(gpu["invalid_memory_indices"], [0])
+
+    def test_nvml_requires_process_telemetry_for_deployment_readiness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp) / "data", gpu_count=1)
+            devices = [
+                GpuSnapshot(
+                    0,
+                    "gpu0",
+                    memory_total_mb=24000,
+                    source="nvml",
+                    process_telemetry_available=False,
+                )
+            ]
+
+            with mock.patch("bk.diagnostics.snapshot", return_value=devices):
+                checks = run_deployment_probes(config)
+
+            gpu = next(item for item in checks if item["name"] == "gpu-telemetry")
+            self.assertEqual(gpu["status"], "fail")
+            self.assertEqual(gpu["process_telemetry_unavailable_indices"], [0])
+
+    def test_nvml_without_per_process_utilization_is_not_strictly_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp) / "data", gpu_count=1)
+            devices = [
+                GpuSnapshot(
+                    0,
+                    "gpu0",
+                    memory_total_mb=24000,
+                    source="nvml",
+                    process_telemetry_available=True,
+                    process_utilization_available=False,
+                )
+            ]
+
+            with mock.patch("bk.diagnostics.snapshot", return_value=devices):
+                checks = run_deployment_probes(config)
+
+            gpu = next(item for item in checks if item["name"] == "gpu-telemetry")
+            self.assertEqual(gpu["status"], "warn")
+            self.assertEqual(gpu["process_utilization_unavailable_indices"], [0])
+            self.assertFalse(probes_ready(checks))
+
+    def test_nvidia_smi_fallback_with_matching_topology_remains_a_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp) / "data", gpu_count=1)
+            devices = [
+                GpuSnapshot(0, "gpu0", memory_total_mb=24000, source="nvidia-smi")
+            ]
+
+            with mock.patch("bk.diagnostics.snapshot", return_value=devices):
+                checks = run_deployment_probes(config)
+
+            gpu = next(item for item in checks if item["name"] == "gpu-telemetry")
+            self.assertEqual(gpu["status"], "warn")
+            self.assertFalse(probes_ready(checks))
+
     def test_wrong_existing_directory_mode_blocks_storage_probes(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "shared"

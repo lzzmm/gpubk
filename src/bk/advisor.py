@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Sequence
 
 from .config import Config
-from .gpu import GpuSnapshot, snapshot
+from .gpu import GpuSnapshot, has_process_telemetry, has_process_utilization, snapshot
 from .monitor import UsageAuditStore
 from .timeparse import to_iso, utc_now
 from .usage import (
@@ -121,4 +121,12 @@ def _gpu_advice_dict(
             "free_mb": max(0, total - used) if total else None,
         },
         "source": snapshot_item.source if snapshot_item is not None else "none",
+        "capabilities": {
+            "process_telemetry": bool(
+                snapshot_item is not None and has_process_telemetry(snapshot_item)
+            ),
+            "process_utilization": bool(
+                snapshot_item is not None and has_process_utilization(snapshot_item)
+            ),
+        },
     }

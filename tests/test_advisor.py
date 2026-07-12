@@ -37,6 +37,28 @@ class GpuAdvisorTests(unittest.TestCase):
         idle = advice.as_dict()["gpus"][1]
         self.assertEqual(idle["name"], "idle-model")
         self.assertEqual(idle["temperature_c"], 47)
+        self.assertEqual(
+            idle["capabilities"],
+            {"process_telemetry": True, "process_utilization": True},
+        )
+
+    def test_advice_reports_degraded_process_capabilities(self):
+        snapshot = GpuSnapshot(
+            0,
+            "gpu0",
+            memory_total_mb=24000,
+            source="nvml",
+            process_telemetry_available=True,
+            process_utilization_available=False,
+        )
+        config = Config(data_dir=self.config.data_dir, gpu_count=1)
+
+        advice = build_gpu_advice(config, snapshots=[snapshot], history={}, at=self.now)
+
+        self.assertEqual(
+            advice.as_dict()["gpus"][0]["capabilities"],
+            {"process_telemetry": True, "process_utilization": False},
+        )
 
     def test_recent_history_breaks_tie_between_currently_idle_gpus(self):
         snapshots = [

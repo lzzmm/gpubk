@@ -237,6 +237,102 @@ class UsageMonitorTests(unittest.TestCase):
             self.assertEqual(third.process_count, 0)
             self.assertEqual(len(audit_store.recent_events(10)), 4)
 
+    def test_process_telemetry_gap_does_not_emit_false_stop_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self.write_ledger(data_dir, [])
+            config = Config(data_dir=data_dir, gpu_count=1)
+            ledger_store = LedgerStore(data_dir)
+            audit_store = UsageAuditStore(data_dir)
+            current = [
+                GpuSnapshot(
+                    0,
+                    "gpu0",
+                    processes=(
+                        GpuProcessSnapshot(
+                            10,
+                            1001,
+                            "alice",
+                            "python train.py",
+                            1024,
+                            40,
+                            "C",
+                            "start-a",
+                        ),
+                    ),
+                    source="nvml",
+                    process_telemetry_available=True,
+                    process_utilization_available=True,
+                )
+            ]
+            monitor = UsageMonitor(
+                config,
+                ledger_store,
+                audit_store,
+                snapshot_provider=lambda _config: current,
+            )
+
+            first = monitor.collect(self.now)
+            current[0] = GpuSnapshot(
+                0,
+                "gpu0",
+                memory_total_mb=24576,
+                source="nvidia-smi",
+                process_telemetry_available=False,
+                process_utilization_available=False,
+            )
+            gap = monitor.collect(self.now + timedelta(seconds=2))
+            repeated_gap = monitor.collect(self.now + timedelta(seconds=4))
+            current[0] = GpuSnapshot(
+                0,
+                "gpu0",
+                memory_total_mb=24576,
+                source="nvml",
+                process_telemetry_available=True,
+                process_utilization_available=True,
+            )
+            restored = monitor.collect(self.now + timedelta(seconds=6))
+
+            self.assertEqual({event["event"] for event in first.events}, {"process-start"})
+            self.assertEqual(gap.events, ())
+            self.assertEqual(repeated_gap.events, ())
+            self.assertIn("preserving prior process state", gap.warnings[0])
+            self.assertEqual(repeated_gap.warnings, ())
+            self.assertEqual({event["event"] for event in restored.events}, {"process-stop"})
+            self.assertIn("process telemetry restored", restored.warnings[0])
+            self.assertEqual(
+                [item["event"] for item in audit_store.recent_events(10)],
+                ["process-start", "process-stop"],
+            )
+
+    def test_missing_process_utilization_warns_once_without_hiding_processes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self.write_ledger(data_dir, [])
+            config = Config(data_dir=data_dir, gpu_count=1)
+            device = GpuSnapshot(
+                0,
+                "gpu0",
+                processes=(GpuProcessSnapshot(10, 1001, "alice", "python", 1024),),
+                source="nvml",
+                process_telemetry_available=True,
+                process_utilization_available=False,
+            )
+            monitor = UsageMonitor(
+                config,
+                LedgerStore(data_dir),
+                UsageAuditStore(data_dir),
+                snapshot_provider=lambda _config: [device],
+            )
+
+            first = monitor.collect(self.now)
+            second = monitor.collect(self.now + timedelta(seconds=2))
+
+            self.assertEqual(first.process_count, 1)
+            self.assertEqual({event["event"] for event in first.events}, {"process-start"})
+            self.assertEqual(first.warnings, ("per-process utilization unavailable for GPU(s) 0",))
+            self.assertEqual(second.warnings, ())
+
     def test_monitor_emits_authorization_change_when_booking_appears(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
