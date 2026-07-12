@@ -66,7 +66,9 @@ GPUbk sets `CUDA_VISIBLE_DEVICES`; do not add physical GPU IDs to the training c
 - `exists`: the operation ID was already applied; treat this as idempotent success.
 - JSON exit `2`: invalid request or write conflict. Inspect `error.message`.
 - Recommendation exit `3`: no legal exact slot; present `nearest_available` without booking it.
-- `uncertain` job: it may already be running. Check processes and logs before using duplicate-risk retry.
+- `uncertain` job: it may have run or produced partial side effects. Inspect `recovery_state`,
+  processes, and private logs before using duplicate-risk retry. A recovered `terminated` group is
+  still uncertain; never present it as safe automatic retry.
 - `pending` with `launch_guard_state=waiting`: the reservation is active, but a live process or VRAM check blocked launch. Report `message`; do not bypass the guard unless the user explicitly accepts that collision risk.
 - Cancellation results include `private_job_cleanup`; cancellation remains committed when cleanup
   reports a warning. Surface that warning instead of retrying the destructive operation.
@@ -77,6 +79,8 @@ requested. Keep `bk worker` running for scheduled commands. Use `list_gpu_reserv
 `cleanup_my_job_logs` expose separate idempotent private cleanup operations. `bk j --cleanup
 --json` runs both. Never remove runnable/retryable specs or logs; report cleanup warnings and
 quota excess to the user.
+Only one worker may hold a UID's private job directory. Exit `75` means another worker already
+holds the lease; do not loop or start a second worker.
 
 ## Respect Safety Boundaries
 

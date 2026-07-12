@@ -26,6 +26,8 @@ from .storage import LedgerStore
 from .timeparse import normalize_queue_start, parse_iso, to_iso, utc_now
 from .worker import (
     JOB_SPEC_ORPHAN_GRACE_SECONDS,
+    WORKER_BUSY_EXIT_CODE,
+    WORKER_WAITING_EXIT_CODE,
     JobSpecCleanupResult,
     cleanup_job_specs,
     delete_job_spec,
@@ -299,6 +301,9 @@ def build_agent_context(
             "queue_search_hours": config.queue_search_hours,
             "ledger_retention_days": config.ledger_retention_days,
             "worker_live_guard": config.worker_live_guard,
+            "worker_recovery_grace_seconds": config.worker_recovery_grace_seconds,
+            "worker_busy_exit_code": WORKER_BUSY_EXIT_CODE,
+            "worker_waiting_exit_code": WORKER_WAITING_EXIT_CODE,
             "job_log_retention_days": config.job_log_retention_days,
             "job_log_max_mb": config.job_log_max_mb,
             "job_log_total_max_mb": config.job_log_total_max_mb,
@@ -325,6 +330,8 @@ def build_agent_context(
             "structured_cancel": True,
             "scheduled_jobs": True,
             "scheduled_job_live_guard": config.worker_live_guard,
+            "single_worker_lease": True,
+            "scheduled_job_crash_recovery": True,
             "private_job_specs": True,
             "private_job_spec_cleanup": True,
             "private_job_spec_orphan_grace_seconds": JOB_SPEC_ORPHAN_GRACE_SECONDS,
@@ -658,6 +665,8 @@ def _public_reservation(
                 "launch_guard_state": job.get("launch_guard_state"),
                 "message": job.get("message"),
                 "waiting_since": job.get("waiting_since"),
+                "recovery_state": job.get("recovery_state"),
+                "recovered_at": job.get("recovered_at"),
             }
             if isinstance(job, dict)
             else None

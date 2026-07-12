@@ -17,6 +17,9 @@ Supported security boundaries:
 - Full launch diagnostics remain in the owning UID's private log; shared job state uses
   path-free failure reasons. The worker supervises the launched process group, not processes
   that deliberately escape into a new session.
+- A UID-private kernel lease prevents concurrent workers. After an unclean exit, Linux recovery
+  matches same-UID processes by the exact reservation environment marker and rechecks identity
+  before TERM/KILL. Cross-host or unverifiable processes are never signalled and remain uncertain.
 - Scheduled jobs re-check live process authorization and physical VRAM immediately before
   launch; this reduces races but cannot replace kernel device access control.
 - Shared capacity units enforce ledger admission and inferred memory budgets only. They do
@@ -41,6 +44,8 @@ Administrator responsibilities:
   unauthenticated network write endpoint or allow users to submit records for arbitrary UIDs.
 - Review generated user units before enabling them. `bk service install` captures absolute data
   and private job-log paths; reinstall the unit after those paths change.
+- Keep one canonical `BK_JOB_LOG_DIR` per UID. The worker lease cannot coordinate invocations
+  deliberately pointed at different private directories.
 - Keep `worker_live_guard=true` on shared servers. Disabling it restores direct launch behavior
   and accepts collisions with activity that appeared after booking.
 - Run `bk doctor --probe --strict` on the target mount before enabling services. Its lock check is

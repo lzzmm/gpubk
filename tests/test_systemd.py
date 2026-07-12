@@ -18,6 +18,7 @@ class BundledSystemdTests(unittest.TestCase):
         self.assertIn('ExecStart="/opt/bk venv/bin/python" -m bk monitor', monitor)
         self.assertIn('Environment="BK_DATA_DIR=/data2/shared/bk"', worker)
         self.assertIn("RestartPreventExitStatus=75", monitor)
+        self.assertIn("RestartPreventExitStatus=75", worker)
         self.assertNotIn("EnvironmentFile=", worker)
         self.assertNotIn("@PYTHON_EXECUTABLE@", worker)
         self.assertNotIn("@SERVICE_ENVIRONMENT@", worker)

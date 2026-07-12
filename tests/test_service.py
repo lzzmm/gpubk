@@ -75,6 +75,8 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(context["capabilities"]["idempotent_edit_history_limit"], 256)
         self.assertTrue(context["capabilities"]["structured_cancel"])
         self.assertTrue(context["capabilities"]["scheduled_job_live_guard"])
+        self.assertTrue(context["capabilities"]["single_worker_lease"])
+        self.assertTrue(context["capabilities"]["scheduled_job_crash_recovery"])
         self.assertTrue(context["capabilities"]["weighted_shared_capacity"])
         self.assertTrue(context["capabilities"]["private_job_spec_cleanup"])
         self.assertTrue(context["capabilities"]["bounded_private_job_logs"])
@@ -87,6 +89,9 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(context["policy"]["job_log_retention_days"], 30)
         self.assertEqual(context["policy"]["job_log_max_mb"], 64)
         self.assertEqual(context["policy"]["job_log_total_max_mb"], 4096)
+        self.assertEqual(context["policy"]["worker_recovery_grace_seconds"], 5.0)
+        self.assertEqual(context["policy"]["worker_busy_exit_code"], 75)
+        self.assertEqual(context["policy"]["worker_waiting_exit_code"], 3)
         self.assertNotIn("secret", str(context))
 
     def test_recommendation_is_read_only_and_prefers_live_idle_gpu(self):

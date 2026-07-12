@@ -9,6 +9,8 @@ from pathlib import Path
 from bk.config import Config
 from bk.joblogs import (
     MIB,
+    WorkerBusyError,
+    acquire_job_worker_lease,
     cleanup_job_logs,
     job_log_path,
     read_job_log_tail,
@@ -49,6 +51,30 @@ class JobLogTests(unittest.TestCase):
         self.write_log(reservation_id, 1).write_text("newest", encoding="utf-8")
 
         self.assertEqual(read_job_log_tail(self.config, reservation_id, 13), "older-newest")
+
+    def test_worker_lease_is_exclusive_and_released_without_deleting_metadata(self):
+        first = acquire_job_worker_lease(self.config, self.actor, "worker-1", "host-a")
+        try:
+            with self.assertRaisesRegex(WorkerBusyError, "another worker"):
+                acquire_job_worker_lease(self.config, self.actor, "worker-2", "host-a")
+            self.assertEqual((self.root / "worker.lock").stat().st_mode & 0o777, 0o600)
+        finally:
+            first.release()
+
+        second = acquire_job_worker_lease(self.config, self.actor, "worker-3", "host-a")
+        second.release()
+        payload = (self.root / "worker.lock").read_text(encoding="utf-8")
+        self.assertIn('"worker_id": "worker-3"', payload)
+
+    def test_worker_lease_rejects_symbolic_link_redirection(self):
+        target = self.root.parent / "outside-worker-lock"
+        target.write_text("untouched", encoding="utf-8")
+        (self.root / "worker.lock").symlink_to(target)
+
+        with self.assertRaises(OSError):
+            acquire_job_worker_lease(self.config, self.actor, "worker-1", "host-a")
+
+        self.assertEqual(target.read_text(encoding="utf-8"), "untouched")
 
     def test_retention_removes_old_terminal_log(self):
         reservation_id = str(uuid.uuid4())

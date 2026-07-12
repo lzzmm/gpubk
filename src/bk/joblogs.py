@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -25,11 +26,40 @@ from .models import (
     Actor,
     BookingError,
 )
-from .timeparse import parse_iso
+from .timeparse import parse_iso, to_iso, utc_now
 
 
 MIB = 1024 * 1024
 LOG_READ_CHUNK_BYTES = 64 * 1024
+
+
+class WorkerBusyError(BookingError):
+    pass
+
+
+class JobWorkerLease:
+    def __init__(self, fd: int, path: Path, worker_id: str):
+        self.fd = fd
+        self.path = path
+        self.worker_id = worker_id
+
+    def release(self) -> None:
+        if self.fd < 0:
+            return
+        fd = self.fd
+        self.fd = -1
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+    def __enter__(self) -> JobWorkerLease:
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.release()
 
 
 @dataclass(frozen=True)
@@ -241,6 +271,55 @@ def ensure_job_log_dir(config: Config, actor: Actor) -> Path:
         raise BookingError(f"job log directory must be absolute: {path}")
     ensure_private_directory(path, actor)
     return path
+
+
+def acquire_job_worker_lease(
+    config: Config,
+    actor: Actor,
+    worker_id: str,
+    hostname: str,
+) -> JobWorkerLease:
+    if actor.uid != os.getuid():
+        raise BookingError("worker lease actor must match the current process UID")
+    root = ensure_job_log_dir(config, actor)
+    path = root / "worker.lock"
+    fd = open_or_create_regular(path, os.O_RDWR, 0o600)
+    try:
+        metadata = os.fstat(fd)
+        if metadata.st_uid != actor.uid:
+            raise BookingError(f"worker lease is not owned by UID {actor.uid}: {path}")
+        if stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise BookingError(f"worker lease is accessible by group or other users: {path}")
+        os.fchmod(fd, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise WorkerBusyError(f"another worker is active for {root}") from exc
+        payload = json.dumps(
+            {
+                "version": 1,
+                "worker_id": worker_id,
+                "pid": os.getpid(),
+                "hostname": hostname,
+                "uid": actor.uid,
+                "acquired_at": to_iso(utc_now()),
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        ).encode("utf-8") + b"\n"
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        if os.write(fd, payload) != len(payload):
+            raise OSError("short write while recording the worker lease")
+        os.fsync(fd)
+        return JobWorkerLease(fd, path, worker_id)
+    except Exception:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
+        raise
 
 
 def ensure_private_directory(path: Path, actor: Actor) -> None:

@@ -17,6 +17,7 @@ from .models import (
     JOB_MISSED,
     JOB_PENDING,
     JOB_RUNNING,
+    JOB_UNCERTAIN,
     STATUS_ACTIVE,
     STATUS_CANCELLED,
     STATUS_EXPIRED,
@@ -196,10 +197,10 @@ def cancel_booking(store: LedgerStore, reservation_id: str, actor: Actor) -> dic
             reservation["updated_at"] = to_iso(now)
             job = reservation.get("job")
             if isinstance(job, dict):
-                if job.get("status") in {JOB_PENDING, JOB_CLAIMED}:
+                if job.get("status") == JOB_PENDING:
                     job["status"] = JOB_CANCELLED
                     job["finished_at"] = to_iso(now)
-                elif job.get("status") == JOB_RUNNING:
+                elif job.get("status") in {JOB_CLAIMED, JOB_RUNNING}:
                     job["cancel_requested_at"] = to_iso(now)
             log = _log_item(actor, "cancel", reservation, "ok", "cancelled")
             return ledger, reservation, [log], True
@@ -1082,6 +1083,13 @@ def _expire_old_reservations(ledger: dict, now: datetime) -> bool:
             if isinstance(job, dict) and job.get("status") in {JOB_PENDING, JOB_CLAIMED}:
                 job["status"] = JOB_MISSED
                 job["finished_at"] = to_iso(now)
+            elif isinstance(job, dict) and job.get("status") == JOB_RUNNING:
+                job["status"] = JOB_UNCERTAIN
+                job["finished_at"] = to_iso(now)
+                job["recovery_state"] = "expired-unverified"
+                job["message"] = (
+                    "reservation ended without worker completion; process state is uncertain"
+                )
             changed = True
     return changed
 

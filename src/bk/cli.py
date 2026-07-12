@@ -17,7 +17,7 @@ from .config import Config, load_config
 from .fileio import open_existing_regular
 from .gpu import snapshot
 from .identity import current_actor
-from .joblogs import JobLogCleanupResult, cleanup_job_logs, job_log_paths
+from .joblogs import WorkerBusyError, JobLogCleanupResult, cleanup_job_logs, job_log_paths
 from .monitor import MONITOR_BUSY_EXIT_CODE, MonitorBusyError, run_monitor
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, EditRequest
 from .scheduler import (
@@ -62,6 +62,7 @@ from .usage_cli import run_usage_cli
 from .usage_store import UsageAuditStore
 from .worker import (
     JobSpecCleanupResult,
+    WORKER_BUSY_EXIT_CODE,
     WORKER_WAITING_EXIT_CODE,
     cleanup_job_specs,
     retry_job,
@@ -158,6 +159,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     except MonitorBusyError as exc:
         print(f"bk: {exc}", file=sys.stderr)
         return MONITOR_BUSY_EXIT_CODE
+    except WorkerBusyError as exc:
+        print(f"bk: {exc}", file=sys.stderr)
+        return WORKER_BUSY_EXIT_CODE
     except (BookingError, ValueError, TimeoutError, OSError) as exc:
         if _json_requested(argv):
             print(
@@ -556,7 +560,10 @@ def _monitor_command(argv: List[str], config: Config, store: LedgerStore) -> int
 
 
 def _worker_command(argv: List[str], config: Config, store: LedgerStore) -> int:
-    parser = argparse.ArgumentParser(prog="bk worker")
+    parser = argparse.ArgumentParser(
+        prog="bk worker",
+        epilog="exit 3: due work is waiting; exit 75: another worker holds this UID's lease",
+    )
     parser.add_argument("--once", action="store_true", help="run due jobs, wait for them, then exit")
     parser.add_argument("--poll", type=float, help="poll interval in seconds")
     parser.add_argument("--max-parallel", type=int, help="maximum child jobs for this worker")

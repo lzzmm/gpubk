@@ -41,6 +41,7 @@ class Config:
     job_log_total_max_mb: int = 4096
     worker_poll_seconds: float = 1.0
     worker_claim_timeout_seconds: float = 30.0
+    worker_recovery_grace_seconds: float = 5.0
     worker_live_guard: bool = True
     file_mode: int = DEFAULT_PRIVATE_FILE_MODE
     dir_mode: int = DEFAULT_PRIVATE_DIR_MODE
@@ -179,6 +180,7 @@ def load_config() -> Config:
         "job_log_total_max_mb": "BK_JOB_LOG_TOTAL_MAX_MB",
         "worker_poll_seconds": "BK_WORKER_POLL_SECONDS",
         "worker_claim_timeout_seconds": "BK_WORKER_CLAIM_TIMEOUT_SECONDS",
+        "worker_recovery_grace_seconds": "BK_WORKER_RECOVERY_GRACE_SECONDS",
         "worker_live_guard": "BK_WORKER_LIVE_GUARD",
         "file_mode": "BK_FILE_MODE",
         "dir_mode": "BK_DIR_MODE",
@@ -221,6 +223,7 @@ def load_config() -> Config:
         job_log_total_max_mb=_nonnegative_int_value(raw, "job_log_total_max_mb", 4096),
         worker_poll_seconds=_float_value(raw, "worker_poll_seconds", 1.0),
         worker_claim_timeout_seconds=_float_value(raw, "worker_claim_timeout_seconds", 30.0),
+        worker_recovery_grace_seconds=_float_value(raw, "worker_recovery_grace_seconds", 5.0),
         worker_live_guard=_bool_value(raw, "worker_live_guard", True),
         file_mode=_mode_value(raw, "file_mode", DEFAULT_PRIVATE_FILE_MODE, directory=False),
         dir_mode=_mode_value(raw, "dir_mode", DEFAULT_PRIVATE_DIR_MODE, directory=True),

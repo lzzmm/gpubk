@@ -1,6 +1,8 @@
 import json
 import os
+import signal
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -8,6 +10,7 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from bk.config import Config
 from bk.gpu import GpuProcessSnapshot, GpuSnapshot
@@ -156,6 +159,88 @@ class ScheduledJobTests(unittest.TestCase):
         self.assertFalse(marker.exists())
         self.assertEqual(target.read_text(encoding="utf-8"), "safe")
 
+    @unittest.skipUnless(Path("/proc").is_dir(), "Linux /proc is required for crash recovery")
+    def test_new_worker_terminates_process_group_left_by_crashed_worker(self):
+        reservation = self.booking(
+            command=[sys.executable, "-c", "import time; time.sleep(30)"]
+        )
+        project_root = Path(__file__).resolve().parents[1]
+        env = {
+            **os.environ,
+            "PYTHONPATH": str(project_root / "src"),
+            "BK_DATA_DIR": str(self.data_dir),
+            "BK_JOB_LOG_DIR": str(self.log_dir),
+            "BK_GPU_COUNT": "1",
+            "BK_WORKER_LIVE_GUARD": "0",
+            "BK_WORKER_RECOVERY_GRACE_SECONDS": "0.2",
+        }
+        worker = subprocess.Popen(
+            [sys.executable, "-m", "bk", "worker", "--quiet", "--poll", "0.1"],
+            cwd=project_root,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        child_pid = None
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                stored = next(
+                    item
+                    for item in self.store.load()["reservations"]
+                    if item["id"] == reservation["id"]
+                )
+                if stored["job"]["status"] == "running":
+                    child_pid = int(stored["job"]["runner_pid"])
+                    break
+                time.sleep(0.05)
+            self.assertIsNotNone(child_pid, "first worker did not start the command")
+            os.kill(worker.pid, signal.SIGKILL)
+            worker.wait(timeout=2)
+            os.kill(child_pid, 0)
+
+            recovered = subprocess.run(
+                [sys.executable, "-m", "bk", "worker", "--once", "--quiet", "--poll", "0.1"],
+                cwd=project_root,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+
+            stored = next(
+                item
+                for item in self.store.load()["reservations"]
+                if item["id"] == reservation["id"]
+            )
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            self.assertEqual(stored["job"]["status"], "uncertain")
+            self.assertEqual(stored["job"]["recovery_state"], "terminated")
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    raw_stat = (Path("/proc") / str(child_pid) / "stat").read_text(
+                        encoding="utf-8"
+                    )
+                except OSError:
+                    break
+                if raw_stat[raw_stat.rfind(")") + 1 :].split()[0] == "Z":
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("orphaned child process is still running after recovery")
+        finally:
+            if worker.poll() is None:
+                worker.kill()
+                worker.wait(timeout=2)
+            if child_pid is not None:
+                try:
+                    os.killpg(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
     def test_live_guard_waits_without_log_spam_then_launches_when_gpu_is_safe(self):
         marker = self.work_dir / "guard-launched"
         reservation = self.booking(
@@ -281,6 +366,32 @@ class ScheduledJobTests(unittest.TestCase):
         self.assertFalse(marker.exists())
         self.assertFalse(job_spec_path(self.config, reservation["job"]["spec_id"]).exists())
 
+    def test_cancellation_after_claim_prevents_popen_and_is_not_counted_as_failure(self):
+        marker = self.work_dir / "claim-race-must-not-run"
+        reservation = self.booking(
+            command=[sys.executable, "-c", f"open({str(marker)!r}, 'w').write('bad')"]
+        )
+
+        def cancel_before_launch(store, actor, reservation_id, _claim_token):
+            cancel_booking(store, reservation_id, actor)
+            return False
+
+        with mock.patch("bk.worker._claim_is_launchable", side_effect=cancel_before_launch):
+            summary = run_worker(
+                self.config,
+                self.store,
+                self.actor,
+                once=True,
+                poll_seconds=0.1,
+                quiet=True,
+            )
+
+        stored = next(item for item in self.store.load()["reservations"] if item["id"] == reservation["id"])
+        self.assertFalse(marker.exists())
+        self.assertEqual(summary.cancelled, 1)
+        self.assertEqual(summary.failed, 0)
+        self.assertEqual(stored["job"]["status"], "cancelled")
+
     def test_running_job_is_terminated_at_reservation_deadline(self):
         reservation = self.booking(command=[sys.executable, "-c", "import time; time.sleep(30)"])
 
@@ -304,18 +415,21 @@ class ScheduledJobTests(unittest.TestCase):
             self.actor,
             utc_now(),
             worker_id="dead-worker",
+            worker_lease_id="dead-worker",
             runner_host="host",
             runner_pid=999999,
             claim_timeout_seconds=1,
             limit=1,
         )
         self.assertEqual(len(first), 1)
+        self.assertEqual(first[0]["job"]["worker_lease_id"], "dead-worker")
 
         second = claim_due_jobs(
             self.store,
             self.actor,
             utc_now() + timedelta(seconds=2),
             worker_id="new-worker",
+            worker_lease_id="new-worker",
             runner_host="host",
             runner_pid=os.getpid(),
             claim_timeout_seconds=1,
@@ -336,6 +450,24 @@ class ScheduledJobTests(unittest.TestCase):
         )
         self.assertEqual(retried["job"]["status"], "pending")
         self.assertTrue(job_spec_path(self.config, reservation["job"]["spec_id"]).exists())
+
+    def test_new_worker_waits_for_active_prelease_job_instead_of_claiming_more(self):
+        reservation = self.booking()
+
+        def mark_legacy_running(ledger):
+            item = next(value for value in ledger["reservations"] if value["id"] == reservation["id"])
+            item["job"]["status"] = "running"
+            item["job"].pop("worker_lease_id", None)
+            return ledger, None, [], True
+
+        self.store.transaction(mark_legacy_running)
+
+        summary = run_worker(self.config, self.store, self.actor, once=True, quiet=True)
+
+        stored = next(item for item in self.store.load()["reservations"] if item["id"] == reservation["id"])
+        self.assertEqual(summary.started, 0)
+        self.assertEqual(summary.waiting, 1)
+        self.assertEqual(stored["job"]["status"], "running")
 
     def test_cleanup_defers_fresh_orphans_then_removes_them_after_grace(self):
         spec = prepare_job_spec(

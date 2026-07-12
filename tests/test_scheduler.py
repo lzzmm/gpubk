@@ -8,7 +8,13 @@ from unittest import mock
 
 from bk.config import Config
 from bk.models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest, EditRequest
-from bk.scheduler import MAX_EDIT_OPERATIONS_PER_RESERVATION, add_booking, edit_booking, find_available_gpus
+from bk.scheduler import (
+    MAX_EDIT_OPERATIONS_PER_RESERVATION,
+    add_booking,
+    cancel_booking,
+    edit_booking,
+    find_available_gpus,
+)
 from bk.storage import LedgerStore
 from bk.timeparse import parse_iso, utc_now
 
@@ -592,6 +598,67 @@ class SchedulerModeTests(unittest.TestCase):
         ids = {item["id"] for item in self.store.load()["reservations"]}
         self.assertEqual(ids, {"recent-cancelled", created.reservation["id"]})
         self.assertIn("historic-audit", self.store.log_path.read_text(encoding="utf-8"))
+
+    def test_maintenance_marks_expired_running_job_uncertain(self):
+        now = utc_now()
+        record = {
+            "id": "expired-running",
+            "uid": 1001,
+            "username": "user1001",
+            "gpus": [0],
+            "mode": MODE_SHARED,
+            "start_at": (now - timedelta(minutes=10)).isoformat(),
+            "end_at": (now - timedelta(minutes=5)).isoformat(),
+            "status": "active",
+            "created_at": (now - timedelta(minutes=10)).isoformat(),
+            "updated_at": (now - timedelta(minutes=10)).isoformat(),
+            "job": {"status": "running", "summary": "python train.py"},
+        }
+        self.store.ensure()
+        self.store.ledger_path.write_text(
+            json.dumps({"version": 1, "reservations": [record]}),
+            encoding="utf-8",
+        )
+
+        add_booking(self.store, self.config, self.request(2000, MODE_SHARED))
+
+        stored = next(
+            item for item in self.store.load()["reservations"] if item["id"] == "expired-running"
+        )
+        self.assertEqual(stored["status"], "expired")
+        self.assertEqual(stored["job"]["status"], "uncertain")
+        self.assertEqual(stored["job"]["recovery_state"], "expired-unverified")
+
+    def test_cancellation_preserves_claim_for_crash_recovery(self):
+        actor = Actor(1001, "user1001")
+        created = add_booking(
+            self.store,
+            self.config,
+            BookingRequest(
+                actor=actor,
+                count=1,
+                duration_seconds=30 * 60,
+                start_at=self.start,
+                job_spec_id="00000000-0000-0000-0000-000000000001",
+                job_digest="0" * 64,
+                job_summary="python train.py",
+            ),
+        ).reservation
+
+        def mark_claimed(ledger):
+            item = next(value for value in ledger["reservations"] if value["id"] == created["id"])
+            item["job"]["status"] = "claimed"
+            item["job"]["claim_token"] = "claim-token"
+            item["job"]["worker_lease_id"] = "old-worker"
+            return ledger, None, [], True
+
+        self.store.transaction(mark_claimed)
+
+        cancelled = cancel_booking(self.store, created["id"], actor)
+
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(cancelled["job"]["status"], "claimed")
+        self.assertIsNotNone(cancelled["job"]["cancel_requested_at"])
 
 
 if __name__ == "__main__":

@@ -20,9 +20,11 @@ from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 from .config import Config
 from .fileio import open_existing_regular
 from .gpu import GpuSnapshot, snapshot
+from .job_recovery import active_legacy_job_count, recover_abandoned_jobs
 from .joblogs import (
     MIB,
     JobLogPump,
+    acquire_job_worker_lease,
     cleanup_job_logs,
     ensure_job_log_dir,
     ensure_private_directory,
@@ -55,6 +57,7 @@ from .timeparse import parse_iso, to_iso, utc_now
 
 SnapshotProvider = Callable[[Config], Sequence[GpuSnapshot]]
 WORKER_WAITING_EXIT_CODE = 3
+WORKER_BUSY_EXIT_CODE = 75
 JOB_SPEC_CLEANUP_INTERVAL_SECONDS = 5 * 60
 JOB_SPEC_ORPHAN_GRACE_SECONDS = 24 * 60 * 60
 
@@ -78,6 +81,8 @@ class WorkerSummary:
     failed: int = 0
     cancelled: int = 0
     waiting: int = 0
+    recovered_uncertain: int = 0
+    terminated_groups: int = 0
 
 
 @dataclass(frozen=True)
@@ -299,11 +304,12 @@ def run_worker(
     if parallel < 1:
         raise ValueError("worker max parallel jobs must be >= 1")
 
-    log_dir = ensure_job_log_dir(config, actor)
     worker_id = str(uuid.uuid4())
     hostname = socket.gethostname()
+    lease = acquire_job_worker_lease(config, actor, worker_id, hostname)
+    log_dir = lease.path.parent
     stop_event = threading.Event()
-    previous_handlers = _install_signal_handlers(stop_event)
+    previous_handlers: Dict[int, object] = {}
     running: Dict[str, RunningJob] = {}
     counts = {
         "claimed": 0,
@@ -312,11 +318,35 @@ def run_worker(
         "failed": 0,
         "cancelled": 0,
         "waiting": 0,
+        "recovered_uncertain": 0,
+        "terminated_groups": 0,
     }
     next_spec_cleanup_at = 0.0
-    if not quiet:
-        print(f"worker started: uid={actor.uid} poll={poll:g}s logs={log_dir}")
     try:
+        previous_handlers = _install_signal_handlers(stop_event)
+        recovery = recover_abandoned_jobs(
+            store,
+            actor,
+            hostname=hostname,
+            worker_id=worker_id,
+            now=utc_now(),
+            grace_seconds=config.worker_recovery_grace_seconds,
+        )
+        counts["recovered_uncertain"] = recovery.uncertain_jobs
+        counts["terminated_groups"] = recovery.terminated_groups
+        legacy_blocked = recovery.legacy_active_jobs
+        if not quiet:
+            print(f"worker started: uid={actor.uid} poll={poll:g}s logs={log_dir}")
+            if recovery.examined:
+                print(
+                    f"recovery: examined={recovery.examined} "
+                    f"uncertain={recovery.uncertain_jobs} "
+                    f"terminated_groups={recovery.terminated_groups} "
+                    f"remote={recovery.remote_jobs} legacy={recovery.legacy_jobs} "
+                    f"legacy_active={recovery.legacy_active_jobs}"
+                )
+            for warning in recovery.warnings:
+                print(f"warning: {warning}")
         while True:
             now = utc_now()
             _reconcile_running(store, actor, running, now, counts, quiet)
@@ -332,6 +362,37 @@ def run_worker(
                 if not running:
                     break
             else:
+                current_legacy = active_legacy_job_count(store.load(), actor, now)
+                if current_legacy:
+                    counts["waiting"] = max(counts["waiting"], current_legacy)
+                    if not quiet and current_legacy != legacy_blocked:
+                        print(
+                            f"waiting: {current_legacy} pre-lease job(s) may still be owned "
+                            "by an older worker"
+                        )
+                    legacy_blocked = current_legacy
+                    if once and not running:
+                        break
+                    stop_event.wait(poll)
+                    continue
+                counts["waiting"] = 0
+                if legacy_blocked:
+                    followup = recover_abandoned_jobs(
+                        store,
+                        actor,
+                        hostname=hostname,
+                        worker_id=worker_id,
+                        now=now,
+                        grace_seconds=config.worker_recovery_grace_seconds,
+                    )
+                    counts["recovered_uncertain"] += followup.uncertain_jobs
+                    counts["terminated_groups"] += followup.terminated_groups
+                    legacy_blocked = followup.legacy_active_jobs
+                    if not quiet:
+                        for warning in followup.warnings:
+                            print(f"warning: {warning}")
+                    if legacy_blocked:
+                        continue
                 capacity = max(0, parallel - len(running))
                 eligible_ids = None
                 if config.worker_live_guard:
@@ -351,6 +412,7 @@ def run_worker(
                     actor,
                     now,
                     worker_id=worker_id,
+                    worker_lease_id=lease.worker_id,
                     runner_host=hostname,
                     runner_pid=os.getpid(),
                     claim_timeout_seconds=config.worker_claim_timeout_seconds,
@@ -361,7 +423,10 @@ def run_worker(
                 for reservation in claimed:
                     started = _start_claimed_job(config, store, actor, reservation, log_dir)
                     if started is None:
-                        counts["failed"] += 1
+                        if _stored_job_status(store, str(reservation.get("id", ""))) == JOB_CANCELLED:
+                            counts["cancelled"] += 1
+                        else:
+                            counts["failed"] += 1
                         continue
                     running[started.reservation_id] = started
                     counts["started"] += 1
@@ -376,24 +441,31 @@ def run_worker(
 
             stop_event.wait(min(poll, 0.2) if once and running else poll)
     finally:
-        if running:
-            _stop_running_jobs(running)
-            deadline = time.monotonic() + 5.0
-            while running and time.monotonic() < deadline:
-                _reconcile_running(store, actor, running, utc_now(), counts, quiet)
-                time.sleep(0.05)
-            for item in running.values():
-                _kill_process_group(item.process)
-            _reconcile_running(store, actor, running, utc_now(), counts, quiet)
-        _cleanup_job_specs_best_effort(config, store, actor, utc_now(), quiet)
-        _cleanup_job_logs_best_effort(config, store, actor, utc_now(), quiet)
-        _restore_signal_handlers(previous_handlers)
+        try:
+            try:
+                if running:
+                    _stop_running_jobs(running)
+                    deadline = time.monotonic() + 5.0
+                    while running and time.monotonic() < deadline:
+                        _reconcile_running(store, actor, running, utc_now(), counts, quiet)
+                        time.sleep(0.05)
+                    for item in running.values():
+                        _kill_process_group(item.process)
+                    _reconcile_running(store, actor, running, utc_now(), counts, quiet)
+                _cleanup_job_specs_best_effort(config, store, actor, utc_now(), quiet)
+                _cleanup_job_logs_best_effort(config, store, actor, utc_now(), quiet)
+            finally:
+                _restore_signal_handlers(previous_handlers)
+        finally:
+            lease.release()
     summary = WorkerSummary(**counts)
     if not quiet:
         print(
             f"worker stopped: claimed={summary.claimed} started={summary.started} "
             f"succeeded={summary.succeeded} failed={summary.failed} "
-            f"cancelled={summary.cancelled} waiting={summary.waiting}"
+            f"cancelled={summary.cancelled} waiting={summary.waiting} "
+            f"recovered={summary.recovered_uncertain} "
+            f"terminated_groups={summary.terminated_groups}"
         )
     return summary
 
@@ -404,6 +476,7 @@ def claim_due_jobs(
     now: datetime,
     *,
     worker_id: str,
+    worker_lease_id: str,
     runner_host: str,
     runner_pid: int,
     claim_timeout_seconds: float,
@@ -473,6 +546,7 @@ def claim_due_jobs(
             job["claim_token"] = claim_token
             job["claimed_at"] = to_iso(now)
             job["worker_id"] = worker_id
+            job["worker_lease_id"] = worker_lease_id
             job["runner_host"] = runner_host
             job["runner_pid"] = runner_pid
             job["message"] = None
@@ -625,6 +699,7 @@ def retry_job(
             "runner_pid",
             "runner_host",
             "worker_id",
+            "worker_lease_id",
             "message",
             "cancel_requested_at",
             "launch_guard_state",
@@ -632,6 +707,9 @@ def retry_job(
             "waiting_since",
             "log_warning",
             "log_rotated",
+            "recovery_state",
+            "recovery_worker_id",
+            "recovered_at",
         ):
             job.pop(key, None)
         reservation["updated_at"] = to_iso(now)
@@ -681,6 +759,17 @@ def _start_claimed_job(
         env["BK_RESERVED_GPUS"] = physical_gpus
         if reservation.get("expected_memory_mb") is not None:
             env["BK_EXPECTED_GPU_MEMORY_MB"] = str(reservation["expected_memory_mb"])
+        if not _claim_is_launchable(store, actor, reservation_id, claim_token):
+            log_pump.record_event(
+                {
+                    "event": "bk-job-launch-aborted",
+                    "timestamp": to_iso(utc_now()),
+                    "reason": "claim is no longer active",
+                }
+            )
+            log_pump.abort()
+            _mark_aborted_claim(store, actor, reservation_id, claim_token)
+            return None
         process = subprocess.Popen(
             argv,
             cwd=cwd,
@@ -697,11 +786,7 @@ def _start_claimed_job(
         log_pump.start(process.stdout)
     except (OSError, ValueError, BookingError) as exc:
         if process is not None:
-            _terminate_process_group(process)
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                _kill_process_group(process)
+            _terminate_and_reap_process_group(process)
         if log_pump is not None:
             try:
                 log_pump.record_event(
@@ -726,20 +811,13 @@ def _start_claimed_job(
     try:
         marked_running = _mark_running(store, actor, reservation_id, claim_token, process.pid)
     except Exception:
-        _terminate_process_group(process)
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _kill_process_group(process)
+        _terminate_and_reap_process_group(process)
         log_pump.finish()
         raise
     if not marked_running:
-        _terminate_process_group(process)
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _kill_process_group(process)
+        _terminate_and_reap_process_group(process)
         log_pump.finish()
+        _mark_aborted_claim(store, actor, reservation_id, claim_token)
         return None
     return RunningJob(
         reservation_id=reservation_id,
@@ -872,6 +950,25 @@ def _mark_running(
     return store.transaction(mutate)
 
 
+def _claim_is_launchable(
+    store: LedgerStore,
+    actor: Actor,
+    reservation_id: str,
+    claim_token: str,
+) -> bool:
+    reservation = _find_reservation(store.load(), reservation_id)
+    if reservation is None or int(reservation.get("uid", -1)) != actor.uid:
+        return False
+    job = reservation.get("job")
+    return (
+        reservation.get("status") == STATUS_ACTIVE
+        and isinstance(job, dict)
+        and job.get("status") == JOB_CLAIMED
+        and job.get("claim_token") == claim_token
+        and parse_iso(reservation["end_at"]) > utc_now()
+    )
+
+
 def _mark_launch_failure(
     store: LedgerStore,
     actor: Actor,
@@ -892,6 +989,42 @@ def _mark_launch_failure(
         job["message"] = message[:1000]
         reservation["updated_at"] = to_iso(now)
         return ledger, None, [_job_log(actor, "job-failed", reservation, message[:200])], True
+
+    store.transaction(mutate)
+
+
+def _mark_aborted_claim(
+    store: LedgerStore,
+    actor: Actor,
+    reservation_id: str,
+    claim_token: str,
+) -> None:
+    def mutate(ledger: dict):
+        reservation = _find_reservation(ledger, reservation_id)
+        if reservation is None or int(reservation.get("uid", -1)) != actor.uid:
+            return ledger, None, [], False
+        job = reservation.get("job")
+        if (
+            not isinstance(job, dict)
+            or job.get("status") != JOB_CLAIMED
+            or job.get("claim_token") != claim_token
+        ):
+            return ledger, None, [], False
+        now = utc_now()
+        if reservation.get("status") == STATUS_CANCELLED:
+            status = JOB_CANCELLED
+            message = "reservation was cancelled while the claimed command was starting"
+        elif parse_iso(reservation["end_at"]) <= now:
+            status = JOB_MISSED
+            message = "reservation ended while the claimed command was starting"
+        else:
+            status = JOB_UNCERTAIN
+            message = "claimed command was stopped before running state could be committed"
+        job["status"] = status
+        job["finished_at"] = to_iso(now)
+        job["message"] = message
+        reservation["updated_at"] = to_iso(now)
+        return ledger, None, [_job_log(actor, f"job-{status}", reservation, message)], True
 
     store.transaction(mutate)
 
@@ -966,6 +1099,8 @@ def _complete_job(
         job["status"] = status
         job["finished_at"] = to_iso(now)
         job["exit_code"] = int(exit_code)
+        for key in ("recovery_state", "recovery_worker_id", "recovered_at"):
+            job.pop(key, None)
         if log_rotations:
             job["log_rotated"] = True
         if log_warning:
@@ -1028,6 +1163,23 @@ def _terminate_process_group(process: subprocess.Popen) -> None:
                 process.terminate()
             except OSError:
                 pass
+
+
+def _terminate_and_reap_process_group(
+    process: subprocess.Popen,
+    grace_seconds: float = 5.0,
+) -> None:
+    _terminate_process_group(process)
+    deadline = time.monotonic() + grace_seconds
+    while _process_group_alive(process) and time.monotonic() < deadline:
+        process.poll()
+        time.sleep(0.05)
+    if _process_group_alive(process):
+        _kill_process_group(process)
+    try:
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(process)
 
 
 def _kill_process_group(process: subprocess.Popen) -> None:
@@ -1158,6 +1310,12 @@ def _find_reservation(ledger: dict, reservation_id: str) -> Optional[dict]:
         if reservation.get("id") == reservation_id:
             return reservation
     return None
+
+
+def _stored_job_status(store: LedgerStore, reservation_id: str) -> Optional[str]:
+    reservation = _find_reservation(store.load(), reservation_id)
+    job = reservation.get("job") if reservation is not None else None
+    return str(job.get("status")) if isinstance(job, dict) else None
 
 
 def _timestamp_before(value: object, cutoff: datetime) -> bool:

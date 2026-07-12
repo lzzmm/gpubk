@@ -25,6 +25,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.job_log_retention_days, 30)
             self.assertEqual(config.job_log_max_mb, 64)
             self.assertEqual(config.job_log_total_max_mb, 4096)
+            self.assertEqual(config.worker_recovery_grace_seconds, 5.0)
 
     def test_gpu_count_is_auto_detected_when_not_configured(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -141,6 +142,7 @@ class ConfigTests(unittest.TestCase):
                     "BK_JOB_LOG_RETENTION_DAYS": "0",
                     "BK_JOB_LOG_MAX_MB": "8",
                     "BK_JOB_LOG_TOTAL_MAX_MB": "512",
+                    "BK_WORKER_RECOVERY_GRACE_SECONDS": "0.25",
                 },
                 clear=True,
             ):
@@ -149,6 +151,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.job_log_retention_days, 0)
             self.assertEqual(config.job_log_max_mb, 8)
             self.assertEqual(config.job_log_total_max_mb, 512)
+            self.assertEqual(config.worker_recovery_grace_seconds, 0.25)
 
     def test_file_mode_rejects_executable_bits(self):
         with tempfile.TemporaryDirectory() as tmp:

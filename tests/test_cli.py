@@ -1053,6 +1053,29 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 75)
             self.assertIn("another monitor or telemetry maintenance writer is active", result.stderr)
 
+    def test_worker_fails_fast_when_another_worker_holds_the_private_lease(self):
+        from bk.config import Config
+        from bk.identity import current_actor
+        from bk.joblogs import acquire_job_worker_lease
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            job_dir = root / "jobs"
+            config = Config(data_dir=data_dir, gpu_count=1, job_log_dir=job_dir)
+            lease = acquire_job_worker_lease(config, current_actor(), "holder", "test-host")
+            try:
+                result = self.run_bk(
+                    ["worker", "--once"],
+                    data_dir,
+                    {"BK_JOB_LOG_DIR": str(job_dir)},
+                )
+            finally:
+                lease.release()
+
+            self.assertEqual(result.returncode, 75)
+            self.assertIn("another worker is active", result.stderr)
+
     def test_service_unit_captures_effective_data_and_job_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

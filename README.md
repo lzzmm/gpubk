@@ -165,6 +165,7 @@ bk 2 1h30m --mem 12g -- python train.py --config exp.yaml
 bk j                    # list scheduled jobs
 bk j --cleanup          # inspect and prune private job files
 bk w                    # run this user's due jobs
+bk jr ID --accept-duplicate-risk  # retry only after checking an uncertain job
 ```
 
 The worker sets `CUDA_VISIBLE_DEVICES`, `CUDA_DEVICE_ORDER`,
@@ -186,6 +187,19 @@ physical VRAM. Missing live telemetry also fails closed. The job remains
 the reservation ends; `bk worker --once` returns `3` when work is waiting.
 `worker_live_guard=false` disables this protection and should only be used for
 an explicitly accepted compatibility case.
+
+Only one worker can hold a UID's private job directory. The kernel releases its
+lease after a crash, so the next worker can recover durable `claimed` or
+`running` records without racing a healthy worker. On Linux, recovery reads only
+same-UID `/proc` entries, matches the exact `BK_RESERVATION_ID`, rechecks identity
+immediately before signalling, then sends TERM and KILL after the configurable
+`worker_recovery_grace_seconds` (default 5 seconds). Recovered jobs remain
+`uncertain`, even after their process groups stop, because partial side effects
+may already exist. Retry requires the explicit duplicate-risk acknowledgement.
+Processes recorded on another host are never signalled locally. A concurrent
+worker exits with status `75`; the bundled systemd unit does not restart-loop on
+that status. During an upgrade, active jobs created by a pre-lease worker are
+left untouched and block new claims until they finish or their reservation ends.
 
 Private command specs are removed after cancellation, success, timeout, or an
 expired retry window. The worker checks them at startup, after shutdown, and at
@@ -213,7 +227,9 @@ systemctl --user enable --now bk-worker.service
 The generated unit captures the absolute `BK_DATA_DIR` and private
 `BK_JOB_LOG_DIR` in effect at installation time. Review it with
 `bk service show worker`; reinstall with `--force` after changing either path.
-Other policy remains in `config.json` and is reloaded whenever the service starts.
+Every worker invocation for one UID must use that same private path so the lease
+has one authority. Other policy remains in `config.json` and is reloaded whenever
+the service starts.
 
 ## Monitoring and Placement
 
@@ -318,6 +334,7 @@ Put a root-owned `config.json` in that directory:
   "job_log_retention_days": 30,
   "job_log_max_mb": 64,
   "job_log_total_max_mb": 4096,
+  "worker_recovery_grace_seconds": 5,
   "worker_live_guard": true,
   "file_mode": "0660",
   "dir_mode": "2770"

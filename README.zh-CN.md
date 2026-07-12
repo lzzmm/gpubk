@@ -154,6 +154,7 @@ bk 2 1h30m --mem 12g -- python train.py --config exp.yaml
 bk j                    # 查看任务
 bk j --cleanup          # 检查并清理私有任务文件
 bk w                    # 执行当前用户已经到点的任务
+bk jr ID --accept-duplicate-risk  # 检查 uncertain 任务后再确认重试
 ```
 
 worker 会设置 `CUDA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER`、
@@ -171,6 +172,16 @@ bk 1 30m -- sh -lc 'python train.py > train.log 2>&1'
 不足时会等待。实时探测不可用时也默认拒绝启动。任务保持 `pending` 并显示原因，常驻
 worker 会在预约窗口内持续重试；`bk worker --once` 有等待任务时返回状态码 `3`。
 只有明确接受兼容性风险时才应设置 `worker_live_guard=false`。
+
+同一个 UID 的私有任务目录同时只允许一个 worker 持有租约；worker 崩溃后内核会自动
+释放锁，因此新 worker 可以恢复持久化的 `claimed` / `running` 状态而不会与健康 worker
+竞争。Linux 上只检查同 UID 的 `/proc` 记录，精确匹配 `BK_RESERVATION_ID`，并在发送
+信号前再次核对身份；先发 TERM，超过 `worker_recovery_grace_seconds`（默认 5 秒）后
+再发 KILL。即使残留进程组已停止，任务仍保持 `uncertain`，因为崩溃前可能已产生部分
+副作用，重试时必须显式接受重复执行风险。其他主机上的进程绝不会在本机被发送信号。
+并发启动第二个 worker 会返回状态码 `75`；内置 systemd unit 不会因此反复重启。
+升级时，旧版无租约 worker 创建的活动任务不会被接管，并会暂停领取新任务，直到旧任务
+结束或预约到期。
 
 预约取消、任务成功、超时或可重试窗口结束后，私有命令 spec 会被清理。worker 会在
 启动、退出以及持续运行时最多每 5 分钟检查一次。没有台账引用的规范 spec 会保留
@@ -192,7 +203,8 @@ systemctl --user enable --now bk-worker.service
 ```
 
 生成的 unit 会固化安装当时生效的绝对 `BK_DATA_DIR` 与私有 `BK_JOB_LOG_DIR`。
-可用 `bk service show worker` 检查；路径变化后使用 `--force` 重新安装。其他策略仍从
+可用 `bk service show worker` 检查；路径变化后使用 `--force` 重新安装。同一 UID 的
+所有 worker 必须使用同一个私有目录，使租约只有一个权威位置。其他策略仍从
 `config.json` 读取，并在服务每次启动时重新加载。
 
 ## 监测与自动选卡
@@ -292,6 +304,7 @@ export BK_DATA_DIR=/data2/shared/bk
   "job_log_retention_days": 30,
   "job_log_max_mb": 64,
   "job_log_total_max_mb": 4096,
+  "worker_recovery_grace_seconds": 5,
   "worker_live_guard": true,
   "file_mode": "0660",
   "dir_mode": "2770"

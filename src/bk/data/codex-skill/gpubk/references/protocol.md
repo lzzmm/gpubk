@@ -32,6 +32,12 @@ Recommendation fields:
 - Scheduled job objects may include `launch_guard_state=waiting`, `waiting_since`, and a
   privacy-safe `message`; exit status `3` from `bk worker --once` means due work is waiting for
   a safe live GPU state, not that the command ran.
+- Scheduled job objects may include `recovery_state` and `recovered_at`. `terminated` means a
+  same-UID process group was stopped after worker loss, but job status remains `uncertain` because
+  earlier side effects cannot be disproved. `remote-unverified`, `unverified`, and
+  `termination-unverified` must never trigger automatic retry.
+- Context capabilities advertise `single_worker_lease` and `scheduled_job_crash_recovery`.
+  Worker exit `75` means the UID-private lease is already held; do not retry in a tight loop.
 
 Create and edit return the same `kind=booking_result` shape through JSON CLI and MCP: `status`, a
 privacy-safe `reservation`, per-GPU `allocation.selected` explanations, allocator source/reason,
