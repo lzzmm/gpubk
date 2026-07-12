@@ -88,8 +88,9 @@ Administrator responsibilities:
 - The bundled monitor service bounds other failure restarts to three attempts per 60 seconds,
   allowing brief I/O recovery without retrying a persistent failure indefinitely.
 - Review generated user units before enabling them. `bk service install` captures absolute data
-  and private job-log paths plus an explicit trusted config path; reinstall the unit after
-  those paths change.
+  and private job-log paths, an explicit trusted config path, and validated values for explicitly
+  active non-secret configuration overrides. It never captures the allocator command. Reinstall
+  the unit after those paths or overrides change; prefer a trusted config file on shared hosts.
 - Enabling systemd linger allows an account's user manager and background services to run
   without an active login. Grant it only to the selected monitor account and users who need
   unattended workers; disable it when that requirement ends.

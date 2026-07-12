@@ -302,12 +302,15 @@ sudo loginctl enable-linger <worker-user>
 ```
 
 The generated unit captures the absolute `BK_DATA_DIR`, private
-`BK_JOB_LOG_DIR`, and an explicit `BK_CONFIG_FILE` in effect at installation
-time. Review it with `bk service show worker`; reinstall with `--force` after
-changing any captured path.
+`BK_JOB_LOG_DIR`, an explicit `BK_CONFIG_FILE`, and any explicitly active
+non-secret configuration overrides such as `BK_WORKER_MAX_PARALLEL`. Values are
+validated and normalized before they enter the unit; allocator commands are
+never captured. Review the snapshot with `bk service show worker`; reinstall
+with `--force` after changing any captured path or override.
 Every worker invocation for one UID must use that same private path so the lease
-has one authority. Other policy is reloaded from the selected configuration path
-whenever the service starts.
+has one authority. Settings without a captured override are reloaded from the
+selected configuration path whenever the service starts. A trusted config file
+is preferable to shell overrides for shared deployments.
 Persistent worker startup failures are bounded to three attempts per 60 seconds;
 ordinary child-command failures are recorded without terminating the long-lived
 worker.
@@ -379,8 +382,9 @@ Run exactly one trusted monitor writer on a shared server. Per-user workers are
 still separate. The monitor service above is intended for a private server or
 for the account whose numeric UID is selected by `monitor_uid`. Its generated
 unit captures the absolute shared data directory and explicit trusted config
-path. Sampling and rollup values are reloaded from that config whenever the
-service starts. A duplicate writer (`75`) or role mismatch (`77`) is not
+path, plus any explicit non-secret configuration overrides active at install
+time. Uncaptured sampling and rollup values are reloaded from that config whenever
+the service starts. A duplicate writer (`75`) or role mismatch (`77`) is not
 restarted. Other failures retry at most three times in 60 seconds, allowing a
 short transient recovery without an endless log loop.
 The final command above is a read-only post-start check. Unlike deployment

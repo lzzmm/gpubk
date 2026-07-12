@@ -1990,6 +1990,32 @@ class CliTests(unittest.TestCase):
             self.assertTrue((units / "bk-monitor.service").is_file())
             self.assertIn("captured config file: /etc/gpubk/config.json", output.getvalue())
 
+    def test_worker_service_install_preserves_explicit_config_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            units = root / "units"
+            result = self.run_bk(
+                ["service", "install", "worker", "--target-dir", str(units)],
+                data_dir,
+                {
+                    "BK_GPU_COUNT": "8",
+                    "BK_MAX_SHARED_USERS": "4",
+                    "BK_WORKER_MAX_PARALLEL": "20",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            text = (units / "bk-worker.service").read_text(encoding="utf-8")
+            self.assertIn('Environment="BK_GPU_COUNT=8"', text)
+            self.assertIn('Environment="BK_MAX_SHARED_USERS=4"', text)
+            self.assertIn('Environment="BK_WORKER_MAX_PARALLEL=20"', text)
+            self.assertIn(
+                "captured config overrides: BK_GPU_COUNT, BK_MAX_SHARED_USERS, "
+                "BK_WORKER_MAX_PARALLEL",
+                result.stdout,
+            )
+
     def test_usage_cli_exposes_stable_storage_and_dry_run_maintenance(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

@@ -1009,6 +1009,9 @@ def _service_command(argv: List[str], config: Config) -> int:
         print(f"captured config file: {environment['BK_CONFIG_FILE']}")
     if "BK_JOB_LOG_DIR" in environment:
         print(f"captured job log directory: {environment['BK_JOB_LOG_DIR']}")
+    captured_overrides = sorted(set(environment) & set(CONFIG_ENV_MAP.values()))
+    if captured_overrides:
+        print(f"captured config overrides: {', '.join(captured_overrides)}")
     print("not enabled or started; review it, then run systemctl --user daemon-reload")
     if args.kind == "monitor":
         print("shared server note: run exactly one trusted monitor writer; do not enable one per user")

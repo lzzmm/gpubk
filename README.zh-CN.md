@@ -262,10 +262,13 @@ bk worker --status --require-running
 sudo loginctl enable-linger <worker用户>
 ```
 
-生成的 unit 会固化安装当时生效的绝对 `BK_DATA_DIR`、私有 `BK_JOB_LOG_DIR`，以及
-显式设置的 `BK_CONFIG_FILE`。可用 `bk service show worker` 检查；任一路径变化后
-使用 `--force` 重新安装。同一 UID 的所有 worker 必须使用同一个私有目录，使租约
-只有一个权威位置。其他策略仍从所选配置路径读取，并在服务每次启动时重新加载。
+生成的 unit 会固化安装时生效的绝对 `BK_DATA_DIR`、私有 `BK_JOB_LOG_DIR`、显式
+`BK_CONFIG_FILE`，以及 `BK_WORKER_MAX_PARALLEL` 等明确启用的非敏感配置覆盖。写入
+unit 前会先校验并规范化数值，allocator 命令绝不会被固化。可用
+`bk service show worker` 检查；任一路径或覆盖项变化后使用 `--force` 重新安装。
+同一 UID 的所有 worker 必须使用同一个私有目录，使租约只有一个权威位置。没有被
+固化覆盖的策略会在每次服务启动时从选定配置文件重新读取；共享部署应优先使用可信
+配置文件，而不是依赖 shell 环境变量。
 worker 持久启动失败在 60 秒内最多重试 3 次；普通子任务失败只写入任务状态，不会让
 长驻 worker 退出。
 
@@ -325,8 +328,9 @@ sudo loginctl enable-linger <monitor账号>
 共享服务器只能运行一个受信任的 monitor 写入者，不能每个用户各启一个；每位用户的
 worker 仍然相互独立。上述用户 monitor 服务适合私人服务器，或 `monitor_uid` 指定的
 唯一账号。
-生成的 unit 会固化共享数据目录和显式可信配置路径；服务每次启动都会从该配置重新读取
-采样与聚合周期。重复写入者（`75`）或角色不匹配（`77`）不会重启；其他失败在 60 秒
+生成的 unit 会固化共享数据目录、显式可信配置路径，以及安装时启用的非敏感配置覆盖；
+未被固化的采样与聚合周期会在服务每次启动时从该配置重新读取。重复写入者（`75`）或
+角色不匹配（`77`）不会重启；其他失败在 60 秒
 内最多重试 3 次，既允许短暂故障自愈，也不会无限刷日志。
 上面的最后一条命令是只读的启动后验收；与部署预检不同，如果从未记录过 collector
 心跳，它会明确失败。

@@ -102,8 +102,8 @@ class BundledSystemdTests(unittest.TestCase):
             config_file=Path("relative-config/config.json"),
         )
 
-        worker = service_environment(config, "worker")
-        monitor = service_environment(config, "monitor")
+        worker = service_environment(config, "worker", process_environment={})
+        monitor = service_environment(config, "monitor", process_environment={})
 
         self.assertEqual(worker["BK_DATA_DIR"], str(Path("relative-data").absolute()))
         self.assertEqual(
@@ -118,8 +118,47 @@ class BundledSystemdTests(unittest.TestCase):
         )
         self.assertNotIn("BK_JOB_LOG_DIR", monitor)
 
-        defaults = service_environment(Config(data_dir=Path("relative-data")), "monitor")
+        defaults = service_environment(
+            Config(data_dir=Path("relative-data")),
+            "monitor",
+            process_environment={},
+        )
         self.assertNotIn("BK_CONFIG_FILE", defaults)
+
+    def test_service_environment_captures_only_explicit_nonsecret_config_overrides(self):
+        config = Config(
+            data_dir=Path("relative-data"),
+            gpu_count=8,
+            max_shared_users=4,
+            worker_max_parallel=20,
+            worker_poll_seconds=1.0,
+            worker_live_guard=False,
+            file_mode=0o660,
+        )
+        environment = service_environment(
+            config,
+            "worker",
+            process_environment={
+                "BK_GPU_COUNT": "08",
+                "BK_MAX_SHARED_USERS": "4",
+                "BK_WORKER_MAX_PARALLEL": "20",
+                "BK_WORKER_POLL_SECONDS": "1.000",
+                "BK_WORKER_LIVE_GUARD": "no",
+                "BK_FILE_MODE": "0o660",
+                "BK_ALLOCATOR_COMMAND": "allocator --token secret-value",
+                "BK_MONITOR_UID": "9999",
+            },
+        )
+
+        self.assertEqual(environment["BK_GPU_COUNT"], "8")
+        self.assertEqual(environment["BK_MAX_SHARED_USERS"], "4")
+        self.assertEqual(environment["BK_WORKER_MAX_PARALLEL"], "20")
+        self.assertEqual(environment["BK_WORKER_POLL_SECONDS"], "1")
+        self.assertEqual(environment["BK_WORKER_LIVE_GUARD"], "false")
+        self.assertEqual(environment["BK_FILE_MODE"], "0660")
+        self.assertNotIn("BK_ALLOCATOR_COMMAND", environment)
+        self.assertNotIn("BK_MONITOR_UID", environment)
+        self.assertNotIn("secret-value", unit_text("worker", environment=environment))
 
     def test_unit_rejects_control_characters_in_environment(self):
         with self.assertRaisesRegex(BookingError, "control character"):

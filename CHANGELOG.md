@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Preserve explicitly active, non-secret `BK_*` configuration overrides in generated systemd
+  units so unattended monitor and worker services cannot silently revert to defaults or hit a
+  ledger-policy mismatch after the installing shell exits.
 - Let the scheduled-command worker run legal same-GPU shared reservations concurrently instead
   of serializing them by physical GPU count, with a configurable safety cap and topology-bounded
   effective limit exposed to operators and Agents.

@@ -8,7 +8,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Mapping, Optional
 
-from .config import Config
+from .config import CONFIG_ENV_MAP, Config
 from .fileio import ensure_directory, fsync_directory
 from .models import BookingError
 
@@ -79,8 +79,14 @@ def install_user_unit(
     return destination
 
 
-def service_environment(config: Config, kind: str) -> dict[str, str]:
+def service_environment(
+    config: Config,
+    kind: str,
+    *,
+    process_environment: Optional[Mapping[str, str]] = None,
+) -> dict[str, str]:
     _unit_filename(kind)
+    source_environment = os.environ if process_environment is None else process_environment
     environment = {
         "BK_DATA_DIR": str(_absolute_path(config.data_dir)),
         "PYTHONUNBUFFERED": "1",
@@ -89,6 +95,9 @@ def service_environment(config: Config, kind: str) -> dict[str, str]:
         environment["BK_CONFIG_FILE"] = str(_absolute_path(config.config_file))
     if kind == "worker" and config.job_log_dir is not None:
         environment["BK_JOB_LOG_DIR"] = str(_absolute_path(config.job_log_dir))
+    for key, name in CONFIG_ENV_MAP.items():
+        if name in source_environment:
+            environment[name] = _config_environment_value(key, getattr(config, key))
     return environment
 
 
@@ -118,3 +127,13 @@ def _systemd_environment_line(name: str, value: str) -> str:
 
 def _absolute_path(path: Path) -> Path:
     return Path(os.path.abspath(os.fspath(path.expanduser())))
+
+
+def _config_environment_value(key: str, value: object) -> str:
+    if key in {"file_mode", "dir_mode"}:
+        return f"{int(value):04o}"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float):
+        return format(value, ".15g")
+    return str(value)
