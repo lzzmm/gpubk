@@ -243,7 +243,11 @@ def edit_booking(store: LedgerStore, config: Config, request: EditRequest) -> Bo
         if isinstance(job, dict) and job.get("status") != JOB_PENDING:
             raise BookingError(f"cannot edit reservation after job entered {job.get('status')} state")
 
-        mode = request.mode or reservation.get("mode", MODE_SHARED)
+        mode = (
+            request.mode
+            if request.mode is not None
+            else reservation.get("mode", MODE_SHARED)
+        )
         if mode not in {MODE_SHARED, MODE_EXCLUSIVE}:
             raise BookingError(f"unsupported booking mode: {mode}")
         expected_memory_mb = _normalize_expected_memory(
@@ -276,8 +280,21 @@ def edit_booking(store: LedgerStore, config: Config, request: EditRequest) -> Bo
         current_end = parse_iso(reservation["end_at"])
         if current_start <= now:
             raise BookingError("cannot edit a reservation after it has started")
-        start = (request.start_at or current_start).astimezone(timezone.utc).replace(microsecond=0)
-        duration_seconds = request.duration_seconds or int((current_end - current_start).total_seconds())
+        requested_start = (
+            request.start_at if request.start_at is not None else current_start
+        )
+        start = requested_start.astimezone(timezone.utc).replace(microsecond=0)
+        if request.start_at is not None and start < now:
+            earliest = ceil_to_slot(now, config.slot_minutes).astimezone()
+            raise BookingError(
+                "edit start must not be in the past; "
+                f"earliest editable slot is {earliest:%Y-%m-%d %H:%M %Z}"
+            )
+        duration_seconds = (
+            request.duration_seconds
+            if request.duration_seconds is not None
+            else int((current_end - current_start).total_seconds())
+        )
         if duration_seconds <= 0:
             raise BookingError("duration must be positive")
         _validate_duration_granularity(duration_seconds, config.slot_minutes)
@@ -294,7 +311,15 @@ def edit_booking(store: LedgerStore, config: Config, request: EditRequest) -> Bo
         preferred = _normalize_preferred_gpus(request.preferred_gpus) if request.preferred_gpus is not None else None
         if preferred is None and request.count is None:
             preferred = _normalize_preferred_gpus(reservation.get("gpus", []))
-        count = request.count or (len(preferred) if preferred is not None else len(reservation.get("gpus", [])))
+        count = (
+            request.count
+            if request.count is not None
+            else (
+                len(preferred)
+                if preferred is not None
+                else len(reservation.get("gpus", []))
+            )
+        )
         if count < 1:
             raise BookingError("GPU count must be >= 1")
         if preferred is not None:

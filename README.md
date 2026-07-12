@@ -128,8 +128,11 @@ resolution.
 
 `bk add` and a flag-free `bk edit ID` are recoverable guided flows. They accept
 the same natural time forms, re-prompt an invalid field, support `back` and
-`cancel`, and show a local-time change summary before writing. `bk slots` is
-read-only and prints a copyable command for its first option.
+`cancel`, and show a local-time change summary before writing. An edit cannot
+target a reservation that has started or supply a start in the past. `--queue`
+may resolve a resource conflict after a valid start, but never repairs an
+invalid past time. `bk slots` is read-only and prints a copyable command for its
+first option.
 
 ## Terminal Interfaces
 

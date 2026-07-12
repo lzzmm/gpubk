@@ -84,7 +84,7 @@ read-only; create and edit are idempotent writes because they require operation 
 destructive and non-idempotent; private-spec cleanup is destructive but idempotent; all tools are
 closed-world local operations.
 
-An operation ID identifies one immutable write intent for the current UID. Exact retries return `status=exists`; reusing that ID with another reservation or different fields returns a structured error. Edit start times remain exact unless `allow_queue=true` is explicitly supplied.
+An operation ID identifies one immutable write intent for the current UID. Exact retries return `status=exists`; reusing that ID with another reservation or different fields returns a structured error. Started reservations and explicit edit starts in the past are rejected. A valid edit start remains exact unless `allow_queue=true` is explicitly supplied to resolve a resource conflict.
 Each retained reservation keeps at most 256 idempotent edit intents so malformed automation cannot grow one hot record without bound. Recreate an unusually long-lived reservation before exceeding that limit.
 
 ## External Allocator

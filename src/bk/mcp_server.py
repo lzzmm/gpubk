@@ -456,7 +456,7 @@ def create_mcp_server(backend: Optional[BkMcpBackend] = None):
         share: Optional[str] = None,
         share_with: Optional[int] = None,
     ) -> dict[str, object]:
-        """Idempotently edit this UID's booking; exact starts never move unless allow_queue is true."""
+        """Idempotently edit this UID's future booking; queue never repairs past starts."""
         return api.edit(
             reservation_id=reservation_id,
             operation_id=operation_id,

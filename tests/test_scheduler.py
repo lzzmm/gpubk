@@ -431,6 +431,58 @@ class SchedulerModeTests(unittest.TestCase):
 
         self.assertEqual(self.store.load(), before)
 
+    def test_queued_edit_does_not_silently_move_an_explicit_past_start(self):
+        actor = Actor(uid=1001, username="user1001")
+        created = add_booking(self.store, self.config, self.request(actor.uid, MODE_SHARED))
+        now = self.start - timedelta(minutes=30)
+        before = self.store.load()
+
+        with mock.patch("bk.scheduler.utc_now", return_value=now):
+            with self.assertRaisesRegex(
+                BookingError,
+                "earliest editable slot",
+            ):
+                edit_booking(
+                    self.store,
+                    self.config,
+                    EditRequest(
+                        actor=actor,
+                        reservation_id=created.reservation["id"],
+                        start_at=now - timedelta(minutes=5),
+                        allow_queue=True,
+                    ),
+                )
+
+        self.assertEqual(self.store.load(), before)
+
+    def test_edit_rejects_explicit_zero_duration_and_gpu_count(self):
+        actor = Actor(uid=1001, username="user1001")
+        created = add_booking(self.store, self.config, self.request(actor.uid, MODE_SHARED))
+        before = self.store.load()
+
+        for request, message in (
+            (
+                EditRequest(
+                    actor=actor,
+                    reservation_id=created.reservation["id"],
+                    duration_seconds=0,
+                ),
+                "duration must be positive",
+            ),
+            (
+                EditRequest(
+                    actor=actor,
+                    reservation_id=created.reservation["id"],
+                    count=0,
+                ),
+                "GPU count must be >= 1",
+            ),
+        ):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(BookingError, message):
+                    edit_booking(self.store, self.config, request)
+                self.assertEqual(self.store.load(), before)
+
     def test_preferred_gpu_queues_on_that_gpu_while_auto_can_choose_another(self):
         config = Config(data_dir=Path(self.tmp.name), gpu_count=2, max_shared_users=2)
         store = LedgerStore(config.data_dir)

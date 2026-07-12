@@ -102,6 +102,24 @@ class McpBackendTests(unittest.TestCase):
         with self.assertRaisesRegex(BookingError, "different write"):
             self.backend.edit(short_id, "mcp-edit-1", duration="50m", expected_memory="8g")
 
+    def test_edit_rejects_zero_gpu_count_instead_of_treating_it_as_unchanged(self):
+        created = self.backend.book(
+            1,
+            "30m",
+            "mcp-create-for-zero-count-edit",
+            start="2030-01-01T12:00:00Z",
+        )
+        before = self.store.load()
+
+        with self.assertRaisesRegex(BookingError, "GPU count must be >= 1"):
+            self.backend.edit(
+                created["reservation"]["short_id"],
+                "mcp-zero-count-edit",
+                count=0,
+            )
+
+        self.assertEqual(self.store.load(), before)
+
     def test_command_arguments_remain_private_when_submitted_through_mcp(self):
         secret = "mcp-secret-token"
 
