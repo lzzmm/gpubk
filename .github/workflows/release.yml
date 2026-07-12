@@ -54,9 +54,15 @@ jobs:
               echo "tag releases require a final version, not $version" >&2
               exit 1
             fi
-            git fetch --no-tags origin main:refs/remotes/origin/main
-            if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
-              echo "tagged commit must be contained in origin/main" >&2
+            if [[ "$(git cat-file -t "$GITHUB_REF")" != "tag" ]]; then
+              echo "production releases require an annotated tag" >&2
+              exit 1
+            fi
+            git fetch --no-tags --force origin main:refs/remotes/origin/main
+            tagged_commit=$(git rev-parse "${GITHUB_REF}^{commit}")
+            main_commit=$(git rev-parse "refs/remotes/origin/main^{commit}")
+            if [[ "$tagged_commit" != "$main_commit" ]]; then
+              echo "tagged commit must equal the current origin/main tip" >&2
               exit 1
             fi
             escaped_version=${version//./\\.}

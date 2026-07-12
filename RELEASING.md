@@ -76,11 +76,17 @@ replacing an uploaded file.
    git push origin "v$VERSION"
    ```
 
+   Do not merge another change before the tag workflow starts. Production
+   release tags must be annotated and point exactly at the current
+   `origin/main` tip; an older commit that merely exists in main history is
+   rejected.
+
 10. The `Release` workflow rebuilds and tests the tag, uploads that artifact to TestPyPI, and installs it back from TestPyPI. Only then does the protected `pypi` environment request approval to promote the exact same wheel and sdist.
 11. Approve `pypi` and wait for the PyPI installation smoke test. Download the exact workflow artifact, verify its hashes against PyPI, create a draft GitHub Release for the same tag, attach the wheel and sdist, then publish the draft. Never rebuild an artifact locally for promotion. Release immutability locks the published tag and assets and creates a release attestation.
 
-The workflow rejects a tag that is a prerelease, does not match the package,
-is not contained in `main`, or still has an `Unreleased` changelog heading. It
+The workflow rejects a tag that is lightweight, points anywhere other than the
+current `main` tip, is a prerelease, does not match the package, or still has an
+`Unreleased` changelog heading. It
 also rejects an already-existing TestPyPI or PyPI version before requesting an
 upload. Production publication therefore always starts from a new final-version
 tag; manual dispatch remains the prerelease-only TestPyPI path.
