@@ -2055,7 +2055,6 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"
             log_dir = Path(tmp) / "job-logs"
-            start = iso(ceil_5m(datetime.now(timezone.utc)) - timedelta(minutes=5))
             env = {
                 "BK_JOB_LOG_DIR": str(log_dir),
                 "BK_WORKER_LIVE_GUARD": "0",
@@ -2064,8 +2063,6 @@ class CliTests(unittest.TestCase):
                 [
                     "1",
                     "10m",
-                    "--start",
-                    start,
                     "--",
                     sys.executable,
                     "-c",
