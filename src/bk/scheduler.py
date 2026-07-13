@@ -90,8 +90,18 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
             applied = _find_applied_operation(ledger, request.actor.uid, op_id)
             if applied is not None:
                 action, existing, existing_signature = applied
-                if action != "create" or (
-                    existing_signature is not None and existing_signature != operation_signature
+                if (
+                    action != "create"
+                    or (
+                        existing_signature is not None
+                        and existing_signature != operation_signature
+                    )
+                    or not _same_request_metadata(
+                        existing,
+                        expected_memory_mb,
+                        job_metadata,
+                        share_units,
+                    )
                 ):
                     raise BookingError("operation ID was already used for a different write")
                 return ledger, BookingResult(existing, False, "operation already applied"), [], changed

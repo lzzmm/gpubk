@@ -73,6 +73,11 @@ Supported security boundaries:
 - Durable writes fsync both file contents and the containing directory. Directory-sync
   errors are never silently ignored: a valid WAL remains for idempotent deferred recovery,
   while telemetry, private job files, and service installation fail visibly.
+- Private command specs are created, opened, scanned, and removed relative to validated
+  UID-owned directory descriptors. Partial writes are removed on interrupts, linked aliases are
+  rejected, and ambiguous booking rollback rereads the recoverable ledger before deleting only an
+  unreferenced spec. Operation-ID retries compare the private command digest, not just its public
+  summary; raw command arguments remain outside the shared ledger.
 - Trusted configuration can live outside the writable ledger through the automatically
   discovered `/etc/gpubk/config.json` or an explicit `BK_CONFIG_FILE`. GPUbk canonicalizes
   its parent, pins every directory component and the leaf by file descriptor, rejects

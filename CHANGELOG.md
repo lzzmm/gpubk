@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Pin private scheduled-command spec creation, reads, and deletion to validated UID-owned
+  directory descriptors; remove partial files on process interrupts, reject linked aliases, and
+  recheck the recovered ledger before rollback so an ambiguous interruption cannot delete a
+  committed command. Idempotent operation IDs now also verify the stable private-command digest.
 - Validate ledger policy before edit-time allocator invocation, and terminate the allocator's
   isolated process group on interrupts as well as ordinary errors and timeouts so rejected edits
   and Ctrl+C cannot leave external side effects running.

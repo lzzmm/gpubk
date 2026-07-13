@@ -294,8 +294,15 @@ expired retry window. The worker checks them at startup, after shutdown, and at
 most every five minutes while running. A spec with no ledger reference gets a
 24-hour grace period so cleanup cannot race a concurrent booking. Failed,
 interrupted, uncertain, pending, claimed, and running jobs keep their specs
-while they can still run or be retried. `bk jobs --cleanup --json` exposes the
-same cleanup as a machine-readable operation. Private job logs are deliberately
+while they can still run or be retried. Creation, execution-time reads, and
+deletion stay pinned to validated UID-owned private directory descriptors;
+symbolic links and hard-linked spec files are rejected. An interrupted write
+removes its partial file. If booking completion is ambiguous, GPUbk first
+recovers and rereads the ledger, then removes only a spec that has no committed
+reference. A stable operation ID also binds the full command digest and working
+directory without putting command arguments in the shared ledger. `bk jobs
+--cleanup --json` exposes the same cleanup as a machine-readable operation.
+Private job logs are deliberately
 kept outside shared data. Direct stdout/stderr is drained through a two-segment
 rolling log capped at 64 MiB per job by default. Terminal logs are kept for 30
 days and oldest terminal logs are pruned if this UID exceeds 4 GiB. Active and

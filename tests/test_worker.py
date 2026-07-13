@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,6 +26,7 @@ from bk.timeparse import utc_now
 from bk.worker import (
     cleanup_job_specs,
     claim_due_jobs,
+    delete_job_spec,
     job_log_path,
     job_spec_path,
     prepare_job_spec,
@@ -68,7 +70,11 @@ class ScheduledJobTests(unittest.TestCase):
             spec = prepare_job_spec(self.config, actor, command, str(self.work_dir))
             spec_id, digest, summary = spec.spec_id, spec.digest, spec.summary
         else:
-            spec_id, digest, summary = "00000000-0000-0000-0000-000000000001", "0" * 64, "private job"
+            spec_id, digest, summary = (
+                "00000000-0000-0000-0000-000000000001",
+                "0" * 64,
+                "private job",
+            )
         return add_booking(
             self.store,
             self.config,
@@ -94,7 +100,9 @@ class ScheduledJobTests(unittest.TestCase):
         mine = self.booking(command=command)
         other = self.booking(actor=Actor(self.actor.uid + 1, "other"))
 
-        summary = run_worker(self.config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True)
+        summary = run_worker(
+            self.config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True
+        )
 
         ledger = self.store.load()
         by_id = {item["id"]: item for item in ledger["reservations"]}
@@ -151,21 +159,25 @@ class ScheduledJobTests(unittest.TestCase):
             self.store.transaction(mutate)
             return RecoverySummary()
 
-        with mock.patch(
-            "bk.worker.recover_abandoned_jobs", side_effect=drift_policy
-        ), mock.patch("bk.worker.claim_due_jobs") as claim:
+        with (
+            mock.patch("bk.worker.recover_abandoned_jobs", side_effect=drift_policy),
+            mock.patch("bk.worker.claim_due_jobs") as claim,
+        ):
             with self.assertRaisesRegex(DaemonPolicyError, "worker configuration"):
                 run_worker(self.config, self.store, self.actor, once=True, quiet=True)
 
         claim.assert_not_called()
 
     def test_cleanup_policy_error_does_not_mask_original_worker_failure(self):
-        with mock.patch(
-            "bk.worker.recover_abandoned_jobs",
-            side_effect=OSError("original worker failure"),
-        ), mock.patch(
-            "bk.worker._cleanup_job_specs_best_effort",
-            side_effect=DaemonPolicyError("cleanup policy drift"),
+        with (
+            mock.patch(
+                "bk.worker.recover_abandoned_jobs",
+                side_effect=OSError("original worker failure"),
+            ),
+            mock.patch(
+                "bk.worker._cleanup_job_specs_best_effort",
+                side_effect=DaemonPolicyError("cleanup policy drift"),
+            ),
         ):
             with self.assertRaisesRegex(OSError, "original worker failure"):
                 run_worker(self.config, self.store, self.actor, once=True, quiet=True)
@@ -189,8 +201,7 @@ class ScheduledJobTests(unittest.TestCase):
             return [sys.executable, "-c", script]
 
         reservations = [
-            self.booking(command=rendezvous_command(index))
-            for index in range(expected)
+            self.booking(command=rendezvous_command(index)) for index in range(expected)
         ]
 
         summary = run_worker(
@@ -207,7 +218,10 @@ class ScheduledJobTests(unittest.TestCase):
         self.assertEqual(summary.started, expected)
         self.assertEqual(summary.succeeded, expected)
         self.assertTrue(
-            all(by_id[reservation["id"]]["job"]["status"] == "succeeded" for reservation in reservations)
+            all(
+                by_id[reservation["id"]]["job"]["status"] == "succeeded"
+                for reservation in reservations
+            )
         )
 
     def test_worker_uses_configured_parallel_cap_unless_cli_overrides_it(self):
@@ -219,10 +233,13 @@ class ScheduledJobTests(unittest.TestCase):
         )
         cases = ((None, 3), (7, 7))
         for override, expected in cases:
-            with self.subTest(override=override), mock.patch(
-                "bk.worker.claim_due_jobs",
-                return_value=[],
-            ) as claim:
+            with (
+                self.subTest(override=override),
+                mock.patch(
+                    "bk.worker.claim_due_jobs",
+                    return_value=[],
+                ) as claim,
+            ):
                 run_worker(
                     config,
                     self.store,
@@ -281,10 +298,13 @@ class ScheduledJobTests(unittest.TestCase):
         child_pid = None
         try:
             started = time.monotonic()
-            with mock.patch(
-                "bk.worker._reconcile_running",
-                side_effect=fail_after_child_is_ready,
-            ), self.assertRaisesRegex(OSError, "simulated ledger outage"):
+            with (
+                mock.patch(
+                    "bk.worker._reconcile_running",
+                    side_effect=fail_after_child_is_ready,
+                ),
+                self.assertRaisesRegex(OSError, "simulated ledger outage"),
+            ):
                 run_worker(
                     config,
                     self.store,
@@ -335,6 +355,7 @@ class ScheduledJobTests(unittest.TestCase):
             nonlocal drifted
             running = args[2]
             if not drifted and running and pid_path.exists():
+
                 def mutate(ledger):
                     ledger["policy"]["max_shared_reservations_per_gpu"] = 9
                     return ledger, None, [], True
@@ -345,10 +366,13 @@ class ScheduledJobTests(unittest.TestCase):
 
         child_pid = None
         try:
-            with mock.patch(
-                "bk.worker._reconcile_running",
-                side_effect=drift_after_child_is_ready,
-            ), self.assertRaisesRegex(DaemonPolicyError, "worker configuration"):
+            with (
+                mock.patch(
+                    "bk.worker._reconcile_running",
+                    side_effect=drift_after_child_is_ready,
+                ),
+                self.assertRaisesRegex(DaemonPolicyError, "worker configuration"),
+            ):
                 run_worker(
                     config,
                     self.store,
@@ -384,17 +408,23 @@ class ScheduledJobTests(unittest.TestCase):
             ]
         )
 
-        summary = run_worker(config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True)
+        summary = run_worker(
+            config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True
+        )
 
         paths = job_log_paths(config, reservation["id"])
         self.assertEqual(summary.succeeded, 1)
         self.assertEqual(len(paths), 2)
         self.assertLessEqual(sum(path.stat().st_size for path in paths), MIB)
-        self.assertTrue(read_job_log_tail(config, reservation["id"], 64).endswith("TAIL-MARKER\n"))
+        self.assertTrue(
+            read_job_log_tail(config, reservation["id"], 64).endswith("TAIL-MARKER\n")
+        )
 
     def test_worker_tracks_same_process_group_children_after_the_leader_exits(self):
         marker = self.work_dir / "child-finished"
-        child_code = f"import time; time.sleep(0.4); open({str(marker)!r}, 'w').write('done')"
+        child_code = (
+            f"import time; time.sleep(0.4); open({str(marker)!r}, 'w').write('done')"
+        )
         self.booking(
             command=[
                 sys.executable,
@@ -404,7 +434,9 @@ class ScheduledJobTests(unittest.TestCase):
         )
 
         started = time.monotonic()
-        summary = run_worker(self.config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True)
+        summary = run_worker(
+            self.config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True
+        )
 
         self.assertEqual(summary.succeeded, 1)
         self.assertTrue(marker.exists())
@@ -419,15 +451,23 @@ class ScheduledJobTests(unittest.TestCase):
         target.write_text("safe", encoding="utf-8")
         job_log_path(self.config, reservation["id"]).symlink_to(target)
 
-        summary = run_worker(self.config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True)
+        summary = run_worker(
+            self.config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True
+        )
 
-        stored = next(item for item in self.store.load()["reservations"] if item["id"] == reservation["id"])
+        stored = next(
+            item
+            for item in self.store.load()["reservations"]
+            if item["id"] == reservation["id"]
+        )
         self.assertEqual(summary.failed, 1)
         self.assertEqual(stored["job"]["status"], "failed")
         self.assertFalse(marker.exists())
         self.assertEqual(target.read_text(encoding="utf-8"), "safe")
 
-    @unittest.skipUnless(Path("/proc").is_dir(), "Linux /proc is required for crash recovery")
+    @unittest.skipUnless(
+        Path("/proc").is_dir(), "Linux /proc is required for crash recovery"
+    )
     def test_new_worker_terminates_process_group_left_by_crashed_worker(self):
         reservation = self.booking(
             command=[sys.executable, "-c", "import time; time.sleep(30)"]
@@ -468,7 +508,16 @@ class ScheduledJobTests(unittest.TestCase):
             os.kill(child_pid, 0)
 
             recovered = subprocess.run(
-                [sys.executable, "-m", "bk", "worker", "--once", "--quiet", "--poll", "0.1"],
+                [
+                    sys.executable,
+                    "-m",
+                    "bk",
+                    "worker",
+                    "--once",
+                    "--quiet",
+                    "--poll",
+                    "0.1",
+                ],
                 cwd=project_root,
                 env=env,
                 stdout=subprocess.PIPE,
@@ -565,7 +614,9 @@ class ScheduledJobTests(unittest.TestCase):
         )
 
         waiting = next(
-            item for item in self.store.load()["reservations"] if item["id"] == reservation["id"]
+            item
+            for item in self.store.load()["reservations"]
+            if item["id"] == reservation["id"]
         )
         self.assertEqual(first.waiting, 1)
         self.assertEqual(second.waiting, 1)
@@ -587,7 +638,9 @@ class ScheduledJobTests(unittest.TestCase):
         )
 
         stored = next(
-            item for item in self.store.load()["reservations"] if item["id"] == reservation["id"]
+            item
+            for item in self.store.load()["reservations"]
+            if item["id"] == reservation["id"]
         )
         self.assertEqual(launched.succeeded, 1)
         self.assertEqual(stored["job"]["status"], "succeeded")
@@ -665,31 +718,49 @@ class ScheduledJobTests(unittest.TestCase):
         )
         self.assertEqual(summary.failed, 1)
         self.assertEqual(stored["job"]["status"], "failed")
-        self.assertEqual(stored["job"]["message"], "scheduled command validation failed")
+        self.assertEqual(
+            stored["job"]["message"], "scheduled command validation failed"
+        )
         self.assertFalse(marker.exists())
 
     def test_launch_failure_is_persisted_without_shell_fallback(self):
         marker = self.work_dir / "must-not-exist"
         reservation = self.booking(command=[f"missing-command;touch {marker}"])
 
-        summary = run_worker(self.config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True)
+        summary = run_worker(
+            self.config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True
+        )
 
-        stored = next(item for item in self.store.load()["reservations"] if item["id"] == reservation["id"])
+        stored = next(
+            item
+            for item in self.store.load()["reservations"]
+            if item["id"] == reservation["id"]
+        )
         self.assertEqual(summary.failed, 1)
         self.assertEqual(stored["job"]["status"], "failed")
         self.assertFalse(marker.exists())
-        self.assertTrue(job_spec_path(self.config, reservation["job"]["spec_id"]).exists())
+        self.assertTrue(
+            job_spec_path(self.config, reservation["job"]["spec_id"]).exists()
+        )
 
     def test_launch_failure_keeps_private_paths_out_of_the_shared_ledger(self):
         secret = "private-launch-path-token"
         missing = self.work_dir / secret / "missing-command"
         reservation = self.booking(command=[str(missing)])
 
-        run_worker(self.config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True)
+        run_worker(
+            self.config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True
+        )
 
         ledger_text = self.store.ledger_path.read_text(encoding="utf-8")
-        stored = next(item for item in self.store.load()["reservations"] if item["id"] == reservation["id"])
-        private_log = job_log_path(self.config, reservation["id"]).read_text(encoding="utf-8")
+        stored = next(
+            item
+            for item in self.store.load()["reservations"]
+            if item["id"] == reservation["id"]
+        )
+        private_log = job_log_path(self.config, reservation["id"]).read_text(
+            encoding="utf-8"
+        )
         self.assertNotIn(secret, ledger_text)
         self.assertEqual(
             stored["job"]["message"],
@@ -699,16 +770,24 @@ class ScheduledJobTests(unittest.TestCase):
 
     def test_cancelled_pending_job_is_never_executed(self):
         marker = self.work_dir / "not-run"
-        reservation = self.booking(command=[sys.executable, "-c", f"open({str(marker)!r}, 'w').write('bad')"])
+        reservation = self.booking(
+            command=[sys.executable, "-c", f"open({str(marker)!r}, 'w').write('bad')"]
+        )
         cancel_booking(self.store, reservation["id"], self.actor)
 
-        summary = run_worker(self.config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True)
+        summary = run_worker(
+            self.config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True
+        )
 
         self.assertEqual(summary.started, 0)
         self.assertFalse(marker.exists())
-        self.assertFalse(job_spec_path(self.config, reservation["job"]["spec_id"]).exists())
+        self.assertFalse(
+            job_spec_path(self.config, reservation["job"]["spec_id"]).exists()
+        )
 
-    def test_cancellation_after_claim_prevents_popen_and_is_not_counted_as_failure(self):
+    def test_cancellation_after_claim_prevents_popen_and_is_not_counted_as_failure(
+        self,
+    ):
         marker = self.work_dir / "claim-race-must-not-run"
         reservation = self.booking(
             command=[sys.executable, "-c", f"open({str(marker)!r}, 'w').write('bad')"]
@@ -718,7 +797,9 @@ class ScheduledJobTests(unittest.TestCase):
             cancel_booking(store, reservation_id, actor)
             return False
 
-        with mock.patch("bk.worker._claim_is_launchable", side_effect=cancel_before_launch):
+        with mock.patch(
+            "bk.worker._claim_is_launchable", side_effect=cancel_before_launch
+        ):
             summary = run_worker(
                 self.config,
                 self.store,
@@ -728,14 +809,20 @@ class ScheduledJobTests(unittest.TestCase):
                 quiet=True,
             )
 
-        stored = next(item for item in self.store.load()["reservations"] if item["id"] == reservation["id"])
+        stored = next(
+            item
+            for item in self.store.load()["reservations"]
+            if item["id"] == reservation["id"]
+        )
         self.assertFalse(marker.exists())
         self.assertEqual(summary.cancelled, 1)
         self.assertEqual(summary.failed, 0)
         self.assertEqual(stored["job"]["status"], "cancelled")
 
     def test_running_job_is_terminated_at_reservation_deadline(self):
-        reservation = self.booking(command=[sys.executable, "-c", "import time; time.sleep(30)"])
+        reservation = self.booking(
+            command=[sys.executable, "-c", "import time; time.sleep(30)"]
+        )
         clock = {"now": utc_now()}
         deadline = datetime.fromisoformat(reservation["end_at"].replace("Z", "+00:00"))
         mark_running = worker_module._mark_running
@@ -748,7 +835,9 @@ class ScheduledJobTests(unittest.TestCase):
 
         with (
             mock.patch("bk.worker.utc_now", side_effect=lambda: clock["now"]),
-            mock.patch("bk.worker._mark_running", side_effect=mark_running_then_cross_deadline),
+            mock.patch(
+                "bk.worker._mark_running", side_effect=mark_running_then_cross_deadline
+            ),
         ):
             summary = run_worker(
                 self.config,
@@ -759,12 +848,20 @@ class ScheduledJobTests(unittest.TestCase):
                 quiet=True,
             )
 
-        stored = next(item for item in self.store.load()["reservations"] if item["id"] == reservation["id"])
+        stored = next(
+            item
+            for item in self.store.load()["reservations"]
+            if item["id"] == reservation["id"]
+        )
         self.assertEqual(summary.failed, 1)
         self.assertEqual(stored["job"]["status"], "timed-out")
-        self.assertFalse(job_spec_path(self.config, reservation["job"]["spec_id"]).exists())
+        self.assertFalse(
+            job_spec_path(self.config, reservation["job"]["spec_id"]).exists()
+        )
 
-    def test_deadline_kills_a_real_process_that_ignores_term_without_post_window_grace(self):
+    def test_deadline_kills_a_real_process_that_ignores_term_without_post_window_grace(
+        self,
+    ):
         marker = self.work_dir / "term-handler-ready"
         reservation = self.booking(
             command=[
@@ -789,7 +886,9 @@ class ScheduledJobTests(unittest.TestCase):
                 ready_by = time.monotonic() + 3.0
                 while not marker.exists() and time.monotonic() < ready_by:
                     time.sleep(0.01)
-                self.assertTrue(marker.exists(), "child did not install its TERM handler")
+                self.assertTrue(
+                    marker.exists(), "child did not install its TERM handler"
+                )
                 clock["now"] = deadline
             return marked
 
@@ -821,7 +920,9 @@ class ScheduledJobTests(unittest.TestCase):
         self.assertEqual(stored["job"]["status"], "timed-out")
 
     def test_worker_gives_grace_before_deadline_and_kills_at_deadline(self):
-        reservation = self.booking(command=[sys.executable, "-c", "import time; time.sleep(30)"])
+        reservation = self.booking(
+            command=[sys.executable, "-c", "import time; time.sleep(30)"]
+        )
         deadline = datetime.fromisoformat(reservation["end_at"].replace("Z", "+00:00"))
         process = mock.Mock(pid=424242)
         process.poll.return_value = None
@@ -862,7 +963,9 @@ class ScheduledJobTests(unittest.TestCase):
             kill.assert_called_once_with(process)
 
     def test_cancelled_job_uses_configured_termination_grace(self):
-        reservation = self.booking(command=[sys.executable, "-c", "import time; time.sleep(30)"])
+        reservation = self.booking(
+            command=[sys.executable, "-c", "import time; time.sleep(30)"]
+        )
         cancel_booking(self.store, reservation["id"], self.actor)
         deadline = datetime.fromisoformat(reservation["end_at"].replace("Z", "+00:00"))
         process = mock.Mock(pid=434343)
@@ -947,7 +1050,11 @@ class ScheduledJobTests(unittest.TestCase):
             limit=1,
         )
 
-        stored = next(item for item in self.store.load()["reservations"] if item["id"] == reservation["id"])
+        stored = next(
+            item
+            for item in self.store.load()["reservations"]
+            if item["id"] == reservation["id"]
+        )
         self.assertEqual(second, [])
         self.assertEqual(stored["job"]["status"], "uncertain")
 
@@ -960,13 +1067,19 @@ class ScheduledJobTests(unittest.TestCase):
             accept_duplicate_risk=True,
         )
         self.assertEqual(retried["job"]["status"], "pending")
-        self.assertTrue(job_spec_path(self.config, reservation["job"]["spec_id"]).exists())
+        self.assertTrue(
+            job_spec_path(self.config, reservation["job"]["spec_id"]).exists()
+        )
 
     def test_new_worker_waits_for_active_prelease_job_instead_of_claiming_more(self):
         reservation = self.booking()
 
         def mark_legacy_running(ledger):
-            item = next(value for value in ledger["reservations"] if value["id"] == reservation["id"])
+            item = next(
+                value
+                for value in ledger["reservations"]
+                if value["id"] == reservation["id"]
+            )
             item["job"]["status"] = "running"
             item["job"].pop("worker_lease_id", None)
             return ledger, None, [], True
@@ -975,7 +1088,11 @@ class ScheduledJobTests(unittest.TestCase):
 
         summary = run_worker(self.config, self.store, self.actor, once=True, quiet=True)
 
-        stored = next(item for item in self.store.load()["reservations"] if item["id"] == reservation["id"])
+        stored = next(
+            item
+            for item in self.store.load()["reservations"]
+            if item["id"] == reservation["id"]
+        )
         self.assertEqual(summary.started, 0)
         self.assertEqual(summary.waiting, 1)
         self.assertEqual(stored["job"]["status"], "running")
@@ -1012,7 +1129,9 @@ class ScheduledJobTests(unittest.TestCase):
         self.assertEqual(result.failed, 1)
         self.assertIn("missing", result.warnings[0])
         stored = next(
-            item for item in self.store.load()["reservations"] if item["id"] == reservation["id"]
+            item
+            for item in self.store.load()["reservations"]
+            if item["id"] == reservation["id"]
         )
         self.assertEqual(stored["job"]["status"], "pending")
 
@@ -1070,6 +1189,113 @@ class ScheduledJobTests(unittest.TestCase):
 
         self.assertEqual(list(outside.iterdir()), [])
 
+    def test_direct_spec_delete_rejects_a_replaced_symlink_directory(self):
+        spec = prepare_job_spec(
+            self.config,
+            self.actor,
+            [sys.executable, "-c", "print('retain')"],
+            str(self.work_dir),
+        )
+        spec_dir = self.log_dir / "specs"
+        outside = Path(self.tmp.name) / "outside-specs"
+        spec_dir.rename(outside)
+        spec_dir.symlink_to(outside, target_is_directory=True)
+        outside_spec = outside / f"{spec.spec_id}.json"
+
+        with self.assertRaisesRegex(BookingError, "not a directory"):
+            delete_job_spec(self.config, spec.spec_id)
+
+        self.assertTrue(outside_spec.exists())
+
+    def test_direct_spec_delete_rejects_a_hard_linked_file(self):
+        spec = prepare_job_spec(
+            self.config,
+            self.actor,
+            [sys.executable, "-c", "print('retain')"],
+            str(self.work_dir),
+        )
+        path = job_spec_path(self.config, spec.spec_id)
+        alias = path.with_suffix(".alias")
+        os.link(path, alias)
+
+        with self.assertRaisesRegex(BookingError, "hard links"):
+            delete_job_spec(self.config, spec.spec_id)
+
+        self.assertTrue(path.exists())
+        self.assertTrue(alias.exists())
+
+    def test_job_spec_uuid_collision_does_not_delete_the_existing_spec(self):
+        first = prepare_job_spec(
+            self.config,
+            self.actor,
+            [sys.executable, "-c", "print('first')"],
+            str(self.work_dir),
+        )
+        path = job_spec_path(self.config, first.spec_id)
+        original = path.read_bytes()
+
+        with mock.patch("bk.worker.uuid.uuid4", return_value=uuid.UUID(first.spec_id)):
+            with self.assertRaises(FileExistsError):
+                prepare_job_spec(
+                    self.config,
+                    self.actor,
+                    [sys.executable, "-c", "print('second')"],
+                    str(self.work_dir),
+                )
+
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_interrupted_job_spec_write_removes_partial_secret_file(self):
+        secret = "partial-secret-command"
+
+        def interrupt_dump(_payload, fh, **_kwargs):
+            fh.write(secret)
+            fh.flush()
+            raise KeyboardInterrupt
+
+        with mock.patch("bk.worker.json.dump", side_effect=interrupt_dump):
+            with self.assertRaises(KeyboardInterrupt):
+                prepare_job_spec(
+                    self.config,
+                    self.actor,
+                    [sys.executable, "-c", f"print({secret!r})"],
+                    str(self.work_dir),
+                )
+
+        self.assertEqual(list((self.log_dir / "specs").glob("*.json")), [])
+
+    def test_worker_rejects_a_replaced_symlink_spec_directory_before_execution(self):
+        marker = self.work_dir / "must-not-run"
+        reservation = self.booking(
+            command=[
+                sys.executable,
+                "-c",
+                f"open({str(marker)!r}, 'w').write('unsafe')",
+            ]
+        )
+        spec_dir = self.log_dir / "specs"
+        outside = Path(self.tmp.name) / "outside-specs"
+        spec_dir.rename(outside)
+        spec_dir.symlink_to(outside, target_is_directory=True)
+
+        summary = run_worker(
+            self.config,
+            self.store,
+            self.actor,
+            once=True,
+            poll_seconds=0.1,
+            quiet=True,
+        )
+
+        stored = next(
+            item
+            for item in self.store.load()["reservations"]
+            if item["id"] == reservation["id"]
+        )
+        self.assertEqual(summary.failed, 1)
+        self.assertEqual(stored["job"]["status"], "failed")
+        self.assertFalse(marker.exists())
+
     def test_job_command_requires_absolute_working_directory(self):
         with self.assertRaisesRegex(BookingError, "must be absolute"):
             prepare_job_spec(
@@ -1096,8 +1322,8 @@ class ScheduledJobTests(unittest.TestCase):
 
     def test_job_spec_is_removed_when_directory_fsync_fails(self):
         with mock.patch(
-            "bk.worker.fsync_directory",
-            side_effect=OSError("job spec directory sync failed"),
+            "bk.worker._fsync_job_spec_directory",
+            side_effect=[None, OSError("job spec directory sync failed"), None],
         ):
             with self.assertRaisesRegex(OSError, "job spec directory sync failed"):
                 prepare_job_spec(
@@ -1109,7 +1335,9 @@ class ScheduledJobTests(unittest.TestCase):
 
         self.assertEqual(list((self.log_dir / "specs").glob("*.json")), [])
 
-    def test_shared_ledger_contains_no_command_arguments_and_private_spec_is_locked_down(self):
+    def test_shared_ledger_contains_no_command_arguments_and_private_spec_is_locked_down(
+        self,
+    ):
         secret = "api-token-should-stay-private"
         reservation = self.booking(command=[sys.executable, "-c", f"print({secret!r})"])
 
@@ -1125,13 +1353,23 @@ class ScheduledJobTests(unittest.TestCase):
         reservation = self.booking(command=[sys.executable, "-c", "print('safe')"])
         spec_path = job_spec_path(self.config, reservation["job"]["spec_id"])
         payload = json.loads(spec_path.read_text(encoding="utf-8"))
-        payload["argv"] = [sys.executable, "-c", f"open({str(marker)!r}, 'w').write('bad')"]
+        payload["argv"] = [
+            sys.executable,
+            "-c",
+            f"open({str(marker)!r}, 'w').write('bad')",
+        ]
         spec_path.write_text(json.dumps(payload), encoding="utf-8")
         spec_path.chmod(0o600)
 
-        summary = run_worker(self.config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True)
+        summary = run_worker(
+            self.config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True
+        )
 
-        stored = next(item for item in self.store.load()["reservations"] if item["id"] == reservation["id"])
+        stored = next(
+            item
+            for item in self.store.load()["reservations"]
+            if item["id"] == reservation["id"]
+        )
         self.assertEqual(summary.failed, 1)
         self.assertEqual(stored["job"]["status"], "failed")
         self.assertFalse(marker.exists())

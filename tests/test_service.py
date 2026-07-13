@@ -42,7 +42,11 @@ class AgentServiceTests(unittest.TestCase):
                 memory_used_mb=16000,
                 memory_total_mb=24000,
                 utilization_percent=80,
-                processes=(GpuProcessSnapshot(55, 1002, "bob", "python train.py --token secret"),),
+                processes=(
+                    GpuProcessSnapshot(
+                        55, 1002, "bob", "python train.py --token secret"
+                    ),
+                ),
                 source="simulation",
             ),
             GpuSnapshot(
@@ -55,7 +59,9 @@ class AgentServiceTests(unittest.TestCase):
                 source="simulation",
             ),
         ]
-        self.advice = build_gpu_advice(self.config, snapshots=self.snapshots, history={}, at=self.start)
+        self.advice = build_gpu_advice(
+            self.config, snapshots=self.snapshots, history={}, at=self.start
+        )
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -78,9 +84,7 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(context["gpu_advice"]["gpus"][1]["name"], "idle")
         self.assertEqual(context["gpu_advice"]["gpus"][1]["temperature_c"], 47)
         self.assertFalse(
-            context["gpu_advice"]["gpus"][1]["capabilities"][
-                "stable_device_identifier"
-            ]
+            context["gpu_advice"]["gpus"][1]["capabilities"]["stable_device_identifier"]
         )
         self.assertTrue(context["capabilities"]["idempotent_edit"])
         self.assertEqual(context["capabilities"]["idempotent_edit_history_limit"], 256)
@@ -213,7 +217,9 @@ class AgentServiceTests(unittest.TestCase):
         now = self.start + timedelta(minutes=47, seconds=23)
         advice = build_gpu_advice(config, snapshots=self.snapshots, history={}, at=now)
 
-        context = build_agent_context(config, self.store, self.actor, at=now, advice=advice)
+        context = build_agent_context(
+            config, self.store, self.actor, at=now, advice=advice
+        )
         with (
             mock.patch("bk.service.utc_now", return_value=now),
             mock.patch("bk.scheduler.utc_now", return_value=now),
@@ -231,7 +237,9 @@ class AgentServiceTests(unittest.TestCase):
 
         self.assertEqual(context["policy"]["granularity_minutes"], 10)
         self.assertTrue(context["capabilities"]["configurable_booking_granularity"])
-        self.assertEqual(submission.result.reservation["start_at"], "2030-01-01T12:40:00Z")
+        self.assertEqual(
+            submission.result.reservation["start_at"], "2030-01-01T12:40:00Z"
+        )
 
     def test_recommendation_is_read_only_and_prefers_live_idle_gpu(self):
         recommendation = recommend_booking(
@@ -250,7 +258,10 @@ class AgentServiceTests(unittest.TestCase):
         self.assertTrue(recommendation["available"])
         self.assertEqual(recommendation["recommendation"]["gpus"], [1])
         self.assertEqual(recommendation["recommendation"]["confidence"], "medium")
-        self.assertGreater(recommendation["recommendation"]["gpu_details"][0]["memory_free_now_mb"], 20000)
+        self.assertGreater(
+            recommendation["recommendation"]["gpu_details"][0]["memory_free_now_mb"],
+            20000,
+        )
         self.assertEqual(self.store.load()["reservations"], [])
 
     def test_implicit_recommendation_uses_the_current_five_minute_slot(self):
@@ -272,7 +283,9 @@ class AgentServiceTests(unittest.TestCase):
                 advice=self.advice,
             )
 
-        self.assertEqual(recommendation["recommendation"]["start_at"], "2030-01-01T12:40:00Z")
+        self.assertEqual(
+            recommendation["recommendation"]["start_at"], "2030-01-01T12:40:00Z"
+        )
         self.assertFalse(recommendation["recommendation"]["queued"])
 
     def test_implicit_submission_uses_the_current_five_minute_slot(self):
@@ -294,7 +307,9 @@ class AgentServiceTests(unittest.TestCase):
                 advice=self.advice,
             )
 
-        self.assertEqual(submission.result.reservation["start_at"], "2030-01-01T12:40:00Z")
+        self.assertEqual(
+            submission.result.reservation["start_at"], "2030-01-01T12:40:00Z"
+        )
         self.assertFalse(submission.result.queued)
 
     def test_recommendation_and_create_ignore_the_same_expired_legacy_record(self):
@@ -315,7 +330,9 @@ class AgentServiceTests(unittest.TestCase):
 
         def make_sub_slot_legacy(ledger):
             reservation = next(
-                item for item in ledger["reservations"] if item["id"] == legacy.reservation["id"]
+                item
+                for item in ledger["reservations"]
+                if item["id"] == legacy.reservation["id"]
             )
             reservation["end_at"] = (active_slice + timedelta(seconds=30)).isoformat()
             return ledger, None, [], True
@@ -350,8 +367,12 @@ class AgentServiceTests(unittest.TestCase):
                 advice=self.advice,
             )
 
-        self.assertEqual(recommendation["recommendation"]["start_at"], "2030-01-01T12:40:00Z")
-        self.assertEqual(submission.result.reservation["start_at"], "2030-01-01T12:40:00Z")
+        self.assertEqual(
+            recommendation["recommendation"]["start_at"], "2030-01-01T12:40:00Z"
+        )
+        self.assertEqual(
+            submission.result.reservation["start_at"], "2030-01-01T12:40:00Z"
+        )
         stored_legacy = next(
             item
             for item in self.store.load()["reservations"]
@@ -412,7 +433,9 @@ class AgentServiceTests(unittest.TestCase):
 
     def test_weighted_share_is_exposed_in_recommendation_and_public_result(self):
         config = Config(data_dir=self.data_dir, gpu_count=2, max_shared_users=4)
-        advice = build_gpu_advice(config, snapshots=self.snapshots, history={}, at=self.start)
+        advice = build_gpu_advice(
+            config, snapshots=self.snapshots, history={}, at=self.start
+        )
 
         recommendation = recommend_booking(
             config,
@@ -497,7 +520,9 @@ class AgentServiceTests(unittest.TestCase):
 
         self.assertEqual(submission.worker_status["state"], "not-seen")
         self.assertEqual(payload["worker"]["state"], "not-seen")
-        self.assertTrue(any("start `bk w`" in warning for warning in payload["warnings"]))
+        self.assertTrue(
+            any("start `bk w`" in warning for warning in payload["warnings"])
+        )
         self.assertEqual(edited.worker_status["state"], "not-seen")
 
     def test_scheduled_job_submission_accepts_a_proven_running_worker(self):
@@ -529,9 +554,174 @@ class AgentServiceTests(unittest.TestCase):
 
         self.assertEqual(submission.worker_status["state"], "running")
         self.assertTrue(submission.worker_status["running"])
-        self.assertFalse(any("scheduled command worker" in warning for warning in payload["warnings"]))
+        self.assertFalse(
+            any(
+                "scheduled command worker" in warning for warning in payload["warnings"]
+            )
+        )
 
-    def test_scheduled_job_submission_rejects_worker_readiness_from_another_instance(self):
+    def test_scheduled_job_interrupt_before_commit_removes_unused_private_spec(self):
+        actor = Actor(os.getuid(), "current")
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=2,
+            job_log_dir=self.data_dir / "private-jobs",
+        )
+
+        with mock.patch("bk.service.add_booking", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                submit_booking(
+                    config,
+                    self.store,
+                    actor,
+                    count=1,
+                    duration_seconds=30 * 60,
+                    start_at=self.start,
+                    command_argv=[sys.executable, "-c", "print('private')"],
+                    working_directory=self.tmp.name,
+                    allow_queue=False,
+                    advice=self.advice,
+                )
+
+        self.assertEqual(self.store.load().get("reservations", []), [])
+        self.assertEqual(list((config.job_log_dir / "specs").glob("*.json")), [])
+
+    def test_scheduled_job_interrupt_after_commit_retains_referenced_private_spec(self):
+        actor = Actor(os.getuid(), "current")
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=2,
+            job_log_dir=self.data_dir / "private-jobs",
+        )
+
+        def commit_then_interrupt(store, runtime_config, request):
+            add_booking(store, runtime_config, request)
+            raise KeyboardInterrupt
+
+        with mock.patch("bk.service.add_booking", side_effect=commit_then_interrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                submit_booking(
+                    config,
+                    self.store,
+                    actor,
+                    count=1,
+                    duration_seconds=30 * 60,
+                    start_at=self.start,
+                    command_argv=[sys.executable, "-c", "print('private')"],
+                    working_directory=self.tmp.name,
+                    allow_queue=False,
+                    advice=self.advice,
+                )
+
+        reservation = self.store.load()["reservations"][0]
+        self.assertTrue(job_spec_path(config, reservation["job"]["spec_id"]).exists())
+
+    def test_scheduled_job_operation_retry_reuses_booking_and_prunes_unused_spec(self):
+        actor = Actor(os.getuid(), "current")
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=2,
+            job_log_dir=self.data_dir / "private-jobs",
+        )
+        kwargs = {
+            "count": 1,
+            "duration_seconds": 30 * 60,
+            "start_at": self.start,
+            "command_argv": [sys.executable, "-c", "print('private')"],
+            "working_directory": self.tmp.name,
+            "allow_queue": False,
+            "operation_id": "scheduled-retry-1",
+            "advice": self.advice,
+        }
+
+        first = submit_booking(config, self.store, actor, **kwargs)
+        second = submit_booking(config, self.store, actor, **kwargs)
+
+        self.assertTrue(first.result.created)
+        self.assertFalse(second.result.created)
+        self.assertEqual(
+            first.result.reservation["id"], second.result.reservation["id"]
+        )
+        self.assertEqual(len(list((config.job_log_dir / "specs").glob("*.json"))), 1)
+
+    def test_scheduled_job_operation_id_rejects_a_different_private_command(self):
+        actor = Actor(os.getuid(), "current")
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=2,
+            job_log_dir=self.data_dir / "private-jobs",
+        )
+        common = {
+            "count": 1,
+            "duration_seconds": 30 * 60,
+            "start_at": self.start,
+            "working_directory": self.tmp.name,
+            "allow_queue": False,
+            "operation_id": "scheduled-command-mismatch",
+            "advice": self.advice,
+        }
+        submit_booking(
+            config,
+            self.store,
+            actor,
+            command_argv=[sys.executable, "-c", "print('first')"],
+            **common,
+        )
+
+        with self.assertRaisesRegex(BookingError, "different write"):
+            submit_booking(
+                config,
+                self.store,
+                actor,
+                command_argv=[sys.executable, "-c", "print('second')"],
+                **common,
+            )
+
+        self.assertEqual(len(self.store.load()["reservations"]), 1)
+        self.assertEqual(len(list((config.job_log_dir / "specs").glob("*.json"))), 1)
+
+    def test_scheduled_job_retry_reports_deferred_unused_spec_cleanup(self):
+        actor = Actor(os.getuid(), "current")
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=2,
+            job_log_dir=self.data_dir / "private-jobs",
+        )
+        kwargs = {
+            "count": 1,
+            "duration_seconds": 30 * 60,
+            "start_at": self.start,
+            "command_argv": [sys.executable, "-c", "print('private')"],
+            "working_directory": self.tmp.name,
+            "allow_queue": False,
+            "operation_id": "scheduled-retry-cleanup-warning",
+            "advice": self.advice,
+        }
+        submit_booking(config, self.store, actor, **kwargs)
+
+        with mock.patch(
+            "bk.service.delete_job_spec",
+            side_effect=BookingError("unsafe private directory"),
+        ):
+            retried = submit_booking(config, self.store, actor, **kwargs)
+
+        payload = booking_result_payload(
+            "existing", retried, actor, self.store.last_warning
+        )
+        self.assertFalse(retried.result.created)
+        self.assertIn("cleanup deferred", self.store.last_warning)
+        self.assertTrue(
+            any("cleanup deferred" in warning for warning in payload["warnings"])
+        )
+
+    def test_scheduled_job_submission_rejects_worker_readiness_from_another_instance(
+        self,
+    ):
         actor = Actor(os.getuid(), "current")
         job_dir = self.data_dir / "private-jobs"
         config = Config(
@@ -692,7 +882,9 @@ class AgentServiceTests(unittest.TestCase):
         )
 
         self.assertFalse(recommendation["available"])
-        self.assertEqual(recommendation["nearest_available"]["start_at"], "2030-01-01T12:30:00Z")
+        self.assertEqual(
+            recommendation["nearest_available"]["start_at"], "2030-01-01T12:30:00Z"
+        )
         self.assertEqual(len(self.store.load()["reservations"]), 1)
 
     def test_structured_edit_uses_advice_and_is_idempotent(self):
@@ -746,7 +938,10 @@ class AgentServiceTests(unittest.TestCase):
             ),
         )
 
-        for field, message in (("count", "GPU count"), ("duration_seconds", "duration")):
+        for field, message in (
+            ("count", "GPU count"),
+            ("duration_seconds", "duration"),
+        ):
             with self.subTest(field=field):
                 with mock.patch("bk.service._allocation_decision") as allocator:
                     with self.assertRaisesRegex(BookingError, message):
@@ -776,7 +971,11 @@ class AgentServiceTests(unittest.TestCase):
             data_dir=self.data_dir,
             gpu_count=2,
             max_shared_users=3,
-            allocator_command=(sys.executable, "-c", "raise SystemExit('must not run')"),
+            allocator_command=(
+                sys.executable,
+                "-c",
+                "raise SystemExit('must not run')",
+            ),
         )
         before = self.store.ledger_path.read_bytes()
 

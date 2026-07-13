@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from .config import DEFAULT_WORKER_TERMINATION_GRACE_SECONDS, Config
-from .fileio import fsync_directory, open_existing_regular
+from .fileio import open_existing_regular_at
 from .gpu import GpuSnapshot, snapshot
 from .job_recovery import active_legacy_job_count, recover_abandoned_jobs
 from .joblogs import (
@@ -27,10 +27,8 @@ from .joblogs import (
     acquire_job_worker_lease,
     cleanup_job_logs,
     ensure_job_log_dir,
-    ensure_private_directory,
     job_log_path,
     job_log_root,
-    validate_private_directory,
 )
 from .launch_guard import LaunchGuardDecision, assess_job_launch
 from .models import (
@@ -131,34 +129,66 @@ def prepare_job_spec(
     }
     digest = _job_spec_digest(payload)
     payload["digest"] = digest
-    ensure_job_log_dir(config, actor)
     path = job_spec_path(config, spec_id)
-    ensure_private_directory(path.parent, actor)
+    spec_dir_fd = _open_job_spec_directory(config, actor, create=True)
+    if spec_dir_fd is None:
+        raise BookingError("private job spec directory disappeared during creation")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    fd = os.open(str(path), flags, 0o600)
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    fd = -1
+    created = False
     try:
+        fd = os.open(path.name, flags, 0o600, dir_fd=spec_dir_fd)
+        created = True
         os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh = os.fdopen(fd, "w", encoding="utf-8")
+        fd = -1
+        with fh:
             json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
             fh.write("\n")
             fh.flush()
             os.fsync(fh.fileno())
-        fsync_directory(path.parent)
-    except Exception:
+        _fsync_job_spec_directory(spec_dir_fd)
+    except BaseException:
         try:
-            os.close(fd)
+            if fd >= 0:
+                os.close(fd)
         except OSError:
             pass
-        path.unlink(missing_ok=True)
+        if created:
+            try:
+                os.unlink(path.name, dir_fd=spec_dir_fd)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+            try:
+                _fsync_job_spec_directory(spec_dir_fd)
+            except OSError:
+                pass
         raise
+    finally:
+        os.close(spec_dir_fd)
     return JobSpecReference(spec_id, digest, _job_command_summary(argv))
 
 
 def delete_job_spec(config: Config, spec_id: str) -> bool:
     path = job_spec_path(config, spec_id)
-    status, _message = _remove_job_spec_file(path, os.getuid())
+    actor = Actor(os.getuid(), "current")
+    spec_dir_fd = _open_job_spec_directory(config, actor, create=False)
+    if spec_dir_fd is None:
+        return False
+    try:
+        status, message = _remove_job_spec_at(spec_dir_fd, path.name, actor.uid)
+    finally:
+        os.close(spec_dir_fd)
+    if status == "failed":
+        raise BookingError(
+            f"cannot safely delete private job spec {spec_id[:8]}: {message}"
+        )
     return status == "removed"
 
 
@@ -175,114 +205,110 @@ def cleanup_job_specs(
     if orphan_grace_seconds < 0:
         raise ValueError("job spec orphan grace must be nonnegative")
 
-    root = job_log_root(config)
-    if not os.path.lexists(root):
+    spec_dir_fd = _open_job_spec_directory(config, actor, create=False)
+    if spec_dir_fd is None:
         return JobSpecCleanupResult()
-    validate_private_directory(root, actor)
-    spec_dir = root / "specs"
-    if not os.path.lexists(spec_dir):
-        return JobSpecCleanupResult()
-    validate_private_directory(spec_dir, actor)
 
-    current = (now if now is not None else datetime.now(timezone.utc)).astimezone(timezone.utc)
-    ledger = store.load()
-    references: Dict[str, bool] = {}
-    warnings: List[str] = []
-    failed = 0
-    for reservation in ledger.get("reservations", []):
-        if not isinstance(reservation, dict):
-            continue
-        job = reservation.get("job")
-        if not isinstance(job, dict) or job.get("spec_id") is None:
-            continue
-        try:
-            spec_id = str(uuid.UUID(str(job["spec_id"])))
-        except (ValueError, AttributeError):
+    try:
+        current = (now if now is not None else datetime.now(timezone.utc)).astimezone(
+            timezone.utc
+        )
+        ledger = store.load()
+        references: Dict[str, bool] = {}
+        warnings: List[str] = []
+        failed = 0
+        for reservation in ledger.get("reservations", []):
+            if not isinstance(reservation, dict):
+                continue
+            job = reservation.get("job")
+            if not isinstance(job, dict) or job.get("spec_id") is None:
+                continue
+            try:
+                spec_id = str(uuid.UUID(str(job["spec_id"])))
+            except (ValueError, AttributeError):
+                try:
+                    reservation_uid = int(reservation.get("uid", -1))
+                except (TypeError, ValueError):
+                    reservation_uid = actor.uid
+                if reservation_uid == actor.uid:
+                    failed += 1
+                    warnings.append(
+                        f"reservation {str(reservation.get('id', ''))[:8]} has an invalid private job spec ID"
+                    )
+                continue
             try:
                 reservation_uid = int(reservation.get("uid", -1))
             except (TypeError, ValueError):
-                reservation_uid = actor.uid
-            if reservation_uid == actor.uid:
+                references[spec_id] = True
                 failed += 1
                 warnings.append(
-                    f"reservation {str(reservation.get('id', ''))[:8]} has an invalid private job spec ID"
+                    f"reservation {str(reservation.get('id', ''))[:8]} has an invalid UID; retained {spec_id[:8]}"
                 )
-            continue
-        try:
-            reservation_uid = int(reservation.get("uid", -1))
-        except (TypeError, ValueError):
-            references[spec_id] = True
-            failed += 1
-            warnings.append(
-                f"reservation {str(reservation.get('id', ''))[:8]} has an invalid UID; retained {spec_id[:8]}"
-            )
-            continue
-        if reservation_uid != actor.uid:
-            continue
-        needed = _job_spec_is_needed(reservation, job, current)
-        references[spec_id] = references.get(spec_id, False) or needed
+                continue
+            if reservation_uid != actor.uid:
+                continue
+            needed = _job_spec_is_needed(reservation, job, current)
+            references[spec_id] = references.get(spec_id, False) or needed
 
-    removed = 0
-    retained = 0
-    for spec_id, needed in references.items():
-        path = job_spec_path(config, spec_id)
-        if needed:
-            retained += 1
-            issue = _job_spec_file_issue(path, actor.uid)
+        removed = 0
+        retained = 0
+        for spec_id, needed in references.items():
+            name = f"{spec_id}.json"
+            if needed:
+                retained += 1
+                _metadata, issue = _job_spec_metadata_at(spec_dir_fd, name, actor.uid)
+                if issue is not None:
+                    failed += 1
+                    warnings.append(f"{spec_id[:8]}: {issue}")
+                continue
+            status, message = _remove_job_spec_at(spec_dir_fd, name, actor.uid)
+            if status == "removed":
+                removed += 1
+            elif status == "failed":
+                failed += 1
+                warnings.append(f"{spec_id[:8]}: {message}")
+
+        deferred_orphans = 0
+        try:
+            candidates = os.listdir(spec_dir_fd)
+        except OSError as exc:
+            return JobSpecCleanupResult(
+                removed,
+                retained,
+                deferred_orphans,
+                failed + 1,
+                tuple([*warnings, f"cannot scan private job specs: {exc}"]),
+            )
+        for name in candidates:
+            spec_id = _spec_id_from_filename(name)
+            if spec_id is None or spec_id in references:
+                continue
+            metadata, issue = _job_spec_metadata_at(spec_dir_fd, name, actor.uid)
             if issue is not None:
                 failed += 1
-                warnings.append(f"{spec_id[:8]}: {issue}")
-            continue
-        status, message = _remove_job_spec_file(path, actor.uid)
-        if status == "removed":
-            removed += 1
-        elif status == "failed":
-            failed += 1
-            warnings.append(f"{spec_id[:8]}: {message}")
+                warnings.append(f"{name}: {issue}")
+                continue
+            assert metadata is not None
+            age_seconds = current.timestamp() - metadata.st_mtime
+            if age_seconds < orphan_grace_seconds:
+                deferred_orphans += 1
+                continue
+            status, message = _remove_job_spec_at(spec_dir_fd, name, actor.uid)
+            if status == "removed":
+                removed += 1
+            elif status == "failed":
+                failed += 1
+                warnings.append(f"{name}: {message}")
 
-    deferred_orphans = 0
-    try:
-        candidates = list(spec_dir.iterdir())
-    except OSError as exc:
         return JobSpecCleanupResult(
             removed,
             retained,
             deferred_orphans,
-            failed + 1,
-            tuple([*warnings, f"cannot scan private job specs: {exc}"]),
+            failed,
+            tuple(warnings),
         )
-    for path in candidates:
-        spec_id = _spec_id_from_filename(path.name)
-        if spec_id is None or spec_id in references:
-            continue
-        issue = _job_spec_file_issue(path, actor.uid)
-        if issue is not None:
-            failed += 1
-            warnings.append(f"{path.name}: {issue}")
-            continue
-        try:
-            age_seconds = current.timestamp() - path.lstat().st_mtime
-        except OSError as exc:
-            failed += 1
-            warnings.append(f"{path.name}: cannot inspect age: {exc}")
-            continue
-        if age_seconds < orphan_grace_seconds:
-            deferred_orphans += 1
-            continue
-        status, message = _remove_job_spec_file(path, actor.uid)
-        if status == "removed":
-            removed += 1
-        elif status == "failed":
-            failed += 1
-            warnings.append(f"{path.name}: {message}")
-
-    return JobSpecCleanupResult(
-        removed,
-        retained,
-        deferred_orphans,
-        failed,
-        tuple(warnings),
-    )
+    finally:
+        os.close(spec_dir_fd)
 
 
 def run_worker(
@@ -388,7 +414,9 @@ def run_worker(
                 if not running:
                     break
             else:
-                current_legacy = active_legacy_job_count(daemon_store.load(), actor, now)
+                current_legacy = active_legacy_job_count(
+                    daemon_store.load(), actor, now
+                )
                 if current_legacy:
                     counts["waiting"] = max(counts["waiting"], current_legacy)
                     if not quiet and current_legacy != legacy_blocked:
@@ -423,12 +451,14 @@ def run_worker(
                 eligible_ids = None
                 launch_devices: Dict[str, Tuple[str, ...]] = {}
                 if config.worker_live_guard:
-                    eligible_ids, waiting, notices, launch_devices = _launch_guard_eligibility(
-                        config,
-                        daemon_store,
-                        actor,
-                        now,
-                        snapshot_provider,
+                    eligible_ids, waiting, notices, launch_devices = (
+                        _launch_guard_eligibility(
+                            config,
+                            daemon_store,
+                            actor,
+                            now,
+                            snapshot_provider,
+                        )
                     )
                     counts["waiting"] = waiting
                     if not quiet:
@@ -570,10 +600,14 @@ def claim_due_jobs(
             if not isinstance(job, dict):
                 continue
             status = job.get("status")
-            if status == JOB_CLAIMED and _timestamp_before(job.get("claimed_at"), stale_before):
+            if status == JOB_CLAIMED and _timestamp_before(
+                job.get("claimed_at"), stale_before
+            ):
                 job["status"] = JOB_UNCERTAIN
                 job["finished_at"] = to_iso(now)
-                job["message"] = "worker disappeared after durable claim; not retried automatically"
+                job["message"] = (
+                    "worker disappeared after durable claim; not retried automatically"
+                )
                 logs.append(_job_log(actor, "job-uncertain", reservation, "uncertain"))
                 changed = True
                 continue
@@ -601,7 +635,10 @@ def claim_due_jobs(
                 logs.append(_job_log(actor, "job-missed", reservation, message))
                 changed = True
                 continue
-            if reservation_status != STATUS_ACTIVE or parse_iso(reservation["start_at"]) > now:
+            if (
+                reservation_status != STATUS_ACTIVE
+                or parse_iso(reservation["start_at"]) > now
+            ):
                 continue
             reservation_id = str(reservation.get("id", ""))
             if eligible_ids is not None and reservation_id not in eligible_ids:
@@ -705,7 +742,9 @@ def _record_launch_guard_decisions(
                 job.pop("waiting_since", None)
                 job["message"] = None
                 reservation["updated_at"] = to_iso(now)
-                logs.append(_job_log(actor, "job-ready", reservation, "live GPU guard cleared"))
+                logs.append(
+                    _job_log(actor, "job-ready", reservation, "live GPU guard cleared")
+                )
                 notices.append(f"ready: {reservation_id[:8]} live GPU guard cleared")
                 changed = True
                 continue
@@ -756,12 +795,19 @@ def retry_job(
             raise BookingError("reservation has no job")
         status = job.get("status")
         if status == JOB_UNCERTAIN and not accept_duplicate_risk:
-            raise BookingError("uncertain job may already be running; pass --accept-duplicate-risk after checking")
+            raise BookingError(
+                "uncertain job may already be running; pass --accept-duplicate-risk after checking"
+            )
         if status not in {JOB_FAILED, JOB_INTERRUPTED, JOB_UNCERTAIN}:
             raise BookingError(f"job in {status} state cannot be retried")
         now = utc_now()
-        if reservation.get("status") != STATUS_ACTIVE or parse_iso(reservation["end_at"]) <= now:
-            raise BookingError("reservation window is no longer active; create a new booking")
+        if (
+            reservation.get("status") != STATUS_ACTIVE
+            or parse_iso(reservation["end_at"]) <= now
+        ):
+            raise BookingError(
+                "reservation window is no longer active; create a new booking"
+            )
         job["status"] = JOB_PENDING
         for key in (
             "claim_token",
@@ -786,7 +832,12 @@ def retry_job(
         ):
             job.pop(key, None)
         reservation["updated_at"] = to_iso(now)
-        return ledger, reservation, [_job_log(actor, "job-retry", reservation, "pending")], True
+        return (
+            ledger,
+            reservation,
+            [_job_log(actor, "job-retry", reservation, "pending")],
+            True,
+        )
 
     return store.transaction(mutate)
 
@@ -806,7 +857,9 @@ def _start_claimed_job(
     reservation_id = str(reservation.get("id", ""))
     log_path = job_log_path(config, reservation_id)
     if log_path.parent != log_dir:
-        _mark_launch_failure(store, actor, reservation_id, claim_token, "invalid log path")
+        _mark_launch_failure(
+            store, actor, reservation_id, claim_token, "invalid log path"
+        )
         return None
     process: Optional[subprocess.Popen] = None
     log_pump: Optional[JobLogPump] = None
@@ -893,7 +946,9 @@ def _start_claimed_job(
         return None
 
     try:
-        marked_running = _mark_running(store, actor, reservation_id, claim_token, process.pid)
+        marked_running = _mark_running(
+            store, actor, reservation_id, claim_token, process.pid
+        )
     except Exception:
         _terminate_and_reap_process_group(
             process,
@@ -918,13 +973,17 @@ def _start_claimed_job(
     )
 
 
-def _validated_job_payload(config: Config, actor: Actor, job: dict) -> Tuple[List[str], str]:
+def _validated_job_payload(
+    config: Config, actor: Actor, job: dict
+) -> Tuple[List[str], str]:
     if job.get("spec_id") is not None:
         payload = _read_job_spec(config, actor, str(job["spec_id"]))
         expected_digest = str(job.get("digest", ""))
         actual_digest = _job_spec_digest(payload)
         if not hmac.compare_digest(expected_digest, actual_digest):
-            raise BookingError("private job spec digest does not match the shared ledger")
+            raise BookingError(
+                "private job spec digest does not match the shared ledger"
+            )
         if not hmac.compare_digest(str(payload.get("digest", "")), actual_digest):
             raise BookingError("private job spec is internally inconsistent")
         raw_argv = payload.get("argv")
@@ -938,11 +997,18 @@ def _validated_job_payload(config: Config, actor: Actor, job: dict) -> Tuple[Lis
 
 
 def _validate_submission_payload(raw_argv, cwd) -> Tuple[List[str], str]:
-    if not isinstance(raw_argv, list) or not raw_argv or not all(isinstance(item, str) for item in raw_argv):
+    if (
+        not isinstance(raw_argv, list)
+        or not raw_argv
+        or not all(isinstance(item, str) for item in raw_argv)
+    ):
         raise BookingError("invalid job argv")
     if len(raw_argv) > 256 or any("\x00" in item for item in raw_argv):
         raise BookingError("invalid job argv")
-    if not raw_argv[0] or sum(len(item.encode("utf-8")) for item in raw_argv) > 64 * 1024:
+    if (
+        not raw_argv[0]
+        or sum(len(item.encode("utf-8")) for item in raw_argv) > 64 * 1024
+    ):
         raise BookingError("invalid job argv")
     if not isinstance(cwd, str) or not os.path.isabs(cwd) or "\x00" in cwd:
         raise BookingError("job working directory must be absolute")
@@ -956,7 +1022,13 @@ def _validate_submission_payload(raw_argv, cwd) -> Tuple[List[str], str]:
 
 def _read_job_spec(config: Config, actor: Actor, spec_id: str) -> dict:
     path = job_spec_path(config, spec_id)
-    fd = open_existing_regular(path)
+    spec_dir_fd = _open_job_spec_directory(config, actor, create=False)
+    if spec_dir_fd is None:
+        raise BookingError("private job spec directory is missing")
+    try:
+        fd = open_existing_regular_at(spec_dir_fd, path.name, path)
+    finally:
+        os.close(spec_dir_fd)
     try:
         metadata = os.fstat(fd)
         if not stat.S_ISREG(metadata.st_mode):
@@ -964,7 +1036,9 @@ def _read_job_spec(config: Config, actor: Actor, spec_id: str) -> dict:
         if metadata.st_uid != actor.uid:
             raise BookingError("job spec is not owned by the reservation UID")
         if stat.S_IMODE(metadata.st_mode) & 0o077:
-            raise BookingError("job spec must not be accessible by group or other users")
+            raise BookingError(
+                "job spec must not be accessible by group or other users"
+            )
         if metadata.st_size > 128 * 1024:
             raise BookingError("job spec is too large")
         fh = os.fdopen(fd, "r", encoding="utf-8")
@@ -1035,7 +1109,12 @@ def _mark_running(
         job["started_at"] = to_iso(now)
         job["runner_pid"] = child_pid
         reservation["updated_at"] = to_iso(now)
-        return ledger, True, [_job_log(actor, "job-start", reservation, f"pid={child_pid}")], True
+        return (
+            ledger,
+            True,
+            [_job_log(actor, "job-start", reservation, f"pid={child_pid}")],
+            True,
+        )
 
     return store.transaction(mutate)
 
@@ -1078,7 +1157,12 @@ def _mark_launch_failure(
         job["finished_at"] = to_iso(now)
         job["message"] = message[:1000]
         reservation["updated_at"] = to_iso(now)
-        return ledger, None, [_job_log(actor, "job-failed", reservation, message[:200])], True
+        return (
+            ledger,
+            None,
+            [_job_log(actor, "job-failed", reservation, message[:200])],
+            True,
+        )
 
     store.transaction(mutate)
 
@@ -1109,12 +1193,19 @@ def _mark_aborted_claim(
             message = "reservation ended while the claimed command was starting"
         else:
             status = JOB_UNCERTAIN
-            message = "claimed command was stopped before running state could be committed"
+            message = (
+                "claimed command was stopped before running state could be committed"
+            )
         job["status"] = status
         job["finished_at"] = to_iso(now)
         job["message"] = message
         reservation["updated_at"] = to_iso(now)
-        return ledger, None, [_job_log(actor, f"job-{status}", reservation, message)], True
+        return (
+            ledger,
+            None,
+            [_job_log(actor, f"job-{status}", reservation, message)],
+            True,
+        )
 
     store.transaction(mutate)
 
@@ -1157,7 +1248,9 @@ def _reconcile_running(
             continue
         log_warning = item.log_pump.finish()
         if log_warning and not quiet:
-            print(f"warning: {reservation_id[:8]} private job log is incomplete: {log_warning}")
+            print(
+                f"warning: {reservation_id[:8]} private job log is incomplete: {log_warning}"
+            )
         status = _completion_status(exit_code, item.termination_reason)
         _complete_job(
             store,
@@ -1205,11 +1298,18 @@ def _complete_job(
         if log_rotations:
             job["log_rotated"] = True
         if log_warning:
-            job["log_warning"] = "private job log is incomplete; inspect the owning worker"
+            job["log_warning"] = (
+                "private job log is incomplete; inspect the owning worker"
+            )
         if running.termination_reason:
             job["message"] = running.termination_reason
         reservation["updated_at"] = to_iso(now)
-        return ledger, None, [_job_log(actor, f"job-{status}", reservation, f"exit={exit_code}")], True
+        return (
+            ledger,
+            None,
+            [_job_log(actor, f"job-{status}", reservation, f"exit={exit_code}")],
+            True,
+        )
 
     store.transaction(mutate)
 
@@ -1289,7 +1389,9 @@ def _shutdown_running_jobs(
             reconciliation_errors.append(exc)
 
     if reconciliation_errors and not quiet:
-        names = ", ".join(dict.fromkeys(type(exc).__name__ for exc in reconciliation_errors))
+        names = ", ".join(
+            dict.fromkeys(type(exc).__name__ for exc in reconciliation_errors)
+        )
         print(
             "warning: worker state reconciliation failed during shutdown "
             f"({names}); forced process cleanup was still applied"
@@ -1306,7 +1408,10 @@ def _shutdown_running_jobs_without_ledger(
     jobs = tuple(running.values())
     _stop_running_jobs(running, utc_now())
     deadline = time.monotonic() + grace_seconds
-    while any(_process_group_alive(item.process) for item in jobs) and time.monotonic() < deadline:
+    while (
+        any(_process_group_alive(item.process) for item in jobs)
+        and time.monotonic() < deadline
+    ):
         time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
     _kill_and_reap_running_jobs(jobs)
     for item in jobs:
@@ -1434,31 +1539,122 @@ def _spec_id_from_filename(name: str) -> Optional[str]:
         return None
 
 
-def _job_spec_file_issue(path: Path, uid: int) -> Optional[str]:
-    if not os.path.lexists(path):
-        return "referenced private job spec is missing"
+def _open_job_spec_directory(
+    config: Config,
+    actor: Actor,
+    *,
+    create: bool,
+) -> Optional[int]:
+    root = job_log_root(config)
+    if create:
+        ensure_job_log_dir(config, actor)
+    elif not os.path.lexists(root):
+        return None
+
+    root_fd = _open_private_directory(root, actor)
     try:
-        metadata = path.lstat()
+        created = False
+        if create:
+            try:
+                os.mkdir("specs", 0o700, dir_fd=root_fd)
+                created = True
+            except FileExistsError:
+                pass
+        if created:
+            _fsync_job_spec_directory(root_fd)
+        try:
+            spec_fd = _open_private_directory(
+                root / "specs",
+                actor,
+                directory_fd=root_fd,
+                name="specs",
+                repair_mode=create,
+            )
+        except FileNotFoundError:
+            if not create:
+                return None
+            raise
+        return spec_fd
+    finally:
+        os.close(root_fd)
+
+
+def _open_private_directory(
+    path: Path,
+    actor: Actor,
+    *,
+    directory_fd: Optional[int] = None,
+    name: Optional[str] = None,
+    repair_mode: bool = False,
+) -> int:
+    target = str(path) if name is None else name
+    flags = os.O_RDONLY
+    for flag_name in ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW"):
+        flags |= getattr(os, flag_name, 0)
+    metadata = os.stat(target, dir_fd=directory_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise BookingError(f"private job path is not a directory: {path}")
+    fd = os.open(target, flags, dir_fd=directory_fd)
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise BookingError(f"private job path is not a directory: {path}")
+        if metadata.st_uid != actor.uid:
+            raise BookingError(
+                f"private job directory is not owned by UID {actor.uid}: {path}"
+            )
+        if repair_mode:
+            os.fchmod(fd, 0o700)
+            metadata = os.fstat(fd)
+        if stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise BookingError(
+                f"private job directory must not be accessible by group or other users: {path}"
+            )
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _fsync_job_spec_directory(directory_fd: int) -> None:
+    os.fsync(directory_fd)
+
+
+def _job_spec_metadata_at(
+    directory_fd: int,
+    name: str,
+    uid: int,
+) -> Tuple[Optional[os.stat_result], Optional[str]]:
+    try:
+        metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None, "referenced private job spec is missing"
     except OSError as exc:
-        return f"cannot inspect private job spec: {exc}"
+        return None, f"cannot inspect private job spec: {exc}"
     if not stat.S_ISREG(metadata.st_mode):
-        return "private job spec is not a regular file"
+        return None, "private job spec is not a regular file"
+    if metadata.st_nlink != 1:
+        return None, f"private job spec has {metadata.st_nlink} hard links"
     if metadata.st_uid != uid:
-        return f"private job spec is not owned by UID {uid}"
+        return None, f"private job spec is not owned by UID {uid}"
     if stat.S_IMODE(metadata.st_mode) & 0o077:
-        return "private job spec is accessible by group or other users"
-    return None
+        return None, "private job spec is accessible by group or other users"
+    return metadata, None
 
 
-def _remove_job_spec_file(path: Path, uid: int) -> Tuple[str, Optional[str]]:
-    if not os.path.lexists(path):
+def _remove_job_spec_at(
+    directory_fd: int,
+    name: str,
+    uid: int,
+) -> Tuple[str, Optional[str]]:
+    metadata, issue = _job_spec_metadata_at(directory_fd, name, uid)
+    if metadata is None and issue == "referenced private job spec is missing":
         return "missing", None
-    issue = _job_spec_file_issue(path, uid)
     if issue is not None:
         return "failed", issue
     try:
-        path.unlink()
-        fsync_directory(path.parent)
+        os.unlink(name, dir_fd=directory_fd)
+        _fsync_job_spec_directory(directory_fd)
     except OSError as exc:
         return "failed", str(exc)
     return "removed", None

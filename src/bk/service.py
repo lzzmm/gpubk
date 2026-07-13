@@ -10,7 +10,15 @@ from .allocator import AllocatorDecision, apply_external_allocator
 from .config import Config
 from .granularity import floor_to_slot, is_slot_aligned, slot_phrase
 from .ledger_schema import MAX_EDIT_OPERATIONS_PER_RESERVATION
-from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest, BookingResult, EditRequest
+from .models import (
+    MODE_EXCLUSIVE,
+    MODE_SHARED,
+    Actor,
+    BookingError,
+    BookingRequest,
+    BookingResult,
+    EditRequest,
+)
 from .policy import DAEMON_POLICY_EXIT_CODE, validate_ledger_policy
 from .scheduler import (
     add_booking,
@@ -121,7 +129,9 @@ def submit_booking(
                 duration_seconds=duration_seconds,
                 start_at=effective_start,
                 mode=mode,
-                preferred_gpus=list(preferred_gpus) if preferred_gpus is not None else None,
+                preferred_gpus=list(preferred_gpus)
+                if preferred_gpus is not None
+                else None,
                 gpu_order=allocator.order,
                 gpu_scores=allocator.scores,
                 op_id=operation_id,
@@ -134,14 +144,20 @@ def submit_booking(
                 share_units=effective_share_units if mode == MODE_SHARED else None,
             ),
         )
-    except Exception:
+    except BaseException:
         if job_spec is not None:
-            delete_job_spec(config, job_spec.spec_id)
+            _cleanup_unreferenced_job_spec(
+                config,
+                store,
+                job_spec.spec_id,
+                suppress_interrupts=True,
+            )
         raise
     if job_spec is not None and (
-        not result.created or result.reservation.get("job", {}).get("spec_id") != job_spec.spec_id
+        not result.created
+        or result.reservation.get("job", {}).get("spec_id") != job_spec.spec_id
     ):
-        delete_job_spec(config, job_spec.spec_id)
+        _cleanup_unreferenced_job_spec(config, store, job_spec.spec_id)
     return BookingSubmission(
         result,
         gpu_advice,
@@ -173,7 +189,11 @@ def submit_edit(
     ledger = store.load()
     validate_ledger_policy(ledger, config)
     reservation = next(
-        (item for item in ledger.get("reservations", []) if item.get("id") == reservation_id),
+        (
+            item
+            for item in ledger.get("reservations", [])
+            if item.get("id") == reservation_id
+        ),
         None,
     )
     if reservation is None:
@@ -193,9 +213,7 @@ def submit_edit(
         else duration_seconds
     )
     effective_start = current_start if start_at is None else start_at
-    effective_mode = (
-        str(reservation.get("mode", MODE_SHARED)) if mode is None else mode
-    )
+    effective_mode = str(reservation.get("mode", MODE_SHARED)) if mode is None else mode
     effective_memory = (
         expected_memory_mb
         if update_expected_memory
@@ -302,6 +320,57 @@ def submit_cancellation(
         warnings.append(f"{cleanup.failed} private job spec cleanup issue(s): {detail}")
     store.last_warning = "; ".join(dict.fromkeys(warnings)) or None
     return CancellationSubmission(reservation, cleanup)
+
+
+def _cleanup_unreferenced_job_spec(
+    config: Config,
+    store: LedgerStore,
+    spec_id: str,
+    *,
+    suppress_interrupts: bool = False,
+) -> None:
+    prior_warning = store.last_warning
+    try:
+        ledger = store.load()
+    except BaseException as exc:
+        _append_store_warning(
+            store,
+            prior_warning,
+            f"private job spec {spec_id[:8]} retained because ledger state could not be verified: "
+            f"{type(exc).__name__}",
+        )
+        if not suppress_interrupts and not isinstance(exc, Exception):
+            raise
+        return
+
+    load_warning = store.last_warning
+    referenced = any(
+        isinstance(reservation, dict)
+        and isinstance(reservation.get("job"), dict)
+        and reservation["job"].get("spec_id") == spec_id
+        for reservation in ledger.get("reservations", [])
+    )
+    if referenced:
+        _append_store_warning(store, prior_warning, load_warning)
+        return
+    try:
+        delete_job_spec(config, spec_id)
+    except BaseException as exc:
+        _append_store_warning(
+            store,
+            prior_warning,
+            load_warning,
+            f"unused private job spec {spec_id[:8]} cleanup deferred: {type(exc).__name__}",
+        )
+        if not suppress_interrupts and not isinstance(exc, Exception):
+            raise
+        return
+    _append_store_warning(store, prior_warning, load_warning)
+
+
+def _append_store_warning(store: LedgerStore, *messages: Optional[str]) -> None:
+    values = [message for message in (store.last_warning, *messages) if message]
+    store.last_warning = "; ".join(dict.fromkeys(values)) or None
 
 
 def build_agent_context(
@@ -506,9 +575,13 @@ def recommend_booking(
             "duration_seconds": duration_seconds,
             "start_at": to_iso(effective_start),
             "mode": mode,
-            "preferred_gpus": list(preferred_gpus) if preferred_gpus is not None else None,
+            "preferred_gpus": list(preferred_gpus)
+            if preferred_gpus is not None
+            else None,
             "expected_memory_mb_per_gpu": expected_memory_mb,
-            "share_units_per_gpu": effective_share_units if mode == MODE_SHARED else None,
+            "share_units_per_gpu": effective_share_units
+            if mode == MODE_SHARED
+            else None,
             "share_fraction_per_gpu": (
                 share_text(effective_share_units, config.max_shared_users)
                 if mode == MODE_SHARED
@@ -518,7 +591,9 @@ def recommend_booking(
         },
         "available": slot is not None,
         "recommendation": None,
-        "nearest_available": _slot_dict(nearest, duration) if slot is None and nearest is not None else None,
+        "nearest_available": _slot_dict(nearest, duration)
+        if slot is None and nearest is not None
+        else None,
         "warnings": [],
         "allocator": {
             "source": allocator.source,
@@ -574,13 +649,17 @@ def recommend_booking(
         "gpu_details": gpu_details,
     }
     if any(item["live_status"] == "busy" for item in gpu_details):
-        response["warnings"].append("one or more selected GPUs are currently busy; live task end times are unknown")
+        response["warnings"].append(
+            "one or more selected GPUs are currently busy; live task end times are unknown"
+        )
     if mode == MODE_SHARED and expected_memory_mb is None:
         response["warnings"].append(
             "expected memory was omitted; share-weighted memory assumptions were used where possible"
         )
     if any(item["history_sample_count"] == 0 for item in gpu_details):
-        response["warnings"].append("recent load history is incomplete; keep bk monitor running for better forecasts")
+        response["warnings"].append(
+            "recent load history is incomplete; keep bk monitor running for better forecasts"
+        )
     return response
 
 
@@ -624,13 +703,17 @@ def _recommendation_gpu_details(
     projected_memory: Dict[int, int],
 ) -> tuple[List[dict], str]:
     snapshots = {item.index: item for item in advice.snapshots}
-    pressure_scores = reservation_pressure_scores(ledger, gpus, start, end, config.max_shared_users)
+    pressure_scores = reservation_pressure_scores(
+        ledger, gpus, start, end, config.max_shared_users
+    )
     details = []
     for gpu in gpus:
         live = advice.live_states[gpu]
         history = advice.historical_loads[gpu]
         snapshot = snapshots.get(gpu)
-        total_memory = snapshot.memory_total_mb if snapshot and snapshot.memory_total_mb else None
+        total_memory = (
+            snapshot.memory_total_mb if snapshot and snapshot.memory_total_mb else None
+        )
         details.append(
             {
                 "gpu": gpu,
@@ -641,7 +724,9 @@ def _recommendation_gpu_details(
                 "recent_predicted_load_percent": round(history.predicted_percent, 3),
                 "history_sample_count": history.sample_count,
                 "memory_total_mb": total_memory,
-                "memory_free_now_mb": max(0, total_memory - snapshot.memory_used_mb) if total_memory else None,
+                "memory_free_now_mb": max(0, total_memory - snapshot.memory_used_mb)
+                if total_memory
+                else None,
                 "projected_memory_headroom_mb": projected_memory.get(gpu),
             }
         )
@@ -811,7 +896,11 @@ def _validate_recommendation_request(
         )
     if expected_memory_mb is not None and expected_memory_mb <= 0:
         raise BookingError("expected GPU memory must be positive")
-    if mode == MODE_SHARED and config.require_shared_memory and expected_memory_mb is None:
+    if (
+        mode == MODE_SHARED
+        and config.require_shared_memory
+        and expected_memory_mb is None
+    ):
         raise BookingError("shared reservations must declare expected memory")
     if mode == MODE_EXCLUSIVE:
         if share_units is not None:
@@ -819,7 +908,9 @@ def _validate_recommendation_request(
         normalized_share_units = config.max_shared_users
     else:
         try:
-            normalized_share_units = normalize_share_units(share_units, config.max_shared_users)
+            normalized_share_units = normalize_share_units(
+                share_units, config.max_shared_users
+            )
         except (TypeError, ValueError) as exc:
             raise BookingError(str(exc)) from exc
     if not allow_queue and not is_slot_aligned(start_at, config.slot_minutes):
@@ -833,7 +924,11 @@ def _slot_dict(slot, duration: timedelta) -> Optional[dict]:
     if slot is None:
         return None
     start, gpus = slot
-    return {"gpus": list(gpus), "start_at": to_iso(start), "end_at": to_iso(start + duration)}
+    return {
+        "gpus": list(gpus),
+        "start_at": to_iso(start),
+        "end_at": to_iso(start + duration),
+    }
 
 
 def _reservation_datetime(reservation: dict, key: str) -> datetime:
@@ -847,10 +942,15 @@ def _optional_int(value: object) -> Optional[int]:
     return int(value) if value is not None else None
 
 
-def _recommendation_confidence(gpu_details: List[dict], snapshots: Dict[int, object]) -> str:
+def _recommendation_confidence(
+    gpu_details: List[dict], snapshots: Dict[int, object]
+) -> str:
     if not gpu_details:
         return "low"
-    telemetry_known = all(getattr(snapshots.get(item["gpu"]), "source", "none") != "none" for item in gpu_details)
+    telemetry_known = all(
+        getattr(snapshots.get(item["gpu"]), "source", "none") != "none"
+        for item in gpu_details
+    )
     history_known = all(item["history_sample_count"] > 0 for item in gpu_details)
     if telemetry_known and history_known:
         return "high"
