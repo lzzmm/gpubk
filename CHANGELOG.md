@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Resolve data, private job, and user-unit defaults through one XDG-compliant absolute-directory
+  policy. Empty or relative XDG values now fall back to HOME instead of drifting with the current
+  working directory, and an explicit private `job_log_dir` must be absolute at config-load time.
 - Snapshot the submitting process's `PATH` in a signed, UID-private v2 scheduled-command spec so
   bare executables keep the same lookup semantics under a restarted systemd worker. No other
   environment variable is captured; v1 specs, operation-ID replays, and exact duplicates remain

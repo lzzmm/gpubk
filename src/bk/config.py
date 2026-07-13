@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from .fileio import open_existing_regular_at
 from .granularity import DEFAULT_SLOT_MINUTES, slot_seconds, validate_slot_minutes
+from .userdirs import xdg_user_directory
 
 
 DEFAULT_PRIVATE_FILE_MODE = 0o600
@@ -474,10 +475,7 @@ def _mode_value(raw: Dict[str, Any], key: str, default: int, *, directory: bool)
 
 
 def _default_data_dir() -> Path:
-    data_home = _path_value(
-        os.environ.get("XDG_DATA_HOME", "~/.local/share"),
-        "XDG_DATA_HOME",
-    )
+    data_home = xdg_user_directory("XDG_DATA_HOME", ".local/share")
     return data_home / "bk"
 
 
@@ -536,12 +534,10 @@ def load_config() -> Config:
 
     job_log_raw = os.environ.get("BK_JOB_LOG_DIR", raw.get("job_log_dir"))
     if job_log_raw is not None and job_log_raw != "":
-        job_log_dir = _path_value(job_log_raw, "job_log_dir")
+        job_log_key = "BK_JOB_LOG_DIR" if "BK_JOB_LOG_DIR" in os.environ else "job_log_dir"
+        job_log_dir = _absolute_user_path_value(job_log_raw, job_log_key)
     else:
-        state_home = _path_value(
-            os.environ.get("XDG_STATE_HOME", "~/.local/state"),
-            "XDG_STATE_HOME",
-        )
+        state_home = xdg_user_directory("XDG_STATE_HOME", ".local/state")
         job_log_dir = state_home / "bk" / "jobs"
     allocator_raw = os.environ.get("BK_ALLOCATOR_COMMAND", raw.get("allocator_command"))
     allocator_command = _command_value(allocator_raw)
@@ -756,6 +752,13 @@ def _path_value(value: Any, key: str) -> Path:
 def _absolute_path_value(value: Any, key: str) -> Path:
     path = _path_value(value, key)
     if not Path(os.fspath(value)).is_absolute():
+        raise ValueError(f"{key} must be an absolute filesystem path")
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _absolute_user_path_value(value: Any, key: str) -> Path:
+    path = _path_value(value, key)
+    if not path.is_absolute():
         raise ValueError(f"{key} must be an absolute filesystem path")
     return Path(os.path.abspath(os.fspath(path)))
 

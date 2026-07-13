@@ -16,6 +16,7 @@ from bk.joblogs import (
     acquire_job_worker_lease,
     cleanup_job_logs,
     job_log_path,
+    job_log_root,
     read_job_log_tail,
     rotated_job_log_path,
     worker_instance_id,
@@ -56,6 +57,18 @@ class JobLogTests(unittest.TestCase):
         self.write_log(reservation_id, 1).write_text("newest", encoding="utf-8")
 
         self.assertEqual(read_job_log_tail(self.config, reservation_id, 13), "older-newest")
+
+    def test_library_default_job_log_root_uses_the_same_xdg_state_policy(self):
+        config = replace(self.config, job_log_dir=None)
+        home = Path(self.tmp.name) / "home"
+        with mock.patch.dict(
+            "os.environ",
+            {"HOME": str(home), "XDG_STATE_HOME": "relative-state"},
+            clear=True,
+        ):
+            root = job_log_root(config)
+
+        self.assertEqual(root, home / ".local" / "state" / "bk" / "jobs")
 
     def test_worker_lease_is_exclusive_and_released_without_deleting_metadata(self):
         first = acquire_job_worker_lease(self.config, self.actor, "worker-1", "host-a")

@@ -546,6 +546,15 @@ behavior and is required unless `BK_DATA_DIR` is also set. Explicit
 system discovery. Set both variables when deliberately combining an alternate
 data directory with an external configuration.
 
+For a private installation without those overrides, GPUbk uses
+`$XDG_DATA_HOME/bk` for the ledger, `$XDG_STATE_HOME/bk/jobs` for private job
+state, and `$XDG_CONFIG_HOME/systemd/user` for installed user units. Per the XDG
+base-directory rules, only absolute non-empty XDG values are accepted; relative
+or empty values fall back to `$HOME/.local/share`, `$HOME/.local/state`, and
+`$HOME/.config`. This keeps CLI and user services on the same paths regardless
+of their working directory. An explicit `BK_JOB_LOG_DIR` or `job_log_dir` must
+be absolute (a leading `~` is expanded).
+
 Replace `1001` with `id -u <monitor-account>` and `1002` with
 `getent group gpuusers | cut -d: -f3`. `storage_gid` is optional, but setting it
 binds the data root itself to the lab group's numeric GID; a consistently

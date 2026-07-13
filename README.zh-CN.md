@@ -468,6 +468,13 @@ sudo chmod 0644 /etc/gpubk/config.json
 显式设置 `BK_DATA_DIR` 会保留原有私有/数据目录内配置行为并跳过系统配置自动发现；
 需要组合其他数据目录与外部配置时应同时设置两个变量。
 
+私有安装若不设置上述覆盖，台账默认位于 `$XDG_DATA_HOME/bk`，私有任务状态位于
+`$XDG_STATE_HOME/bk/jobs`，用户 unit 安装到 `$XDG_CONFIG_HOME/systemd/user`。按照
+XDG 目录规范，只采用非空绝对路径；相对或空值分别回退到 `$HOME/.local/share`、
+`$HOME/.local/state` 与 `$HOME/.config`。因此从不同工作目录运行 CLI 或 user service
+仍会使用同一组路径。显式 `BK_JOB_LOG_DIR` 或 `job_log_dir` 必须为绝对路径（开头的
+`~` 会先展开）。
+
 请用 `id -u <monitor账号>` 的结果替换 `1001`，用
 `getent group gpuusers | cut -d: -f3` 的结果替换 `1002`。`storage_gid` 可省略；
 配置后会把数据根目录本身绑定到实验室组的数字 GID，避免整棵目录树一致地落入错误组

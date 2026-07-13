@@ -5,7 +5,12 @@ from unittest import mock
 
 from bk.config import Config
 from bk.models import BookingError
-from bk.systemd import install_user_unit, service_environment, unit_text
+from bk.systemd import (
+    default_user_unit_dir,
+    install_user_unit,
+    service_environment,
+    unit_text,
+)
 
 
 class BundledSystemdTests(unittest.TestCase):
@@ -61,6 +66,37 @@ class BundledSystemdTests(unittest.TestCase):
             with self.assertRaisesRegex(BookingError, "already exists"):
                 install_user_unit("worker", target, environment=environment)
             install_user_unit("worker", target, environment=environment, force=True)
+
+    def test_default_install_ignores_relative_xdg_config_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            with mock.patch.dict(
+                "os.environ",
+                {"HOME": str(home), "XDG_CONFIG_HOME": "relative-config"},
+                clear=True,
+            ):
+                expected = home / ".config" / "systemd" / "user"
+                self.assertEqual(default_user_unit_dir(), expected)
+                installed = install_user_unit(
+                    "worker",
+                    environment={"BK_DATA_DIR": "/data2/shared/bk"},
+                )
+
+            self.assertEqual(installed, expected / "bk-worker.service")
+            self.assertTrue(installed.is_file())
+
+    def test_default_install_uses_absolute_xdg_config_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_home = Path(tmp) / "xdg-config"
+            with mock.patch.dict(
+                "os.environ",
+                {"HOME": "/home/ignored", "XDG_CONFIG_HOME": str(config_home)},
+                clear=True,
+            ):
+                self.assertEqual(
+                    default_user_unit_dir(),
+                    config_home / "systemd" / "user",
+                )
 
     def test_install_refuses_dangling_unit_symlink_without_force(self):
         with tempfile.TemporaryDirectory() as tmp:

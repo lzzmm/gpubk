@@ -92,6 +92,11 @@ intentionally shown as degraded until the current monitor replaces it.
 After starting the services, verify the monitor with
 `bk doctor --require-monitor --strict` and each user's worker with
 `bk doctor --require-worker --strict`.
+GPUbk now ignores empty or relative XDG base-directory values instead of
+resolving them against the caller's working directory. Before restarting,
+inspect `bk config --json`; if an old shell used a relative XDG value, move or
+select the intended absolute data and private job directories deliberately,
+then reinstall the affected user units with `--force`.
 If those user services must survive logout or start at boot, have an
 administrator verify selective `loginctl enable-linger <user>` state; GPUbk
 never changes linger policy automatically.

@@ -52,6 +52,65 @@ class ConfigTests(unittest.TestCase):
             self.assertIsNone(config.storage_gid)
             self.assertIsNone(config.config_owner_uid)
 
+    def test_relative_xdg_directories_fall_back_to_absolute_home_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "HOME": str(home),
+                    "XDG_DATA_HOME": "relative-data",
+                    "XDG_STATE_HOME": "relative-state",
+                    "BK_GPU_COUNT": "1",
+                },
+                clear=True,
+            ), mock.patch(
+                "bk.config.SYSTEM_CONFIG_FILE",
+                root / "missing-system-config.json",
+            ):
+                config = load_config()
+
+            self.assertEqual(config.data_dir, home / ".local" / "share" / "bk")
+            self.assertEqual(config.job_log_dir, home / ".local" / "state" / "bk" / "jobs")
+            self.assertTrue(config.data_dir.is_absolute())
+            self.assertTrue(config.job_log_dir.is_absolute())
+
+    def test_absolute_xdg_state_home_sets_the_private_job_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "XDG_DATA_HOME": str(root / "data"),
+                    "XDG_STATE_HOME": str(root / "state"),
+                    "BK_GPU_COUNT": "1",
+                },
+                clear=True,
+            ), mock.patch(
+                "bk.config.SYSTEM_CONFIG_FILE",
+                root / "missing-system-config.json",
+            ):
+                config = load_config()
+
+            self.assertEqual(config.data_dir, root / "data" / "bk")
+            self.assertEqual(config.job_log_dir, root / "state" / "bk" / "jobs")
+
+    def test_relative_explicit_job_log_directory_fails_during_config_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "BK_DATA_DIR": str(root / "data"),
+                    "BK_JOB_LOG_DIR": "relative-jobs",
+                    "BK_GPU_COUNT": "1",
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(ValueError, "BK_JOB_LOG_DIR must be an absolute"):
+                    load_config()
+
     def test_trusted_system_config_supplies_shared_data_dir_without_shell_exports(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

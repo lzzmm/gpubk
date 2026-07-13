@@ -131,6 +131,9 @@ Administrator responsibilities:
   and private job-log paths, an explicit trusted config path, and validated values for explicitly
   active non-secret configuration overrides. It never captures the allocator command. Reinstall
   the unit after those paths or overrides change; prefer a trusted config file on shared hosts.
+- Keep XDG base-directory variables absolute. GPUbk ignores empty or relative XDG values and uses
+  the account's absolute HOME defaults, preventing ledger, private worker, or unit paths from
+  changing with a caller's working directory. Explicit private job-log paths must be absolute.
 - Enabling systemd linger allows an account's user manager and background services to run
   without an active login. Grant it only to the selected monitor account and users who need
   unattended workers; disable it when that requirement ends.

@@ -33,6 +33,7 @@ from .models import (
     BookingError,
 )
 from .timeparse import parse_iso, to_iso, utc_now
+from .userdirs import xdg_user_directory
 
 
 MIB = 1024 * 1024
@@ -284,7 +285,9 @@ class JobLogPump:
 
 
 def job_log_root(config: Config) -> Path:
-    return config.job_log_dir or (Path.home() / ".local" / "state" / "bk" / "jobs")
+    return config.job_log_dir or (
+        xdg_user_directory("XDG_STATE_HOME", ".local/state") / "bk" / "jobs"
+    )
 
 
 def worker_instance_id(config: Config) -> str:

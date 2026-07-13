@@ -11,6 +11,7 @@ from typing import Mapping, Optional
 from .config import CONFIG_ENV_MAP, Config
 from .fileio import ensure_directory, fsync_directory
 from .models import BookingError
+from .userdirs import xdg_user_directory
 
 
 UNITS = {
@@ -22,7 +23,7 @@ _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 def default_user_unit_dir() -> Path:
-    config_home = Path(os.environ.get("XDG_CONFIG_HOME", "~/.config")).expanduser()
+    config_home = xdg_user_directory("XDG_CONFIG_HOME", ".config")
     return config_home / "systemd" / "user"
 
 
