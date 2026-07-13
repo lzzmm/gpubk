@@ -187,18 +187,21 @@ bk tutorial --tui
 | `,`、`.` | 快速缩短或延长，步长随缩放变化 |
 | `v` | 在 1x、6x、24x 调节速度间循环 |
 | `Shift` + 调节键 | 终端支持时使用更大的步长 |
-| `1`-`9` | 选择 GPU 数量并跳到最近合法时段 |
+| `1`-`9` | 选择 GPU 数量，并从搜索起点向后查找最早合法时段 |
 | `s`、`x` | 在 Add/Edit 中切换 shared/exclusive |
 | `u` | 设置每张 GPU 要申请的整数 shared slot 数 |
-| `f`、`g` | 查找任意可用卡，或固定当前已选卡查找 |
+| `f` | 从 `NOW` 或手动指定的开始时间向后查找最早可用卡 |
+| `o` | 查找当前时间光标附近最近的合法时段 |
+| `g` | 固定当前已选卡，向后查找最早合法时段 |
 | `n` | 回到带 `NOW` 标记的实时窗口 |
 | `c` | 切换深色/浅色主题 |
+| `z` | 切换容量切片与优先实心的 shared 时间条 |
 | `?` | 打开分页帮助和快速上手说明 |
 | `Enter`、`Esc`、`q` | 提交、取消当前操作或退出 |
 
 TUI 默认每秒刷新一次。较慢终端或希望降低轮询频率时，可在配置中设置
 `tui_refresh_seconds`，或用 `BK_TUI_REFRESH_SECONDS` 覆盖当前环境。
-头部的 `M:` 表示共享遥测采集器，`W:` 表示当前 UID 的预约脚本 worker；`W:IDLE`
+头部直接写出共享遥测采集器与当前 UID 的预约脚本 worker 状态；`worker=idle`
 表示当前没有任务需要自动执行。只有存在可运行脚本时才会只读检查 worker，并限制为
 最多每 10 秒一次；按 `r` 会立即清空 monitor 和 worker 状态缓存并重新检查。
 
@@ -348,7 +351,7 @@ monitor 警告与 Agent 的 GPU 详情会暴露进程列表和进程级利用率
 monitor 还会原子更新一个很小的 `usage/collector.json` 心跳。Usage JSON、Agent
 上下文、`bk doctor` 与 TUI 顶栏读取同一组 `running`、`degraded`、`stale`、
 `stopped`、拓扑不匹配状态。异常退出漏过三次心跳后变为 `stale`，正常退出显示
-`stopped`；TUI 中 `M:OK` 表示采集器新鲜，`M:--` 表示尚无心跳记录。
+`stopped`；TUI 中 `monitor=ok` 表示采集器新鲜，`monitor=not-seen` 表示尚无心跳记录。
 缺少稳定设备标识，或当前观测到的 GPU 进程无法解析出数字 UID 时，collector 会进入
 `degraded`，因此受保护定时任务仍无法启动时，启动后的 doctor 验收也不会误报成功。
 若主机使用 `hidepid` 或容器化 `/proc`，只把管理员批准的进程可见组授予 monitor 账号；

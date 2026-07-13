@@ -56,13 +56,15 @@ class CliTests(unittest.TestCase):
             check=False,
         )
 
-    def run_bk_with_input(self, args, data_dir, text):
+    def run_bk_with_input(self, args, data_dir, text, extra_env=None):
         env = os.environ.copy()
         env["PYTHONPATH"] = str(ROOT / "src")
         env["BK_DATA_DIR"] = str(data_dir)
         env["BK_GPU_COUNT"] = "2"
         env["BK_MAX_SHARED_USERS"] = "2"
         env["BK_GPU_SIM_FILE"] = str(Path(data_dir) / "missing-gpu-simulation.json")
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
             [sys.executable, "-m", "bk"] + args,
             input=text,
@@ -349,6 +351,16 @@ class CliTests(unittest.TestCase):
             self.assertIn("physical-free-now=", result.stdout)
             self.assertIn("reservation-budget-after=", result.stdout)
 
+    def test_positional_memory_is_shorthand_for_per_gpu_memory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+
+            result = self.run_bk(["1", "30m", "5g"], data_dir)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            ledger = json.loads((data_dir / "ledger.json").read_text(encoding="utf-8"))
+            self.assertEqual(ledger["reservations"][0]["expected_memory_mb"], 5 * 1024)
+
     def test_auto_alias_defaults_to_shared(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.run_bk(["auto", "1", "30m"], Path(tmp))
@@ -454,6 +466,38 @@ class CliTests(unittest.TestCase):
             self.assertIn("created:", result.stdout)
             ledger = json.loads((Path(tmp) / "ledger.json").read_text(encoding="utf-8"))
             self.assertEqual(len(ledger["reservations"]), 1)
+
+    def test_guided_add_requires_memory_before_review_when_policy_demands_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            user_input = "\n".join(
+                [
+                    "",      # shared
+                    "1",
+                    "30m",
+                    "now",
+                    "",      # automatic GPUs
+                    "",      # one shared slot
+                    "",      # rejected automatic VRAM
+                    "5g",
+                    "",      # no command
+                    "",      # confirm
+                    "",
+                ]
+            )
+
+            result = self.run_bk_with_input(
+                ["add"],
+                data_dir,
+                user_input,
+                {"BK_REQUIRE_SHARED_MEMORY": "1"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("requires expected VRAM", result.stdout)
+            self.assertEqual(result.stdout.count("Review"), 1)
+            ledger = json.loads((data_dir / "ledger.json").read_text(encoding="utf-8"))
+            self.assertEqual(ledger["reservations"][0]["expected_memory_mb"], 5 * 1024)
 
     def test_guided_add_can_go_back_and_cancel_without_writing(self):
         with tempfile.TemporaryDirectory() as tmp:

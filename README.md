@@ -204,21 +204,24 @@ Useful TUI keys:
 | `,`, `.` | Quickly shorten or extend duration; step follows zoom |
 | `v` | Cycle adjustment speed through 1x, 6x, and 24x |
 | `Shift` + adjustment | Use a larger step when the terminal reports it |
-| `1`-`9` | Pick a GPU count and jump to the nearest valid slot |
+| `1`-`9` | Pick a GPU count and find the earliest valid slot from the search start |
 | `s`, `x` | Switch between shared and exclusive in Add/Edit |
 | `u` | Set the integer shared slots requested per GPU |
-| `f`, `g` | Find any suitable GPUs, or keep the selected GPUs fixed |
+| `f` | Find the earliest suitable GPUs from `NOW` or the manually selected start |
+| `o` | Find the nearest valid slot around the current cursor |
+| `g` | Find the earliest slot while keeping the selected GPUs fixed |
 | `n` | Return to the live `NOW` window |
 | `c` | Toggle the dark/light theme |
+| `z` | Toggle capacity-sliced and solid-first shared bars |
 | `?` | Open the paged help and quick tour |
 | `Enter`, `Esc`, `q` | Submit, cancel the current action, or quit |
 
 The TUI refreshes once per second by default. Set `tui_refresh_seconds` in the
 configuration, or `BK_TUI_REFRESH_SECONDS` for one environment, when a slower
 terminal or lower polling rate is preferred.
-The header uses `M:` for the shared telemetry collector and `W:` for this UID's
-scheduled-command worker. `W:IDLE` means no current reservation needs automatic
-execution; worker state is checked read-only and at most once every ten seconds
+The header spells out the shared telemetry collector and this UID's scheduled-command
+worker state. `worker=idle` means no current reservation needs automatic execution;
+worker state is checked read-only and at most once every ten seconds
 while a runnable command exists. Press `r` to invalidate both monitor and worker
 status caches immediately.
 
@@ -410,7 +413,8 @@ The monitor also atomically updates a small `usage/collector.json` heartbeat.
 Usage JSON, Agent context, `bk doctor`, and the TUI header expose the same states:
 `running`, `degraded`, `stale`, `stopped`, or `topology-mismatch`. A crash becomes
 `stale` after three missed heartbeats; a normal exit becomes `stopped`. In the
-TUI, `M:OK` means a fresh collector and `M:--` means no heartbeat has been recorded.
+TUI, `monitor=ok` means a fresh collector and `monitor=not-seen` means no heartbeat
+has been recorded.
 Missing stable identifiers or an observed process whose numeric UID cannot be
 resolved make the collector `degraded`, so post-start doctor verification cannot
 pass while guarded scheduled commands would remain blocked. On hosts using

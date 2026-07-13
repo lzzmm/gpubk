@@ -692,35 +692,14 @@ def find_earliest_slot(
         candidate_starts = [earliest_start]
 
     for candidate_start in candidate_starts:
-        candidate_end = candidate_start + duration
-        if preferred_gpus is not None:
-            reasons = []
-            for gpu in preferred_gpus:
-                ok, reason = _availability_detail_indexed(
-                    index,
-                    gpu,
-                    candidate_start,
-                    candidate_end,
-                    mode,
-                    config.max_shared_users,
-                    expected_memory_mb,
-                    gpu_memory_capacity_mb,
-                    config.shared_memory_reserve_mb,
-                    share_units,
-                )
-                if not ok:
-                    reasons.append(reason)
-            if not reasons:
-                return candidate_start, list(preferred_gpus)
-            continue
-
-        gpus, _reason = _find_available_gpus_with_reason(
+        gpus = _gpus_at_start(
             index,
             config,
             count,
             candidate_start,
-            candidate_end,
+            duration,
             mode,
+            preferred_gpus,
             gpu_order,
             gpu_scores,
             expected_memory_mb,
@@ -730,6 +709,117 @@ def find_earliest_slot(
         if len(gpus) == count:
             return candidate_start, gpus
     return None
+
+
+def find_nearest_slot(
+    ledger: dict,
+    config: Config,
+    count: int,
+    target_start: datetime,
+    duration: timedelta,
+    mode: str,
+    uid: int,
+    preferred_gpus: Optional[Sequence[int]] = None,
+    gpu_order: Optional[Sequence[int]] = None,
+    gpu_scores: Optional[Dict[int, float]] = None,
+    expected_memory_mb: Optional[int] = None,
+    gpu_memory_capacity_mb: Optional[Dict[int, int]] = None,
+    share_units: int = 1,
+) -> Optional[Tuple[datetime, List[int]]]:
+    validate_ledger_policy(ledger, config)
+    now = utc_now()
+    lower_bound = floor_to_slot(now, config.slot_minutes)
+    target = max(lower_bound, ceil_to_slot(target_start, config.slot_minutes))
+    search_until = target + timedelta(hours=config.queue_search_hours)
+    index = ReservationIndex.from_ledger(ledger, lower_bound)
+    candidates = set(
+        _candidate_starts_from_index(
+            index,
+            lower_bound,
+            search_until,
+            config.slot_minutes,
+        )
+    )
+    candidates.add(target)
+    for reservation in index.spans:
+        before = floor_to_slot(reservation.start - duration, config.slot_minutes)
+        if lower_bound <= before <= search_until:
+            candidates.add(before)
+    ordered = sorted(
+        candidates,
+        key=lambda candidate: (
+            abs((candidate - target).total_seconds()),
+            candidate > target,
+            candidate,
+        ),
+    )
+    for candidate_start in ordered:
+        gpus = _gpus_at_start(
+            index,
+            config,
+            count,
+            candidate_start,
+            duration,
+            mode,
+            preferred_gpus,
+            gpu_order,
+            gpu_scores,
+            expected_memory_mb,
+            gpu_memory_capacity_mb,
+            share_units,
+        )
+        if len(gpus) == count:
+            return candidate_start, gpus
+    return None
+
+
+def _gpus_at_start(
+    index: ReservationIndex,
+    config: Config,
+    count: int,
+    start: datetime,
+    duration: timedelta,
+    mode: str,
+    preferred_gpus: Optional[Sequence[int]],
+    gpu_order: Optional[Sequence[int]],
+    gpu_scores: Optional[Dict[int, float]],
+    expected_memory_mb: Optional[int],
+    gpu_memory_capacity_mb: Optional[Dict[int, int]],
+    share_units: int,
+) -> List[int]:
+    end = start + duration
+    if preferred_gpus is not None:
+        for gpu in preferred_gpus:
+            ok, _reason = _availability_detail_indexed(
+                index,
+                gpu,
+                start,
+                end,
+                mode,
+                config.max_shared_users,
+                expected_memory_mb,
+                gpu_memory_capacity_mb,
+                config.shared_memory_reserve_mb,
+                share_units,
+            )
+            if not ok:
+                return []
+        return list(preferred_gpus)
+
+    gpus, _reason = _find_available_gpus_with_reason(
+        index,
+        config,
+        count,
+        start,
+        end,
+        mode,
+        gpu_order,
+        gpu_scores,
+        expected_memory_mb,
+        gpu_memory_capacity_mb,
+        share_units,
+    )
+    return gpus
 
 
 def can_place_gpu(

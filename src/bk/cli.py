@@ -394,6 +394,11 @@ def _book_command(
     )
     parser.add_argument("count", type=int)
     parser.add_argument("duration")
+    parser.add_argument(
+        "memory",
+        nargs="?",
+        help="expected VRAM on each GPU, e.g. 5g (shorthand for --mem 5g)",
+    )
     start_group = parser.add_mutually_exclusive_group()
     start_group.add_argument(
         "--start",
@@ -413,7 +418,10 @@ def _book_command(
     args = parser.parse_args(booking_argv)
 
     preferred = _parse_gpu_list(args.gpu) if args.gpu else None
-    expected_memory_mb = parse_memory_mb(args.mem) if args.mem else None
+    if args.memory and args.mem:
+        parser.error("memory may be given either positionally or with --mem, not both")
+    memory_value = args.mem or args.memory
+    expected_memory_mb = parse_memory_mb(memory_value) if memory_value else None
     share_units = _share_units_from_args(args, config, mode)
     duration_seconds = parse_duration_seconds(args.duration)
     if args.at is not None:
@@ -1400,14 +1408,21 @@ def _add_command(argv: List[str], config: Config, store: LedgerStore) -> int:
 def _add_interactive(config: Config, store: LedgerStore) -> int:
     print("Guided booking. Enter accepts a default; type back or cancel at any field.")
     actor = _current_actor()
-    try:
-        values = _guided_booking_fields(config, store)
-    except (EOFError, KeyboardInterrupt):
-        print("\ncancelled")
-        return 0
-    if values is None:
-        print("cancelled")
-        return 0
+    while True:
+        try:
+            values = _guided_booking_fields(config, store)
+        except (EOFError, KeyboardInterrupt):
+            print("\ncancelled")
+            return 0
+        if values is None:
+            print("cancelled")
+            return 0
+        try:
+            preview = _guided_booking_preview(config, store, actor, values)
+        except (BookingError, ValueError) as exc:
+            print(f"  Cannot review this request: {exc}. Please revise it.")
+            continue
+        break
     mode_raw = values["mode"]
     count = values["count"]
     duration = values["duration"]
@@ -1417,18 +1432,16 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
     share_units = values["share"]
     command_argv = values["command"]
 
-    start_text = (
-        f"current {config.slot_minutes}-minute interval, then earliest queueable slot"
-        if allow_queue
-        else format_local(start)
-    )
-    gpu_text = "automatic" if preferred is None else ",".join(map(str, preferred))
+    recommendation = preview["recommendation"]
+    start_text = format_local(recommendation["start_at"])
+    gpu_text = ",".join(map(str, recommendation["gpus"]))
     memory_text = "share-weighted estimate" if expected_memory_mb is None else _format_memory_mb(expected_memory_mb)
     print("Review")
     print(f"  mode={mode_raw} GPUs={count} ({gpu_text}) duration={_duration_compact(duration)}")
     if mode_raw == MODE_SHARED:
         print(f"  share={share_text(share_units, config.max_shared_users)} per GPU")
-    print(f"  start={start_text}")
+    queue_note = " (queued earliest)" if recommendation["queued"] else ""
+    print(f"  start={start_text}{queue_note}")
     print(f"  expected VRAM/GPU={memory_text}")
     if command_argv:
         print(f"  command={shlex.join(command_argv)}")
@@ -1491,7 +1504,7 @@ def _guided_booking_fields(config: Config, store: LedgerStore) -> Optional[dict]
         ),
         (
             "start",
-            lambda _values: "start [now, +30m, 20:00, tomorrow 09:00, 07-13 20:00] (now): ",
+            lambda _values: "start [now, +30m, 9, 21, 9am, t 9, 07-13 20:00] (now): ",
             lambda raw, _values: _guided_start(raw, config.slot_minutes),
         ),
         (
@@ -1511,7 +1524,13 @@ def _guided_booking_fields(config: Config, store: LedgerStore) -> Optional[dict]
         (
             "memory",
             lambda _values: "expected VRAM per GPU [auto or 12g] (auto): ",
-            lambda raw, _values: _guided_memory(raw),
+            lambda raw, values: _guided_memory(
+                raw,
+                required=(
+                    config.require_shared_memory
+                    and values["mode"] == MODE_SHARED
+                ),
+            ),
         ),
         (
             "command",
@@ -1818,10 +1837,48 @@ def _guided_optional_count(raw: str, gpu_count: int, gpus: Optional[List[int]]) 
     return count
 
 
-def _guided_memory(raw: str) -> Optional[int]:
+def _guided_memory(raw: str, *, required: bool = False) -> Optional[int]:
     if not raw or raw.lower() == "auto":
+        if required:
+            raise ValueError(
+                "this server requires expected VRAM for shared reservations, such as 12g"
+            )
         return None
     return parse_memory_mb(raw)
+
+
+def _guided_booking_preview(
+    config: Config,
+    store: LedgerStore,
+    actor: Actor,
+    values: dict,
+) -> dict:
+    start, allow_queue = values["start"]
+    preview = recommend_booking(
+        config,
+        store,
+        actor,
+        count=values["count"],
+        duration_seconds=values["duration"],
+        start_at=start,
+        mode=values["mode"],
+        preferred_gpus=values["gpus"],
+        expected_memory_mb=values["memory"],
+        share_units=(
+            values["share"] if values["mode"] == MODE_SHARED else None
+        ),
+        allow_queue=allow_queue,
+    )
+    if preview.get("recommendation") is None:
+        nearest = preview.get("nearest_available")
+        hint = ""
+        if isinstance(nearest, dict):
+            hint = (
+                f"; nearest is GPU {','.join(map(str, nearest.get('gpus', [])))} "
+                f"at {format_local(str(nearest['start_at']))}"
+            )
+        raise BookingError(f"no legal placement for the requested time{hint}")
+    return preview
 
 
 def _guided_edit_memory(raw: str) -> tuple[Optional[int], bool]:

@@ -16,6 +16,10 @@ from .granularity import (
 
 _DURATION_TOKEN_RE = re.compile(r"(?P<num>\d+)(?P<unit>[dhm])")
 _MEMORY_RE = re.compile(r"^(?P<num>\d+(?:\.\d+)?)(?P<unit>g|gb|gib|m|mb|mib)$", re.IGNORECASE)
+_CLOCK_RE = re.compile(
+    r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<meridiem>am|pm)?",
+    re.IGNORECASE,
+)
 
 
 def utc_now() -> datetime:
@@ -69,14 +73,30 @@ def parse_friendly_start(
     lowered = raw.lower()
     day_offset = None
     clock_text = raw
-    if lowered.startswith("today "):
+    day_aliases = {
+        "today": 0,
+        "tod": 0,
+        "tomorrow": 1,
+        "tom": 1,
+        "tmr": 1,
+        "t": 1,
+    }
+    day_match = re.fullmatch(
+        r"(?P<day>today|tod|tomorrow|tom|tmr|t)\s+(?P<clock>.+)",
+        raw,
+        re.IGNORECASE,
+    )
+    if day_match:
+        day_offset = day_aliases[day_match.group("day").lower()]
+        clock_text = day_match.group("clock").strip()
+    elif lowered.startswith("today "):
         day_offset = 0
         clock_text = raw[6:].strip()
     elif lowered.startswith("tomorrow "):
         day_offset = 1
         clock_text = raw[9:].strip()
 
-    if day_offset is not None or re.fullmatch(r"\d{1,2}:\d{2}", clock_text):
+    if day_offset is not None or _CLOCK_RE.fullmatch(clock_text):
         hour, minute = _friendly_clock(clock_text)
         candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if day_offset is not None:
@@ -93,7 +113,9 @@ def parse_friendly_start(
             candidate += timedelta(days=1)
         return _validate_friendly_boundary(candidate, slot_minutes)
 
-    month_day = re.fullmatch(r"(?P<month>\d{1,2})-(?P<day>\d{1,2})[ T](?P<time>\d{1,2}:\d{2})", raw)
+    month_day = re.fullmatch(
+        r"(?P<month>\d{1,2})-(?P<day>\d{1,2})[ T](?P<time>.+)", raw
+    )
     if month_day:
         hour, minute = _friendly_clock(month_day.group("time"))
         try:
@@ -118,7 +140,8 @@ def parse_friendly_start(
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError(
-            "start must be now, +30m, 20:00, tomorrow 09:00, 07-13 20:00, or ISO 8601"
+            "start must be now, +30m, 9, 21, 9am, t 9, tomorrow 09:00, "
+            "07-13 20:00, or ISO 8601"
         ) from exc
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=local_zone)
@@ -144,12 +167,19 @@ def normalize_queue_start(
 
 
 def _friendly_clock(value: str) -> tuple[int, int]:
-    match = re.fullmatch(r"(?P<hour>\d{1,2}):(?P<minute>\d{2})", value)
+    match = _CLOCK_RE.fullmatch(value.strip())
     if not match:
-        raise ValueError("clock time must look like 20:00")
+        raise ValueError("clock time must look like 9, 21, 9am, or 20:30")
     hour = int(match.group("hour"))
-    minute = int(match.group("minute"))
-    if hour > 23 or minute > 59:
+    minute = int(match.group("minute") or 0)
+    meridiem = (match.group("meridiem") or "").lower()
+    if meridiem:
+        if hour < 1 or hour > 12:
+            raise ValueError("12-hour clock must use an hour between 1 and 12")
+        hour = hour % 12 + (12 if meridiem == "pm" else 0)
+    elif hour > 23:
+        raise ValueError("24-hour clock must use an hour between 0 and 23")
+    if minute > 59:
         raise ValueError("clock time is out of range")
     return hour, minute
 

@@ -61,6 +61,31 @@ class TimeParsingTests(unittest.TestCase):
                 self.assertEqual(int(parsed.timestamp()) % 300, 0)
                 self.assertGreaterEqual(parsed, now - timedelta(minutes=5))
 
+    def test_friendly_clock_accepts_short_day_and_clock_forms(self):
+        now = datetime(2030, 1, 1, 12, 40, tzinfo=timezone.utc)
+        local = now.astimezone()
+
+        expected_tomorrow = local.replace(
+            day=local.day + 1, hour=9, minute=0
+        ).astimezone(timezone.utc)
+        for value in ("t 9", "tmr 9am", "tom 09:00", "tomorrow 9"):
+            with self.subTest(value=value):
+                self.assertEqual(parse_friendly_start(value, now), expected_tomorrow)
+        self.assertEqual(
+            parse_friendly_start("9pm", now),
+            local.replace(hour=21, minute=0).astimezone(timezone.utc),
+        )
+        self.assertEqual(
+            parse_friendly_start("21", now),
+            local.replace(hour=21, minute=0).astimezone(timezone.utc),
+        )
+        self.assertEqual(
+            parse_friendly_start("07-13 9:30pm", now),
+            local.replace(month=7, day=13, hour=21, minute=30).astimezone(
+                timezone.utc
+            ),
+        )
+
     def test_friendly_time_error_lists_supported_examples(self):
         with self.assertRaisesRegex(ValueError, "tomorrow 09:00"):
             parse_friendly_start("hwo", datetime(2030, 1, 1, tzinfo=timezone.utc))

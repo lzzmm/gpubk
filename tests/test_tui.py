@@ -142,17 +142,17 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertLessEqual(len(title), width - 1)
         self.assertLessEqual(len(details), width - 1)
         self.assertTrue(title.endswith("5m"), title)
-        self.assertTrue(details.endswith("? help"), details)
-        self.assertIn("2.5s refresh", details)
-        self.assertIn("M:--", details)
-        self.assertIn("W:IDLE", details)
+        self.assertTrue(details.endswith("capacity"), details)
+        self.assertIn("monitor=not-seen", details)
+        self.assertIn("worker=idle", details)
+        self.assertNotIn("data=", details)
 
         preview = AddPreview(self.start, self.end, (0,), 0, MODE_SHARED, True, blink=True)
         variants = [
             (_footer_label(TuiState(), None, width), "n NOW", "q quit"),
             (_footer_label(TuiState(focus=FOCUS_GPUS), None, width), "n NOW", "q quit"),
-            (_footer_label(TuiState(add_mode=True), preview, width), "f/g", "? help"),
-            (_footer_label(TuiState(edit_mode=True), preview, width), "f/g", "? help"),
+            (_footer_label(TuiState(add_mode=True), preview, width), "f first", "?"),
+            (_footer_label(TuiState(edit_mode=True), preview, width), "f first", "?"),
         ]
         for footer, control, ending in variants:
             self.assertLessEqual(len(footer), width - 1)
@@ -677,6 +677,15 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertIsNone(_timeline_selected_id(active, TuiState(edit_mode=True)))
         self.assertIsNone(_timeline_selected_id(active, TuiState(focus=FOCUS_GPUS)))
 
+    def test_reservation_focus_can_select_another_users_booking(self):
+        active = [
+            reservation("other", os.getuid() + 1, MODE_SHARED, [0], self.start, self.end),
+            reservation("mine", os.getuid(), MODE_SHARED, [1], self.start, self.end),
+        ]
+
+        self.assertEqual(_timeline_selected_id(active, TuiState(selected=0)), "other")
+        self.assertEqual(_timeline_selected_id(active, TuiState(selected=1)), "mine")
+
     def test_gpu_focus_navigation_and_add_uses_focused_gpu(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Config(data_dir=Path(tmp), gpu_count=2, max_shared_users=2)
@@ -757,7 +766,7 @@ class TuiAddPreviewTests(unittest.TestCase):
             self.assertLessEqual(state.editor_view_start, utc_now())
             self.assertLess(preview.end, view_end)
             self.assertFalse(state.error)
-            self.assertIn("auto found 1 GPU [1]", state.message)
+            self.assertIn("earliest found 1 GPU [1]", state.message)
             self.assertEqual(len(store.load()["reservations"]), 1)
 
     def test_add_auto_find_preserves_the_selected_gpu_count(self):
@@ -779,7 +788,7 @@ class TuiAddPreviewTests(unittest.TestCase):
             preview = _build_add_preview(store.load(), config, state, state.editor_view_start)
             self.assertEqual(preview.start, self.start)
             self.assertGreaterEqual(state.slot_minutes, 30)
-            self.assertIn("auto found 2 GPU [1,2]", state.message)
+            self.assertIn("earliest found 2 GPU [1,2]", state.message)
             self.assertEqual(len(store.load()["reservations"]), 1)
 
     def test_add_fixed_find_keeps_selected_gpu_and_jumps_to_its_next_slot(self):
@@ -804,7 +813,7 @@ class TuiAddPreviewTests(unittest.TestCase):
             self.assertTrue(preview.valid, preview.reason)
             self.assertLessEqual(state.editor_view_start, utc_now())
             self.assertLess(preview.end, view_end)
-            self.assertIn("fixed found 1 GPU [0]", state.message)
+            self.assertIn("fixed earliest found 1 GPU [0]", state.message)
             self.assertEqual(len(store.load()["reservations"]), 1)
 
     def test_add_fixed_find_requires_a_gpu_selection(self):
@@ -833,7 +842,7 @@ class TuiAddPreviewTests(unittest.TestCase):
             self.assertEqual(state.message, "")
             self.assertFalse(state.error)
 
-    def test_number_key_sets_gpu_count_and_auto_finds_nearest_slot(self):
+    def test_number_key_sets_gpu_count_and_finds_earliest_slot(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Config(data_dir=Path(tmp), gpu_count=3, max_shared_users=1)
             store = LedgerStore(config.data_dir)
@@ -851,7 +860,77 @@ class TuiAddPreviewTests(unittest.TestCase):
             self.assertEqual(state.add_selected_gpus, {1, 2})
             preview = _build_add_preview(store.load(), config, state, state.editor_view_start)
             self.assertEqual(preview.start, self.start)
-            self.assertIn("auto found 2 GPU [1,2]", state.message)
+            self.assertIn("earliest found 2 GPU [1,2]", state.message)
+
+    def test_earliest_search_keeps_now_anchor_after_an_automatic_jump(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp), gpu_count=1, max_shared_users=1)
+            store = LedgerStore(config.data_dir)
+            actor = Actor(uid=os.getuid(), username="current")
+            add_booking(
+                store,
+                config,
+                BookingRequest(
+                    actor,
+                    1,
+                    30 * 60,
+                    self.start + timedelta(minutes=30),
+                    MODE_EXCLUSIVE,
+                    [0],
+                ),
+            )
+            state = self.state(mode=MODE_EXCLUSIVE, duration_steps=12)
+            state.editor_view_start = self.start
+            state.add_search_anchor = self.start
+
+            _handle_add_key(ord("f"), config, store, state)
+            first = _build_add_preview(store.load(), config, state, state.editor_view_start)
+            self.assertEqual(first.start, self.start + timedelta(hours=1))
+            self.assertEqual(state.add_search_anchor, self.start)
+
+            state.add_duration_steps = 6
+            _handle_add_key(ord("f"), config, store, state)
+            second = _build_add_preview(store.load(), config, state, state.editor_view_start)
+
+            self.assertEqual(second.start, self.start)
+            self.assertEqual(state.add_search_anchor, self.start)
+
+    def test_manual_time_move_sets_the_earliest_search_anchor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp), gpu_count=1, max_shared_users=1)
+            store = LedgerStore(config.data_dir)
+            state = self.state(mode=MODE_EXCLUSIVE)
+            state.editor_view_start = self.start
+            state.add_search_anchor = self.start
+
+            for _ in range(6):
+                _handle_add_key(curses.KEY_RIGHT, config, store, state)
+            _handle_add_key(ord("f"), config, store, state)
+
+            preview = _build_add_preview(store.load(), config, state, state.editor_view_start)
+            self.assertEqual(preview.start, self.start + timedelta(minutes=30))
+            self.assertEqual(state.add_search_anchor, self.start + timedelta(minutes=30))
+
+    def test_nearest_search_is_a_separate_key_and_prefers_the_left_tie(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp), gpu_count=1, max_shared_users=1)
+            store = LedgerStore(config.data_dir)
+            actor = Actor(uid=os.getuid(), username="current")
+            target = self.start + timedelta(hours=1)
+            add_booking(
+                store,
+                config,
+                BookingRequest(actor, 1, 30 * 60, target, MODE_EXCLUSIVE, [0]),
+            )
+            state = self.state(mode=MODE_EXCLUSIVE)
+            state.editor_view_start = target
+            state.add_search_anchor = target
+
+            _handle_add_key(ord("o"), config, store, state)
+
+            preview = _build_add_preview(store.load(), config, state, state.editor_view_start)
+            self.assertEqual(preview.start, target - timedelta(minutes=30))
+            self.assertIn("nearest found", state.message)
 
     def test_editor_has_fine_quick_and_zoom_adjustments(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1015,7 +1094,7 @@ class TuiAddPreviewTests(unittest.TestCase):
             self.assertEqual(preview.start, self.start)
             self.assertEqual(preview.selected_gpus, (0,))
             self.assertTrue(preview.valid, preview.reason)
-            self.assertIn("auto found 1 GPU [0]", state.message)
+            self.assertIn("earliest found 1 GPU [0]", state.message)
 
     def test_edit_reset_restores_original_selection(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1124,7 +1203,7 @@ class TuiAddPreviewTests(unittest.TestCase):
             reservation("exclusive", os.getuid(), MODE_EXCLUSIVE, [1], self.start, self.end),
         ]
 
-        self.assertEqual(_capacity_text(active[0], active, 2), "1")
+        self.assertEqual(_capacity_text(active[0], active, 2), "1/2")
         self.assertEqual(_capacity_text(active[2], active, 2), "-")
 
     def test_two_shared_reservations_split_gpu_band_into_vertical_lanes(self):
@@ -1259,7 +1338,25 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertTrue(first[2] & curses.A_BLINK)
         self.assertEqual(second[:2], (BAR_CHAR, color_map["large"]))
         self.assertFalse(second[2] & curses.A_BLINK)
-        self.assertEqual(_capacity_text(large, active, 4), "3")
+        self.assertEqual(_capacity_text(large, active, 4), "3/4")
+
+    def test_solid_shared_style_uses_full_bar_until_another_booking_overlaps(self):
+        one = reservation("one", os.getuid(), MODE_SHARED, [0], self.start, self.end)
+        one["share_units"] = 1
+        color_map = _reservation_color_map([one])
+
+        cell = _cell_for_gpu(
+            0,
+            color_map,
+            [one],
+            self.start,
+            self.start + timedelta(minutes=5),
+            None,
+            shared_limit=4,
+            shared_style="solid",
+        )
+
+        self.assertEqual(cell[:2], (BAR_CHAR, color_map["one"]))
 
     def test_shared_weave_gives_each_reservation_equal_area_per_period(self):
         for count in (3, 4, 5, 6, 8):
@@ -1391,9 +1488,8 @@ class TuiAddPreviewTests(unittest.TestCase):
         narrow = _gpu_label(GpuSnapshot(index=0, name="unknown"), 20, peak_shared=4, shared_limit=4)
 
         self.assertIn("G0", label)
-        self.assertIn(" 4 ", label)
-        self.assertIn(" 4 ", narrow)
-        self.assertNotIn("of4", label)
+        self.assertIn("4/4", label)
+        self.assertIn("4/4", narrow)
         self.assertNotIn("unknown", label)
 
     def test_gpu_metric_columns_do_not_move_when_shared_capacity_changes(self):
@@ -1409,10 +1505,10 @@ class TuiAddPreviewTests(unittest.TestCase):
         idle = _gpu_label(gpu, 32, peak_shared=0, shared_limit=2)
         shared = _gpu_label(gpu, 32, peak_shared=2, shared_limit=2)
 
-        self.assertIn(" 0 ", idle)
-        self.assertIn(" 2 ", shared)
-        self.assertEqual(idle.split()[1], "0")
-        self.assertEqual(shared.split()[1], "2")
+        self.assertIn("0/2", idle)
+        self.assertIn("2/2", shared)
+        self.assertEqual(idle.split()[1], "0/2")
+        self.assertEqual(shared.split()[1], "2/2")
         self.assertEqual(idle.index("72%"), shared.index("72%"))
         self.assertEqual(idle.index("92.0G"), shared.index("92.0G"))
 
@@ -1450,7 +1546,7 @@ class TuiAddPreviewTests(unittest.TestCase):
         label = _gpu_label(gpu, 32, peak_shared=2, shared_limit=4, violations=1)
 
         self.assertIn("!1", label)
-        self.assertIn(" 2 ", label)
+        self.assertIn("2/4", label)
         self.assertNotIn("of4", label)
         self.assertIn("72%", label)
         self.assertIn("92.0G", label)

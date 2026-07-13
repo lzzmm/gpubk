@@ -79,7 +79,7 @@ Recommendation fields:
 - `policy.worker_termination_grace_seconds` is charged inside a reservation: TERM is sent that
   far before `end_at`, and KILL is sent at `end_at` if needed. Agents should budget useful runtime
   accordingly and make scheduled commands handle TERM for checkpointing.
-- Human `bk status` and TUI `W:` inspect that lease only while the current UID has a job that may
+- Human `bk status` and the TUI `worker=` header inspect that lease only while the current UID has a job that may
   still run automatically; terminal jobs do not create a stale worker warning.
 
 Create and edit return the same `kind=booking_result` shape through JSON CLI and MCP: `status`, a
