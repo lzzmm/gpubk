@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Add `bk doctor --require-worker` for a read-only, instance-bound deployment check of the
+  current UID's scheduled-command worker. Doctor JSON now includes the privacy-safe worker status,
+  while ordinary checks do not require the optional per-user service.
 - Resolve exact create and edit operation-ID replays before GPU probing, external allocation, or
   private-spec writes. Replay responses preserve the committed allocation with explicit
   `idempotent-replay` provenance, while concurrent first submissions still converge through the

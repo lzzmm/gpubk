@@ -140,9 +140,10 @@ Administrator responsibilities:
 - After enabling the monitor, run `bk doctor --require-monitor --strict`. Preflight intentionally
   permits a missing heartbeat because the service may not have started yet; post-start verification
   must not.
-- After enabling each per-user worker, run `bk worker --status --require-running`. The probe is
-  authoritative only for invocations resolving the same private job directory and lock-capable
-  mount as that worker.
+- After enabling each per-user worker, run `bk doctor --require-worker --strict`. The check is
+  authoritative only for invocations resolving the same data directory, private job directory,
+  and lock-capable mount as that worker. `bk worker --status --require-running` remains the
+  lower-level worker-only diagnostic.
 - Use plain `bk doctor --json --strict` for side-effect-free inspection. It does not recover a
   pending transaction or follow symbolic links at managed paths; `--probe` is the explicit
   temporary-write mode.

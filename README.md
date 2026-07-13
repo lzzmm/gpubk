@@ -317,7 +317,7 @@ For unattended jobs, each user can install the bundled systemd user unit:
 bk service install worker
 systemctl --user daemon-reload
 systemctl --user enable --now bk-worker.service
-bk worker --status --require-running
+bk doctor --require-worker --strict
 ```
 
 On systemd Linux, the user manager may stop at logout and may not start at boot.
@@ -617,6 +617,18 @@ After enabling the monitor, verify the long-running writer separately:
 bk doctor --require-monitor --strict
 bk doctor --require-monitor --json --strict
 ```
+
+Each user who enables scheduled commands should verify that their private worker
+holds the lease for this exact data directory:
+
+```bash
+bk doctor --require-worker --strict
+bk doctor --require-worker --json --strict
+```
+
+Both flags can be combined when checking a complete current-user deployment.
+Ordinary `doctor` reports the privacy-safe worker state without requiring the
+optional service or creating its private directory.
 
 `bk reset` is intentionally disabled for a shared data-directory mode. To retire
 or rebuild a shared ledger, stop all GPUbk writers, back it up, and use an

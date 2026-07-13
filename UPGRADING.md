@@ -86,7 +86,7 @@ without the additive stable-device-identifier capability is intentionally shown
 as degraded until the current monitor replaces it.
 After starting the services, verify the monitor with
 `bk doctor --require-monitor --strict` and each user's worker with
-`bk worker --status --require-running`.
+`bk doctor --require-worker --strict`.
 If those user services must survive logout or start at boot, have an
 administrator verify selective `loginctl enable-linger <user>` state; GPUbk
 never changes linger policy automatically.

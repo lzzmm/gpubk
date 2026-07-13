@@ -271,7 +271,7 @@ UID 状态。
 bk service install worker
 systemctl --user daemon-reload
 systemctl --user enable --now bk-worker.service
-bk worker --status --require-running
+bk doctor --require-worker --strict
 ```
 
 在 systemd Linux 上，用户退出后 user manager 可能停止，开机时也不一定自动启动。
@@ -525,6 +525,16 @@ bk doctor --probe --json --strict
 bk doctor --require-monitor --strict
 bk doctor --require-monitor --json --strict
 ```
+
+每位启用预约脚本的用户还应确认自己的私有 worker 正在服务这一份数据目录：
+
+```bash
+bk doctor --require-worker --strict
+bk doctor --require-worker --json --strict
+```
+
+检查当前用户的完整部署时可同时使用两个 `--require-*` 参数。普通 `doctor` 会只读报告
+隐私安全的 worker 状态，但不会强制纯预约用户启用可选服务，也不会创建私有目录。
 
 共享数据目录模式下会禁用 `bk reset`。需要退役或重建共享台账时，管理员必须先停止
 所有 GPUbk 写入者并完成备份，再通过受控的文件系统流程处理。该命令仅保留给私有目录

@@ -133,4 +133,5 @@ evidence of unattended command execution.
 - Before an approved service deployment, run `bk doctor --probe --json --strict`; do not treat a simulation or single-host NFS lock check as proof of the complete production boundary.
 - After starting the monitor service, run `bk doctor --require-monitor --json --strict`; a
   preflight without a heartbeat does not prove the long-running collector is alive.
-- After starting a per-user worker service, run `bk worker --status --require-running --json`.
+- After starting a per-user worker service, run `bk doctor --require-worker --json --strict`;
+  only the current UID and exact data-directory instance may satisfy it.

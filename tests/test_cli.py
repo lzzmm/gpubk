@@ -674,11 +674,17 @@ class CliTests(unittest.TestCase):
     def test_doctor_json_is_read_only_without_explicit_probe(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "not-created"
+            job_dir = Path(tmp) / "private-jobs"
 
-            result = self.run_bk(["doctor", "--json"], data_dir)
+            result = self.run_bk(
+                ["doctor", "--json"],
+                data_dir,
+                {"BK_JOB_LOG_DIR": str(job_dir)},
+            )
             required = self.run_bk(
                 ["doctor", "--require-monitor", "--json", "--strict"],
                 data_dir,
+                {"BK_JOB_LOG_DIR": str(job_dir)},
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -688,6 +694,8 @@ class CliTests(unittest.TestCase):
             self.assertTrue(payload["healthy"])
             self.assertIsNone(payload["ready"])
             self.assertFalse(payload["monitor_required"])
+            self.assertFalse(payload["worker_required"])
+            self.assertEqual(payload["worker"]["state"], "not-seen")
             self.assertEqual(required.returncode, 2, required.stderr)
             required_payload = json.loads(required.stdout)
             self.assertTrue(required_payload["monitor_required"])
@@ -704,6 +712,115 @@ class CliTests(unittest.TestCase):
                 ],
             )
             self.assertFalse(data_dir.exists())
+            self.assertFalse(job_dir.exists())
+
+    def test_doctor_require_worker_is_read_only_and_rejects_an_absent_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "not-created"
+            job_dir = Path(tmp) / "private-jobs"
+
+            result = self.run_bk(
+                ["doctor", "--require-worker", "--json", "--strict"],
+                data_dir,
+                {"BK_JOB_LOG_DIR": str(job_dir)},
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["worker_required"])
+            self.assertEqual(payload["worker"]["state"], "not-seen")
+            self.assertFalse(payload["healthy"])
+            issue = next(
+                item for item in payload["policy_issues"] if item["type"] == "worker-health"
+            )
+            self.assertIn("state=not-seen", issue["message"])
+            self.assertFalse(data_dir.exists())
+            self.assertFalse(job_dir.exists())
+
+    def test_doctor_require_worker_accepts_only_the_current_data_instance(self):
+        from bk.config import Config
+        from bk.identity import current_actor
+        from bk.joblogs import acquire_job_worker_lease
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            job_dir = root / "private-jobs"
+            environment = {"BK_JOB_LOG_DIR": str(job_dir)}
+            config = Config(data_dir=data_dir, gpu_count=1, job_log_dir=job_dir)
+            lease = acquire_job_worker_lease(
+                config,
+                current_actor(),
+                "doctor-worker",
+                "test-host",
+            )
+            try:
+                result = self.run_bk(
+                    ["doctor", "--require-worker", "--json", "--strict"],
+                    data_dir,
+                    environment,
+                )
+                human = self.run_bk(
+                    ["doctor", "--require-worker", "--strict"],
+                    data_dir,
+                    environment,
+                )
+            finally:
+                lease.release()
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["healthy"])
+            self.assertTrue(payload["worker_required"])
+            self.assertEqual(payload["worker"]["state"], "running")
+            self.assertTrue(payload["worker"]["running"])
+            self.assertEqual(human.returncode, 0, human.stderr)
+            self.assertIn("worker is running for this data directory", human.stdout)
+
+            stopped = self.run_bk(
+                ["doctor", "--require-worker", "--json", "--strict"],
+                data_dir,
+                environment,
+            )
+            self.assertEqual(stopped.returncode, 2, stopped.stderr)
+            stopped_payload = json.loads(stopped.stdout)
+            self.assertEqual(stopped_payload["worker"]["state"], "stopped")
+            self.assertTrue(
+                any(
+                    item["type"] == "worker-health"
+                    for item in stopped_payload["policy_issues"]
+                )
+            )
+
+            other_config = Config(
+                data_dir=root / "other-data",
+                gpu_count=1,
+                job_log_dir=job_dir,
+            )
+            other_lease = acquire_job_worker_lease(
+                other_config,
+                current_actor(),
+                "other-doctor-worker",
+                "test-host",
+            )
+            try:
+                other = self.run_bk(
+                    ["doctor", "--require-worker", "--json", "--strict"],
+                    data_dir,
+                    environment,
+                )
+            finally:
+                other_lease.release()
+
+            self.assertEqual(other.returncode, 2, other.stderr)
+            other_payload = json.loads(other.stdout)
+            self.assertEqual(other_payload["worker"]["state"], "other-instance")
+            issue = next(
+                item
+                for item in other_payload["policy_issues"]
+                if item["type"] == "worker-health"
+            )
+            self.assertIn("state=other-instance", issue["message"])
 
     def test_doctor_probe_is_machine_readable_and_strict_rejects_simulation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2048,7 +2165,7 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("EnvironmentFile=", unit)
             self.assertIn(f"captured data directory: {data_dir}", installed.stdout)
             self.assertNotIn("captured config file:", installed.stdout)
-            self.assertIn("bk worker --status --require-running", installed.stdout)
+            self.assertIn("bk doctor --require-worker --strict", installed.stdout)
             self.assertIn("sudo loginctl enable-linger", installed.stdout)
 
     def test_service_unit_captures_an_external_trusted_config(self):

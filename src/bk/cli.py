@@ -1051,7 +1051,7 @@ def _service_command(argv: List[str], config: Config) -> int:
         print("shared server note: run exactly one trusted monitor writer; do not enable one per user")
         print("after starting it, verify: bk doctor --require-monitor --strict")
     else:
-        print("after starting it, verify: bk worker --status --require-running")
+        print("after starting it, verify: bk doctor --require-worker --strict")
     username = shlex.quote(_current_actor().username)
     print(
         "Linux boot/logout persistence (optional, admin): "
@@ -1983,6 +1983,11 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         action="store_true",
         help="require a fresh, complete monitor heartbeat for post-start verification",
     )
+    parser.add_argument(
+        "--require-worker",
+        action="store_true",
+        help="require this UID's worker to hold the lease for the current data directory",
+    )
     args = parser.parse_args(argv)
     usage_store = UsageAuditStore(
         config.data_dir,
@@ -2051,6 +2056,7 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         if unsafe_data_root
         else usage_store.load_collector_status(expected_gpu_count=config.gpu_count)
     )
+    worker_status = inspect_worker_status(config, _current_actor())
 
     ledger = {"version": 1, "reservations": []}
     managed_ledger_paths = {
@@ -2143,6 +2149,15 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
                 f"expects {collector.get('expected_gpu_count')}"
             )
         issues.append({"type": "monitor-health", "message": message})
+    if args.require_worker and worker_status.get("running") is not True:
+        worker_state = str(worker_status.get("state", "invalid"))
+        worker_message = (
+            "current-user worker is not ready for this data directory "
+            f"(state={worker_state}); start bk-worker.service and retry"
+        )
+        if worker_status.get("warning"):
+            worker_message += f"; {worker_status['warning']}"
+        issues.append({"type": "worker-health", "message": worker_message})
     if ledger_readable:
         try:
             validate_ledger_policy(ledger, config)
@@ -2188,7 +2203,9 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         "monitor_uid": config.monitor_uid,
         "storage_gid": config.storage_gid,
         "monitor_required": args.require_monitor,
+        "worker_required": args.require_worker,
         "collector": collector,
+        "worker": worker_status,
         "file_mode": f"{config.file_mode:04o}",
         "dir_mode": f"{config.dir_mode:04o}",
         "storage_issues": storage_issues,
@@ -2202,7 +2219,9 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     if healthy and not probes:
         if args.require_monitor:
             print("Monitor is running with fresh, complete telemetry.")
-        else:
+        if args.require_worker:
+            print("Current-user worker is running for this data directory.")
+        if not args.require_monitor and not args.require_worker:
             print("No policy issues found.")
         return 0
     if probes:
@@ -2599,6 +2618,7 @@ AGENTS AND ADMIN
   bk mcp / bk skill install      MCP server or bundled Codex skill
   bk config [--json]            inspect effective config and policy
   bk doctor --probe --strict     verify deployment prerequisites
+  bk doctor --require-worker     verify this UID's scheduled-job worker
   bk reset --yes                 private/test only; never shared
 
 TIME AND POLICY
