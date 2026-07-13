@@ -169,6 +169,9 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("gpu-extra:", workflow)
         self.assertIn("python -m pip install '.[gpu]'", workflow)
         self.assertIn("nvmlDeviceGetProcessUtilization", workflow)
+        self.assertIn("Verify scheduled-command wheel flow", workflow)
+        self.assertIn('"BK_WORKER_LIVE_GUARD": "0"', workflow)
+        self.assertIn('stored["job"]["status"] != "succeeded"', workflow)
 
     def test_release_uses_trusted_publishers_and_one_promoted_artifact(self):
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")

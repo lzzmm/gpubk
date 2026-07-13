@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Exercise the built zero-dependency wheel through a complete simulated scheduled-command flow
+  in package CI, including booking, worker execution, GPU environment injection, terminal state,
+  private logging, and command-spec cleanup.
 - Replace production runtime assertions with explicit fail-closed handling so optimized Python
   preserves workload-dictionary and private-job cleanup safety; exercise the full suite under
   `python -O` in CI.

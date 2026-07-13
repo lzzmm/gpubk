@@ -106,3 +106,68 @@ jobs:
           BK_DATA_DIR=/tmp/bk-wheel-data BK_GPU_COUNT=2 /tmp/bk-wheel-smoke/bin/bk agent context --compact > /tmp/bk-context.json
           /tmp/bk-wheel-smoke/bin/bk skill install --target /tmp/bk-wheel-skill
           /tmp/bk-wheel-smoke/bin/bk service show worker | grep -- "-m bk worker"
+      - name: Verify scheduled-command wheel flow
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          root = Path("/tmp/bk-wheel-job-smoke")
+          work = root / "work"
+          work.mkdir(parents=True)
+          executable = "/tmp/bk-wheel-smoke/bin/bk"
+          python = "/tmp/bk-wheel-smoke/bin/python"
+          environment = {
+              **os.environ,
+              "BK_DATA_DIR": str(root / "data"),
+              "BK_JOB_LOG_DIR": str(root / "jobs"),
+              "BK_GPU_COUNT": "2",
+              "BK_WORKER_LIVE_GUARD": "0",
+          }
+
+          def run(*arguments, cwd=None):
+              result = subprocess.run(
+                  arguments,
+                  cwd=cwd,
+                  env=environment,
+                  text=True,
+                  capture_output=True,
+                  timeout=30,
+              )
+              if result.returncode:
+                  raise SystemExit(
+                      f"{arguments!r} failed ({result.returncode}): "
+                      f"stdout={result.stdout!r} stderr={result.stderr!r}"
+                  )
+              return result.stdout
+
+          booking = json.loads(
+              run(
+                  executable,
+                  "1",
+                  "10m",
+                  "--json",
+                  "--",
+                  python,
+                  "-c",
+                  "import os; print('E2E=' + os.environ['CUDA_VISIBLE_DEVICES'] + ':' + "
+                  "os.environ['BK_RESERVED_GPUS'] + ':' + os.environ['BK_RESERVATION_ID'])",
+                  cwd=work,
+              )
+          )
+          reservation = booking["reservation"]
+          run(executable, "worker", "--once", "--quiet", "--poll", "0.1")
+          jobs = json.loads(run(executable, "jobs", "--json"))
+          stored = next(item for item in jobs["jobs"] if item["id"] == reservation["id"])
+          log = run(executable, "job-log", reservation["id"])
+          proof = f"E2E=0:0:{reservation['id']}"
+
+          if reservation["gpus"] != [0] or stored["job"]["status"] != "succeeded":
+              raise SystemExit(f"unexpected scheduled-command result: {stored!r}")
+          if proof not in log:
+              raise SystemExit(f"worker environment proof is missing: {log!r}")
+          if list((root / "jobs" / "specs").glob("*.json")):
+              raise SystemExit("successful worker left a private command spec behind")
+          PY

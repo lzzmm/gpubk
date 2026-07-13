@@ -62,7 +62,10 @@ replacing an uploaded file.
    validate-pyproject pyproject.toml
    ```
 
-7. Install the wheel into a fresh environment. Verify `bk --version`, core zero-dependency installation, `bk skill install`, and `bk-mcp` with the MCP extra.
+7. Install the wheel into a fresh environment. Verify `bk --version`, core zero-dependency
+   installation, `bk skill install`, and `bk-mcp` with the MCP extra. In an isolated no-GPU
+   simulation, create a scheduled-command reservation from the wheel, run `bk worker --once`,
+   and verify its terminal state, injected GPU environment, private log, and spec cleanup.
 8. As the configured `monitor_uid`, run `bk doctor --probe --strict` and bounded read-only
    NVML/context/recommendation checks on a real multi-GPU host with an isolated `BK_DATA_DIR`.
    The `process-identity` probe must demonstrate numeric ownership visibility for a process from
