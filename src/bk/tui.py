@@ -650,13 +650,30 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
     preview = _build_add_preview(ledger, config, state, view_start) if state.editor_active else None
     color_map = _reservation_color_map(timeline_records, timeline_index)
 
+    visible_gpu_rows = max(1, height - (timeline_top + 4) - 8)
+    gpu_anchor = _gpu_view_anchor(state, active, selected_id)
+    gpu_anchor_position = next(
+        (
+            position
+            for position, gpu in enumerate(gpu_snapshots)
+            if gpu.index == gpu_anchor
+        ),
+        0,
+    )
+    gpu_view_start = _gpu_view_start(
+        len(gpu_snapshots),
+        visible_gpu_rows,
+        gpu_anchor_position,
+    )
+    visible_gpu_snapshots = gpu_snapshots[
+        gpu_view_start : gpu_view_start + visible_gpu_rows
+    ]
+
     _draw_header(stdscr, config, now, view_start, view_end, width, state)
     _draw_editor_banner(stdscr, 2, width, state, preview, id_width)
     _draw_time_axis(stdscr, timeline_top, label_width, timeline_width, view_start, view_end, width, now)
     row = timeline_top + 4
-    for gpu in gpu_snapshots:
-        if row + 1 > height - 8:
-            break
+    for gpu in visible_gpu_snapshots:
         _draw_gpu_row(
             stdscr,
             row,
@@ -1418,6 +1435,31 @@ def _reservation_view_start(total: int, rows: int, selected: int) -> int:
     if total <= visible_rows or selected < visible_rows:
         return 0
     return min(max(0, total - visible_rows), selected - visible_rows + 1)
+
+
+def _gpu_view_start(total: int, rows: int, anchor: int) -> int:
+    visible_rows = max(1, rows)
+    if total <= visible_rows:
+        return 0
+    clamped_anchor = min(max(0, anchor), total - 1)
+    if clamped_anchor < visible_rows:
+        return 0
+    return min(max(0, total - visible_rows), clamped_anchor - visible_rows + 1)
+
+
+def _gpu_view_anchor(
+    state: TuiState,
+    reservations: Sequence[dict],
+    selected_id: Optional[str],
+) -> int:
+    if state.editor_active:
+        return state.add_cursor_gpu
+    if state.focus == FOCUS_GPUS:
+        return state.selected_gpu
+    selected = _reservation_by_id(reservations, selected_id)
+    if selected is not None and selected.get("gpus"):
+        return int(selected["gpus"][0])
+    return 0
 
 
 def _draw_footer(stdscr, height: int, width: int, state: TuiState, preview: Optional[AddPreview]) -> None:

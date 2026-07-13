@@ -44,6 +44,8 @@ from bk.tui import (
     _gpu_label,
     _gpu_metrics_header,
     _gpu_row_label,
+    _gpu_view_anchor,
+    _gpu_view_start,
     _header_lines,
     _handle_add_key,
     _handle_key,
@@ -185,6 +187,28 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertEqual(_reservation_view_start(12, 4, 9), 6)
         self.assertEqual(_reservation_view_start(12, 4, 11), 8)
         self.assertEqual(_reservation_view_start(3, 4, 2), 0)
+
+    def test_gpu_view_follows_focus_in_a_short_terminal(self):
+        self.assertEqual(_gpu_view_start(8, 3, 0), 0)
+        self.assertEqual(_gpu_view_start(8, 3, 2), 0)
+        self.assertEqual(_gpu_view_start(8, 3, 3), 1)
+        self.assertEqual(_gpu_view_start(8, 3, 6), 4)
+        self.assertEqual(_gpu_view_start(8, 3, 7), 5)
+        self.assertEqual(_gpu_view_start(8, 8, 7), 0)
+
+    def test_gpu_view_anchor_follows_editor_focus_or_selected_reservation(self):
+        selected = reservation("selected", os.getuid(), MODE_SHARED, [6], self.start, self.end)
+
+        self.assertEqual(
+            _gpu_view_anchor(TuiState(add_mode=True, add_cursor_gpu=7), [selected], "selected"),
+            7,
+        )
+        self.assertEqual(
+            _gpu_view_anchor(TuiState(focus=FOCUS_GPUS, selected_gpu=5), [selected], "selected"),
+            5,
+        )
+        self.assertEqual(_gpu_view_anchor(TuiState(), [selected], "selected"), 6)
+        self.assertEqual(_gpu_view_anchor(TuiState(), [selected], None), 0)
 
     def test_reservation_details_are_readable_but_keep_other_users_read_only(self):
         reservation = {

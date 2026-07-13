@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Tighten the compact TUI with aligned GPU capacity/utilization/VRAM fields, responsive action
+  hints, cursor-following GPU and reservation views, and read-only details for any visible
+  reservation.
 - Add administrator-controlled disabled GPU and preference-tier scheduling, per-request GPU
   exclusion, and a stopped-service `bk admin gpu-policy` transaction with atomic rollback and
   explicit crash recovery for the trusted configuration and install manifest.
