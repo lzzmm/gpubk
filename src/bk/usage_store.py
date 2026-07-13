@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import gzip
 import hashlib
 import hmac
@@ -27,6 +28,7 @@ from .fileio import (
     file_type_name,
     fsync_directory,
     open_existing_regular,
+    setgid_directory_gid,
 )
 from .jsonl import JsonlFormatError, append_json_objects
 from .storage import FileLock
@@ -165,9 +167,20 @@ class UsageAuditStore:
 
     def ensure(self) -> None:
         ensure_directory(self.data_dir, self.dir_mode, require_mode=True)
-        ensure_directory(self.usage_dir, self.dir_mode, require_mode=True)
-        ensure_directory(self.migrations_dir, self.dir_mode, require_mode=True)
-        self._validate_core_files_for_write()
+        managed_gid = self._managed_gid()
+        ensure_directory(
+            self.usage_dir,
+            self.dir_mode,
+            require_mode=True,
+            expected_gid=managed_gid,
+        )
+        ensure_directory(
+            self.migrations_dir,
+            self.dir_mode,
+            require_mode=True,
+            expected_gid=managed_gid,
+        )
+        self._validate_core_files_for_write(managed_gid)
         if os.path.lexists(self.meta_path):
             self._validate_meta(self._read_json(self.meta_path))
             return
@@ -188,12 +201,28 @@ class UsageAuditStore:
             ],
             "created_at": to_iso(utc_now()),
         }
-        _atomic_write_json(self.meta_path, payload, self.file_mode, self.usage_dir, ".store.")
+        _atomic_write_json(
+            self.meta_path,
+            payload,
+            self.file_mode,
+            self.usage_dir,
+            ".store.",
+            expected_gid=managed_gid,
+        )
 
     def lock(self, timeout_seconds: Optional[float] = None) -> FileLock:
         ensure_directory(self.data_dir, self.dir_mode, require_mode=True)
         timeout = self.lock_timeout_seconds if timeout_seconds is None else timeout_seconds
-        return FileLock(self.lock_path, timeout, self.file_mode, self.dir_mode)
+        return FileLock(
+            self.lock_path,
+            timeout,
+            self.file_mode,
+            self.dir_mode,
+            self._managed_gid(),
+        )
+
+    def _managed_gid(self) -> Optional[int]:
+        return setgid_directory_gid(self.data_dir, self.dir_mode)
 
     def load_state(self) -> Dict[str, dict]:
         if self.transition_journal_path.exists():
@@ -217,6 +246,7 @@ class UsageAuditStore:
             self.file_mode,
             self.usage_dir,
             ".state.",
+            expected_gid=self._managed_gid(),
         )
 
     def commit_state_transition(self, events: Sequence[dict], processes: Dict[str, dict]) -> int:
@@ -235,6 +265,7 @@ class UsageAuditStore:
             self.file_mode,
             self.usage_dir,
             ".state-transition.",
+            expected_gid=self._managed_gid(),
         )
         written = self.append_events(sanitized_events)
         self.save_state(processes)
@@ -256,7 +287,14 @@ class UsageAuditStore:
 
     def save_load_history(self, history: dict) -> None:
         self.ensure()
-        _atomic_write_json(self.load_path, history, self.file_mode, self.usage_dir, ".load.")
+        _atomic_write_json(
+            self.load_path,
+            history,
+            self.file_mode,
+            self.usage_dir,
+            ".load.",
+            expected_gid=self._managed_gid(),
+        )
 
     def save_collector_status(self, payload: dict) -> None:
         validate_collector_document(payload)
@@ -267,6 +305,7 @@ class UsageAuditStore:
             self.file_mode,
             self.usage_dir,
             ".collector.",
+            expected_gid=self._managed_gid(),
         )
 
     def load_collector_status(
@@ -296,11 +335,13 @@ class UsageAuditStore:
         if not items:
             return 0
         self.ensure()
-        self._remember_users(items)
         grouped: Dict[date, List[dict]] = {}
         for item in items:
             timestamp = parse_iso(str(item["timestamp"]))
             grouped.setdefault(timestamp.date(), []).append(encode_event(item))
+        for day in grouped:
+            self._validate_append_target("events", day)
+        self._remember_users(items)
         return sum(self._append_event_partition(day, records) for day, records in grouped.items())
 
     def append_rollups(self, rollups: Iterable[dict]) -> int:
@@ -312,11 +353,13 @@ class UsageAuditStore:
         if not items:
             return 0
         self.ensure()
-        self._remember_users(items)
         grouped: Dict[date, List[dict]] = {}
         for item in items:
             start = parse_iso(str(item["window_start"]))
             grouped.setdefault(start.date(), []).append(encode_rollup(item))
+        for day in grouped:
+            self._validate_append_target("minute", day)
+        self._remember_users(items)
         return sum(self._append_partition("minute", day, records) for day, records in grouped.items())
 
     def register_workload(self, uid: Optional[int], descriptor: WorkloadDescriptor) -> int:
@@ -467,6 +510,7 @@ class UsageAuditStore:
                 self._validate_meta(self._read_json(self.meta_path))
         else:
             self.ensure()
+            self._validate_usage_tree_for_write()
         current = (now or utc_now()).astimezone(timezone.utc)
         today = current.date()
         report = {"generated": [], "sealed": [], "removed": [], "blocked": [], "dry_run": dry_run}
@@ -543,13 +587,18 @@ class UsageAuditStore:
                 report["removed"].append(relative)
                 if not dry_run:
                     self._ensure_usage_directory(path.parent)
-                    source_fd = open_existing_regular(path, expected_mode=self.file_mode)
+                    source_fd = open_existing_regular(
+                        path,
+                        expected_mode=self.file_mode,
+                        expected_gid=self._managed_gid(),
+                    )
                     os.close(source_fd)
                     metadata_path = _meta_path_for(path)
                     if os.path.lexists(metadata_path):
                         metadata_fd = open_existing_regular(
                             metadata_path,
                             expected_mode=self.file_mode,
+                            expected_gid=self._managed_gid(),
                         )
                         os.close(metadata_fd)
                     path.unlink(missing_ok=True)
@@ -560,6 +609,7 @@ class UsageAuditStore:
     def migrate_legacy(self, *, dry_run: bool = True) -> dict:
         if not dry_run:
             self.ensure()
+            self._validate_usage_tree_for_write()
         marker = self.migrations_dir / "legacy-v1.json"
         sources = [path for path in (self.events_path, self.rollups_path) if path.exists()]
         marker_payload = self._read_json(marker) if marker.exists() else None
@@ -631,6 +681,7 @@ class UsageAuditStore:
             self.file_mode,
             self.migrations_dir,
             ".legacy-migration.",
+            expected_gid=self._managed_gid(),
         )
         return report
 
@@ -841,6 +892,26 @@ class UsageAuditStore:
         self._ensure_usage_directory(path.parent)
         return self._append_jsonl(path, records)
 
+    def _validate_append_target(self, tier: str, day: date) -> None:
+        path = self._partition_path(tier, day)
+        self._ensure_usage_directory(path.parent)
+        closed = path.with_suffix(path.suffix + ".gz")
+        metadata_path = _meta_path_for(closed)
+        if os.path.lexists(closed) != os.path.lexists(metadata_path):
+            raise UsageFormatError(
+                f"closed usage partition and metadata must exist together: {closed}"
+            )
+        candidates = (path, closed, metadata_path)
+        for candidate in candidates:
+            if not os.path.lexists(candidate):
+                continue
+            fd = open_existing_regular(
+                candidate,
+                expected_mode=self.file_mode,
+                expected_gid=self._managed_gid(),
+            )
+            os.close(fd)
+
     def _append_event_partition(self, day: date, records: Sequence[dict]) -> int:
         existing_ids = set()
         plain = self._partition_path("events", day)
@@ -878,6 +949,7 @@ class UsageAuditStore:
                     else MAX_PARTITION_UNCOMPRESSED_BYTES
                 ),
                 record_name="usage",
+                expected_gid=self._managed_gid(),
             )
         except JsonlFormatError as exc:
             raise UsageFormatError(str(exc)) from exc
@@ -894,7 +966,13 @@ class UsageAuditStore:
         for record in records:
             merged.setdefault(key_fn(record), record)
         self._ensure_usage_directory(path.parent)
-        _atomic_write_jsonl(path, list(merged.values()), self.file_mode, path.parent)
+        _atomic_write_jsonl(
+            path,
+            list(merged.values()),
+            self.file_mode,
+            path.parent,
+            expected_gid=self._managed_gid(),
+        )
 
     def _partition_path(self, tier: str, day: date) -> Path:
         return self.usage_dir / tier / f"{day:%Y}" / f"{day:%m}" / f"{day.isoformat()}{PARTITION_SUFFIX}"
@@ -966,7 +1044,11 @@ class UsageAuditStore:
         self._ensure_usage_directory(target.parent)
         if target.exists() and _meta_path_for(target).exists():
             for existing in (target, _meta_path_for(target)):
-                fd = open_existing_regular(existing, expected_mode=self.file_mode)
+                fd = open_existing_regular(
+                    existing,
+                    expected_mode=self.file_mode,
+                    expected_gid=self._managed_gid(),
+                )
                 os.close(fd)
             return target
         fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
@@ -976,6 +1058,14 @@ class UsageAuditStore:
         uncompressed_bytes = 0
         try:
             os.fchmod(fd, self.file_mode)
+            actual_gid = os.fstat(fd).st_gid
+            expected_gid = self._managed_gid()
+            if expected_gid is not None and actual_gid != expected_gid:
+                raise PermissionError(
+                    errno.EPERM,
+                    f"refusing temporary partition with GID {actual_gid}; "
+                    f"expected {expected_gid}: {tmp_path}",
+                )
             raw = os.fdopen(fd, "wb")
             fd = -1
             with raw, gzip.GzipFile(fileobj=raw, mode="wb", filename="", mtime=0) as compressed:
@@ -1007,6 +1097,7 @@ class UsageAuditStore:
                 self.file_mode,
                 target.parent,
                 ".partition-meta.",
+                expected_gid=self._managed_gid(),
             )
             return target
         finally:
@@ -1018,7 +1109,11 @@ class UsageAuditStore:
         if not path.name.endswith(".jsonl"):
             return
         self._ensure_usage_directory(path.parent)
-        source_fd = open_existing_regular(path, expected_mode=self.file_mode)
+        source_fd = open_existing_regular(
+            path,
+            expected_mode=self.file_mode,
+            expected_gid=self._managed_gid(),
+        )
         os.close(source_fd)
         target = path.with_suffix(path.suffix + ".gz")
         if target.exists() and _meta_path_for(target).exists():
@@ -1286,7 +1381,14 @@ class UsageAuditStore:
                 users["users"][key] = {"username": username[:128], "updated_at": to_iso(utc_now())}
                 changed = True
         if changed:
-            _atomic_write_json(self.users_path, users, self.file_mode, self.usage_dir, ".users.")
+            _atomic_write_json(
+                self.users_path,
+                users,
+                self.file_mode,
+                self.usage_dir,
+                ".users.",
+                expected_gid=self._managed_gid(),
+            )
 
     def _load_workload_registry(self) -> None:
         if self._workloads_by_id is not None:
@@ -1317,7 +1419,11 @@ class UsageAuditStore:
         if self._workload_key is not None:
             return self._workload_key
         if self.key_path.exists():
-            fd = open_existing_regular(self.key_path, expected_mode=0o600)
+            fd = open_existing_regular(
+                self.key_path,
+                expected_mode=0o600,
+                expected_gid=self._managed_gid(),
+            )
             with os.fdopen(fd, "rb") as fh:
                 key = fh.read(64)
             if len(key) != 32:
@@ -1331,17 +1437,30 @@ class UsageAuditStore:
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         fd = os.open(str(self.key_path), flags, 0o600)
+        created = True
         try:
             os.fchmod(fd, 0o600)
-            os.write(fd, key)
+            actual_gid = os.fstat(fd).st_gid
+            expected_gid = self._managed_gid()
+            if expected_gid is not None and actual_gid != expected_gid:
+                raise PermissionError(
+                    errno.EPERM,
+                    f"refusing workload key with GID {actual_gid}; expected {expected_gid}: "
+                    f"{self.key_path}",
+                )
+            if os.write(fd, key) != len(key):
+                raise OSError(errno.EIO, "short write while creating workload HMAC key")
             os.fsync(fd)
+            created = False
         finally:
             os.close(fd)
+            if created:
+                self.key_path.unlink(missing_ok=True)
         fsync_directory(self.usage_dir)
         self._workload_key = key
         return key
 
-    def _validate_core_files_for_write(self) -> None:
+    def _validate_core_files_for_write(self, expected_gid: Optional[int]) -> None:
         expected_modes = {
             self.meta_path: self.file_mode,
             self.state_path: self.file_mode,
@@ -1355,19 +1474,77 @@ class UsageAuditStore:
         for path, expected_mode in expected_modes.items():
             if not os.path.lexists(path):
                 continue
-            fd = open_existing_regular(path, expected_mode=expected_mode)
+            fd = open_existing_regular(
+                path,
+                expected_mode=expected_mode,
+                expected_gid=expected_gid,
+            )
             os.close(fd)
+        for path in (
+            self.legacy_state_path,
+            self.events_path,
+            self.rollups_path,
+            self.legacy_load_path,
+        ):
+            if not os.path.lexists(path):
+                continue
+            fd = open_existing_regular(path, expected_gid=expected_gid)
+            os.close(fd)
+
+    def _validate_usage_tree_for_write(self) -> None:
+        unsafe_types = {
+            "usage-directory-type",
+            "usage-directory-mode",
+            "usage-directory-gid",
+            "usage-file-type",
+            "usage-file-mode",
+            "usage-file-gid",
+            "usage-file-links",
+            "usage-path-stat",
+            "usage-path-scan",
+        }
+        legacy_paths = {
+            str(self.legacy_state_path),
+            str(self.events_path),
+            str(self.rollups_path),
+            str(self.legacy_load_path),
+        }
+        issue = next(
+            (
+                item
+                for item in self.health_issues()
+                if item.get("type") in unsafe_types
+                and str(item.get("path", "")) not in legacy_paths
+            ),
+            None,
+        )
+        if issue is not None:
+            raise UsageFormatError(
+                f"refusing usage maintenance with {issue['type']} at "
+                f"{issue.get('path', self.usage_dir)}"
+            )
 
     def _ensure_usage_directory(self, path: Path) -> None:
         try:
             relative = path.relative_to(self.usage_dir)
         except ValueError as exc:
             raise UsageFormatError(f"usage path escapes the store: {path}") from exc
-        ensure_directory(self.usage_dir, self.dir_mode, require_mode=True)
+        expected_gid = self._managed_gid()
+        ensure_directory(
+            self.usage_dir,
+            self.dir_mode,
+            require_mode=True,
+            expected_gid=expected_gid,
+        )
         current = self.usage_dir
         for part in relative.parts:
             current /= part
-            ensure_directory(current, self.dir_mode, require_mode=True)
+            ensure_directory(
+                current,
+                self.dir_mode,
+                require_mode=True,
+                expected_gid=expected_gid,
+            )
 
     def _legacy_visible(self) -> bool:
         marker = self.migrations_dir / "legacy-v1.json"
@@ -1418,17 +1595,41 @@ def _in_range(value: datetime, start: Optional[datetime], end: Optional[datetime
     return end is None or normalized <= end.astimezone(timezone.utc)
 
 
-def _atomic_write_json(path: Path, payload: dict, mode: int, directory: Path, prefix: str) -> None:
+def _atomic_write_json(
+    path: Path,
+    payload: dict,
+    mode: int,
+    directory: Path,
+    prefix: str,
+    *,
+    expected_gid: Optional[int] = None,
+) -> None:
     metadata = directory.lstat()
     if not stat.S_ISDIR(metadata.st_mode):
         raise NotADirectoryError(f"refusing non-directory path: {directory}")
+    if expected_gid is not None and metadata.st_gid != expected_gid:
+        raise PermissionError(
+            errno.EPERM,
+            f"refusing directory with GID {metadata.st_gid}; expected {expected_gid}: {directory}",
+        )
     if os.path.lexists(path):
-        existing_fd = open_existing_regular(path, expected_mode=mode)
+        existing_fd = open_existing_regular(
+            path,
+            expected_mode=mode,
+            expected_gid=expected_gid,
+        )
         os.close(existing_fd)
     fd, tmp_name = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=str(directory))
     tmp_path = Path(tmp_name)
     try:
         os.fchmod(fd, mode)
+        actual_gid = os.fstat(fd).st_gid
+        if expected_gid is not None and actual_gid != expected_gid:
+            raise PermissionError(
+                errno.EPERM,
+                f"refusing temporary file with GID {actual_gid}; expected {expected_gid}: "
+                f"{tmp_path}",
+            )
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fd = -1
             json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
@@ -1443,17 +1644,40 @@ def _atomic_write_json(path: Path, payload: dict, mode: int, directory: Path, pr
         tmp_path.unlink(missing_ok=True)
 
 
-def _atomic_write_jsonl(path: Path, records: Sequence[dict], mode: int, directory: Path) -> None:
+def _atomic_write_jsonl(
+    path: Path,
+    records: Sequence[dict],
+    mode: int,
+    directory: Path,
+    *,
+    expected_gid: Optional[int] = None,
+) -> None:
     metadata = directory.lstat()
     if not stat.S_ISDIR(metadata.st_mode):
         raise NotADirectoryError(f"refusing non-directory path: {directory}")
+    if expected_gid is not None and metadata.st_gid != expected_gid:
+        raise PermissionError(
+            errno.EPERM,
+            f"refusing directory with GID {metadata.st_gid}; expected {expected_gid}: {directory}",
+        )
     if os.path.lexists(path):
-        existing_fd = open_existing_regular(path, expected_mode=mode)
+        existing_fd = open_existing_regular(
+            path,
+            expected_mode=mode,
+            expected_gid=expected_gid,
+        )
         os.close(existing_fd)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(directory))
     tmp_path = Path(tmp_name)
     try:
         os.fchmod(fd, mode)
+        actual_gid = os.fstat(fd).st_gid
+        if expected_gid is not None and actual_gid != expected_gid:
+            raise PermissionError(
+                errno.EPERM,
+                f"refusing temporary file with GID {actual_gid}; expected {expected_gid}: "
+                f"{tmp_path}",
+            )
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fd = -1
             total_bytes = 0

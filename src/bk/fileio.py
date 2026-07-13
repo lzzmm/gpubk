@@ -11,12 +11,18 @@ def open_existing_regular(
     flags: int = os.O_RDONLY,
     *,
     expected_mode: int | None = None,
+    expected_gid: int | None = None,
 ) -> int:
     if not hasattr(os, "O_NOFOLLOW") and path.is_symlink():
         raise OSError(errno.ELOOP, f"refusing symbolic link: {path}")
     fd = os.open(str(path), _secure_flags(flags))
     try:
-        _validate_regular_fd(fd, path, expected_mode=expected_mode)
+        _validate_regular_fd(
+            fd,
+            path,
+            expected_mode=expected_mode,
+            expected_gid=expected_gid,
+        )
         return fd
     except Exception:
         os.close(fd)
@@ -30,6 +36,7 @@ def open_existing_regular_at(
     flags: int = os.O_RDONLY,
     *,
     expected_mode: int | None = None,
+    expected_gid: int | None = None,
 ) -> int:
     if not name or name in {".", ".."} or os.sep in name or (os.altsep and os.altsep in name):
         raise ValueError("name must be a single path component")
@@ -39,14 +46,25 @@ def open_existing_regular_at(
             raise OSError(errno.ELOOP, f"refusing symbolic link: {display_path}")
     fd = os.open(name, _secure_flags(flags), dir_fd=directory_fd)
     try:
-        _validate_regular_fd(fd, display_path, expected_mode=expected_mode)
+        _validate_regular_fd(
+            fd,
+            display_path,
+            expected_mode=expected_mode,
+            expected_gid=expected_gid,
+        )
         return fd
     except Exception:
         os.close(fd)
         raise
 
 
-def open_or_create_regular(path: Path, flags: int, mode: int) -> int:
+def open_or_create_regular(
+    path: Path,
+    flags: int,
+    mode: int,
+    *,
+    expected_gid: int | None = None,
+) -> int:
     secure_flags = _secure_flags(flags)
     created = False
     try:
@@ -60,14 +78,20 @@ def open_or_create_regular(path: Path, flags: int, mode: int) -> int:
         if created:
             _validate_regular_fd(fd, path)
             os.fchmod(fd, mode)
-        _validate_regular_fd(fd, path, expected_mode=mode)
+        _validate_regular_fd(fd, path, expected_mode=mode, expected_gid=expected_gid)
         return fd
     except Exception:
         os.close(fd)
         raise
 
 
-def ensure_directory(path: Path, mode: int, *, require_mode: bool = False) -> None:
+def ensure_directory(
+    path: Path,
+    mode: int,
+    *,
+    require_mode: bool = False,
+    expected_gid: int | None = None,
+) -> None:
     """Create a real directory tree and optionally enforce the leaf mode.
 
     Newly created intermediate directories receive the requested mode too. Existing
@@ -99,16 +123,38 @@ def ensure_directory(path: Path, mode: int, *, require_mode: bool = False) -> No
         try:
             if created:
                 os.fchmod(fd, mode)
-            _validate_directory_fd(fd, directory, expected_mode=mode)
+            _validate_directory_fd(
+                fd,
+                directory,
+                expected_mode=mode,
+                expected_gid=expected_gid,
+            )
         finally:
             os.close(fd)
 
-    if not missing and require_mode:
+    if not missing and (require_mode or expected_gid is not None):
         fd = _open_directory(path)
         try:
-            _validate_directory_fd(fd, path, expected_mode=mode)
+            _validate_directory_fd(
+                fd,
+                path,
+                expected_mode=mode if require_mode else None,
+                expected_gid=expected_gid,
+            )
         finally:
             os.close(fd)
+
+
+def setgid_directory_gid(path: Path, mode: int) -> int | None:
+    if not mode & stat.S_ISGID:
+        return None
+    fd = _open_directory(path)
+    try:
+        metadata = os.fstat(fd)
+        _validate_directory_fd(fd, path, expected_mode=mode)
+        return metadata.st_gid
+    finally:
+        os.close(fd)
 
 
 def fsync_directory(path: Path) -> None:
@@ -156,6 +202,7 @@ def _validate_regular_fd(
     path: Path,
     *,
     expected_mode: int | None = None,
+    expected_gid: int | None = None,
 ) -> int:
     metadata = os.fstat(fd)
     if not stat.S_ISREG(metadata.st_mode):
@@ -172,6 +219,11 @@ def _validate_regular_fd(
                 errno.EPERM,
                 f"refusing file with mode {actual_mode:04o}; expected {expected_mode:04o}: {path}",
             )
+    if expected_gid is not None and metadata.st_gid != expected_gid:
+        raise PermissionError(
+            errno.EPERM,
+            f"refusing file with GID {metadata.st_gid}; expected {expected_gid}: {path}",
+        )
     return fd
 
 
@@ -198,6 +250,7 @@ def _validate_directory_fd(
     path: Path,
     *,
     expected_mode: int | None = None,
+    expected_gid: int | None = None,
 ) -> None:
     metadata = os.fstat(fd)
     _validate_directory_metadata(metadata, path)
@@ -208,3 +261,8 @@ def _validate_directory_fd(
                 errno.EPERM,
                 f"refusing directory with mode {actual_mode:04o}; expected {expected_mode:04o}: {path}",
             )
+    if expected_gid is not None and metadata.st_gid != expected_gid:
+        raise PermissionError(
+            errno.EPERM,
+            f"refusing directory with GID {metadata.st_gid}; expected {expected_gid}: {path}",
+        )

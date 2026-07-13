@@ -597,8 +597,10 @@ In JSON, `healthy` covers read-only ledger checks; `ready` remains `null` until
 Plain `doctor` never initializes storage, acquires a lock, recovers a pending
 transaction, or follows a symbolic link or hard-linked alias at a managed path.
 It also reports permission and GID drift across the ledger, backups, and telemetry
-tree. Configured mode drift makes write commands fail closed instead of silently
-running `chmod`; only explicit `--probe` writes temporary files.
+tree. Configured mode or setgid-group drift makes write commands fail closed before
+mutating data instead of silently running `chmod` or `chgrp`; only explicit
+`--probe` writes temporary files. In setgid mode, the numeric GID of the data
+directory is the inheritance anchor for every managed directory and file.
 For NFS/FUSE used by multiple hosts, additionally verify locking from a second
 host because one machine cannot prove cross-host lock propagation. Every writer
 must use GPUbk.

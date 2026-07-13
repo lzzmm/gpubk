@@ -95,11 +95,12 @@ private job files, and unit installation fail visibly. Do not enable unattended
 services on a mount where `bk doctor --probe --strict` fails the atomic-replace
 probe.
 
-Version 0.2 also requires configured modes on managed write targets and rejects
-files with hard-linked aliases. Run plain `bk doctor --json --strict` after the
-upgrade. If it reports a mode or link-count issue, stop GPUbk writers and have an
-administrator repair that named path and its ownership deliberately; GPUbk does
-not silently `chmod` existing shared data.
+Version 0.2 also requires configured modes on managed write targets, rejects
+files with hard-linked aliases, and in setgid mode requires every managed path to
+keep the data directory's numeric GID. Run plain `bk doctor --json --strict`
+after the upgrade. If it reports a mode, GID, or link-count issue, stop GPUbk
+writers and have an administrator repair that named path and its ownership
+deliberately; GPUbk does not silently `chmod` or `chgrp` existing shared data.
 
 ## Running-job boundary
 

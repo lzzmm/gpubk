@@ -19,6 +19,7 @@ from .fileio import (
     fsync_directory,
     open_existing_regular,
     open_or_create_regular,
+    setgid_directory_gid,
 )
 from .jsonl import (
     JsonlTailResult,
@@ -66,16 +67,28 @@ class FileLock:
         timeout_seconds: float,
         file_mode: int = 0o600,
         dir_mode: int = 0o700,
+        expected_gid: Optional[int] = None,
     ):
         self.path = path
         self.timeout_seconds = timeout_seconds
         self.file_mode = file_mode
         self.dir_mode = dir_mode
+        self.expected_gid = expected_gid
         self._fh = None
 
     def __enter__(self):
-        ensure_directory(self.path.parent, self.dir_mode, require_mode=True)
-        fd = open_or_create_regular(self.path, os.O_RDWR, self.file_mode)
+        ensure_directory(
+            self.path.parent,
+            self.dir_mode,
+            require_mode=True,
+            expected_gid=self.expected_gid,
+        )
+        fd = open_or_create_regular(
+            self.path,
+            os.O_RDWR,
+            self.file_mode,
+            expected_gid=self.expected_gid,
+        )
         self._fh = os.fdopen(fd, "r+", encoding="utf-8")
         deadline = time.monotonic() + self.timeout_seconds
         try:
@@ -139,7 +152,12 @@ class LedgerStore:
 
     def ensure(self) -> None:
         ensure_directory(self.data_dir, self.dir_mode, require_mode=True)
-        ensure_directory(self.backup_dir, self.dir_mode, require_mode=True)
+        ensure_directory(
+            self.backup_dir,
+            self.dir_mode,
+            require_mode=True,
+            expected_gid=self._managed_gid(),
+        )
 
     def load(self) -> dict:
         self.last_warning = None
@@ -211,7 +229,11 @@ class LedgerStore:
             log_count = _line_count(self.log_path)
             backup_paths = list(self.backup_dir.glob("ledger-*.json")) if self.backup_dir.exists() else []
             for path in backup_paths:
-                fd = open_existing_regular(path, expected_mode=self.file_mode)
+                fd = open_existing_regular(
+                    path,
+                    expected_mode=self.file_mode,
+                    expected_gid=self._managed_gid(),
+                )
                 os.close(fd)
             backup_count = len(backup_paths)
 
@@ -504,13 +526,21 @@ class LedgerStore:
             self.lock_timeout_seconds,
             self.file_mode,
             self.dir_mode,
+            self._managed_gid(),
         )
+
+    def _managed_gid(self) -> Optional[int]:
+        return setgid_directory_gid(self.data_dir, self.dir_mode)
 
     def _load_unlocked(self, *, require_modes: bool = False) -> dict:
         if not os.path.lexists(self.ledger_path):
             return _empty_ledger()
         try:
-            fd = open_existing_regular(self.ledger_path)
+            fd = open_existing_regular(
+                self.ledger_path,
+                expected_mode=self.file_mode if require_modes else None,
+                expected_gid=self._managed_gid() if require_modes else None,
+            )
             with os.fdopen(fd, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
             self._validate_ledger(data)
@@ -554,6 +584,7 @@ class LedgerStore:
                 fd = open_existing_regular(
                     path,
                     expected_mode=self.file_mode if require_modes else None,
+                    expected_gid=self._managed_gid() if require_modes else None,
                 )
                 with os.fdopen(fd, "r", encoding="utf-8") as fh:
                     data = json.load(fh)
@@ -574,13 +605,18 @@ class LedgerStore:
             self.file_mode,
             self.data_dir,
             prefix=".transaction.",
+            expected_gid=self._managed_gid(),
         )
 
     def _recover_journal_unlocked(self) -> None:
         if not os.path.lexists(self.journal_path):
             return
         try:
-            fd = open_existing_regular(self.journal_path, expected_mode=self.file_mode)
+            fd = open_existing_regular(
+                self.journal_path,
+                expected_mode=self.file_mode,
+                expected_gid=self._managed_gid(),
+            )
             with os.fdopen(fd, "r", encoding="utf-8") as fh:
                 journal = json.load(fh)
             self._validate_journal(journal)
@@ -593,7 +629,11 @@ class LedgerStore:
         if not os.path.lexists(self.journal_path):
             return False
         try:
-            fd = open_existing_regular(self.journal_path, expected_mode=self.file_mode)
+            fd = open_existing_regular(
+                self.journal_path,
+                expected_mode=self.file_mode,
+                expected_gid=self._managed_gid(),
+            )
             with os.fdopen(fd, "r", encoding="utf-8") as fh:
                 journal = json.load(fh)
             self._validate_journal(journal)
@@ -659,6 +699,7 @@ class LedgerStore:
             self.file_mode,
             self.data_dir,
             prefix=".ledger.",
+            expected_gid=self._managed_gid(),
         )
 
     def _write_backup(self, ledger: dict) -> None:
@@ -670,6 +711,7 @@ class LedgerStore:
             self.file_mode,
             self.backup_dir,
             prefix=".ledger-backup.",
+            expected_gid=self._managed_gid(),
         )
         self._prune_backups()
 
@@ -677,7 +719,11 @@ class LedgerStore:
         backups = sorted(self.backup_dir.glob("ledger-*.json"), reverse=True)
         removed = False
         for path in backups[self.backup_keep :]:
-            fd = open_existing_regular(path, expected_mode=self.file_mode)
+            fd = open_existing_regular(
+                path,
+                expected_mode=self.file_mode,
+                expected_gid=self._managed_gid(),
+            )
             os.close(fd)
             path.unlink(missing_ok=True)
             removed = True
@@ -711,6 +757,7 @@ class LedgerStore:
                 max_file_bytes=None,
                 record_name="audit",
                 compact=False,
+                expected_gid=self._managed_gid(),
             )
         except ValueError as exc:
             raise OSError(f"cannot append audit log: {exc}") from exc
@@ -738,7 +785,11 @@ class LedgerStore:
         for path in (self.ledger_path, self.log_path, self.journal_path):
             if not os.path.lexists(path):
                 continue
-            fd = open_existing_regular(path, expected_mode=self.file_mode)
+            fd = open_existing_regular(
+                path,
+                expected_mode=self.file_mode,
+                expected_gid=self._managed_gid(),
+            )
             os.close(fd)
 
     def _preflight_storage_policy_on_mode_mismatch(self) -> None:
@@ -850,22 +901,42 @@ def _atomic_write_json(
     directory: Path,
     *,
     prefix: str,
+    expected_gid: Optional[int] = None,
 ) -> None:
+    directory_metadata = directory.lstat()
+    if not stat.S_ISDIR(directory_metadata.st_mode):
+        raise NotADirectoryError(errno.ENOTDIR, f"refusing non-directory path: {directory}")
+    if expected_gid is not None and directory_metadata.st_gid != expected_gid:
+        raise PermissionError(
+            errno.EPERM,
+            f"refusing directory with GID {directory_metadata.st_gid}; "
+            f"expected {expected_gid}: {directory}",
+        )
     payload = (
         json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2, sort_keys=True) + "\n"
     )
-    stat = shutil.disk_usage(directory)
-    if stat.free < max(len(payload) * 2, 1024 * 1024):
+    disk_usage = shutil.disk_usage(directory)
+    if disk_usage.free < max(len(payload) * 2, 1024 * 1024):
         raise OSError(errno.ENOSPC, "not enough free space for safe file transaction")
 
     if os.path.lexists(path):
-        existing_fd = open_existing_regular(path, expected_mode=file_mode)
+        existing_fd = open_existing_regular(
+            path,
+            expected_mode=file_mode,
+            expected_gid=expected_gid,
+        )
         os.close(existing_fd)
 
     fd, tmp_name = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=str(directory))
     tmp_path = Path(tmp_name)
     try:
         os.fchmod(fd, file_mode)
+        actual_gid = os.fstat(fd).st_gid
+        if expected_gid is not None and actual_gid != expected_gid:
+            raise PermissionError(
+                errno.EPERM,
+                f"refusing temporary file with GID {actual_gid}; expected {expected_gid}: {tmp_path}",
+            )
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(payload)
             fh.flush()

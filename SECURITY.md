@@ -17,7 +17,9 @@ Supported security boundaries:
   closed without silently running `chmod`; `bk doctor` reports the path for administrator repair.
 - For setgid shared storage, read-only health checks report managed ledger, backup, and telemetry
   paths whose numeric GID differs from the data directory; the deployment probe also verifies that
-  a newly atomically replaced file inherits that GID.
+  a newly atomically replaced file inherits that GID. Ledger transactions, audit appends, telemetry
+  writes, compaction, migration, and retention cleanup enforce the same GID before mutating data
+  and never repair it implicitly.
 - Scheduled command arguments live in UID-owned `0600` specs, not the shared ledger.
 - Terminal and expired private command specs are pruned by the owning UID; unreferenced specs
   receive a 24-hour race-safety grace period.

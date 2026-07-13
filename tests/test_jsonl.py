@@ -1,7 +1,9 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from bk.jsonl import READ_CHUNK_BYTES, append_json_objects, read_json_objects_tail
@@ -173,6 +175,41 @@ class JsonlTailTests(unittest.TestCase):
                         max_line_bytes=1024,
                         max_file_bytes=None,
                         record_name="test",
+                    )
+
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_append_rejects_gid_drift_before_repairing_or_appending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            path.write_bytes(b'{"id":1}')
+            path.chmod(0o600)
+            original = path.read_bytes()
+            target_inode = path.stat().st_ino
+            expected_gid = path.stat().st_gid
+            real_fstat = os.fstat
+
+            def drifted_fstat(fd):
+                metadata = real_fstat(fd)
+                if metadata.st_ino == target_inode:
+                    return SimpleNamespace(
+                        st_mode=metadata.st_mode,
+                        st_nlink=metadata.st_nlink,
+                        st_gid=expected_gid + 1,
+                    )
+                return metadata
+
+            with mock.patch("bk.fileio.os.fstat", side_effect=drifted_fstat):
+                with self.assertRaisesRegex(PermissionError, "GID"):
+                    append_json_objects(
+                        path,
+                        [{"id": 2}],
+                        file_mode=0o600,
+                        dir_mode=0o700,
+                        max_line_bytes=1024,
+                        max_file_bytes=None,
+                        record_name="test",
+                        expected_gid=expected_gid,
                     )
 
             self.assertEqual(path.read_bytes(), original)

@@ -3,6 +3,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from bk.fileio import (
@@ -11,6 +12,7 @@ from bk.fileio import (
     open_existing_regular,
     open_existing_regular_at,
     open_or_create_regular,
+    setgid_directory_gid,
 )
 
 
@@ -103,6 +105,33 @@ class SecureFileIoTests(unittest.TestCase):
 
             self.assertEqual(alias.read_text(encoding="utf-8"), "keep")
 
+    def test_existing_write_rejects_gid_drift_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "managed"
+            path.write_text("keep", encoding="utf-8")
+            path.chmod(0o600)
+            expected_gid = path.stat().st_gid
+            real_fstat = os.fstat
+
+            def drifted_fstat(fd):
+                metadata = real_fstat(fd)
+                return SimpleNamespace(
+                    st_mode=metadata.st_mode,
+                    st_nlink=metadata.st_nlink,
+                    st_gid=expected_gid + 1,
+                )
+
+            with mock.patch("bk.fileio.os.fstat", side_effect=drifted_fstat):
+                with self.assertRaisesRegex(PermissionError, "expected"):
+                    open_or_create_regular(
+                        path,
+                        os.O_WRONLY | os.O_APPEND,
+                        0o600,
+                        expected_gid=expected_gid,
+                    )
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "keep")
+
     def test_directory_helper_rejects_symbolic_link(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -137,6 +166,38 @@ class SecureFileIoTests(unittest.TestCase):
 
             for managed in (path, path.parent, path.parent.parent, path.parent.parent.parent):
                 self.assertEqual(stat.S_IMODE(managed.stat().st_mode), 0o2770)
+
+    def test_directory_helper_rejects_gid_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "managed"
+            path.mkdir(mode=0o700)
+            expected_gid = path.stat().st_gid
+            real_fstat = os.fstat
+
+            def drifted_fstat(fd):
+                metadata = real_fstat(fd)
+                return SimpleNamespace(
+                    st_mode=metadata.st_mode,
+                    st_gid=expected_gid + 1,
+                )
+
+            with mock.patch("bk.fileio.os.fstat", side_effect=drifted_fstat):
+                with self.assertRaisesRegex(PermissionError, "GID"):
+                    ensure_directory(
+                        path,
+                        0o700,
+                        require_mode=True,
+                        expected_gid=expected_gid,
+                    )
+
+    def test_setgid_directory_gid_returns_the_pinned_directory_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "managed"
+            path.mkdir(mode=0o700)
+            path.chmod(0o2770)
+
+            self.assertEqual(setgid_directory_gid(path, 0o2770), path.stat().st_gid)
+            self.assertIsNone(setgid_directory_gid(path, 0o700))
 
     def test_directory_fsync_rejects_symbolic_link(self):
         with tempfile.TemporaryDirectory() as tmp:

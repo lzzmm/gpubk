@@ -280,6 +280,19 @@ class LedgerStorageTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(store.lock_path.stat().st_mode), 0o660)
             backup = next(store.backup_dir.glob("ledger-*.json"))
             self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o660)
+            expected_gid = data_dir.stat().st_gid
+            self.assertTrue(
+                all(
+                    path.stat().st_gid == expected_gid
+                    for path in (
+                        store.backup_dir,
+                        store.ledger_path,
+                        store.log_path,
+                        store.lock_path,
+                        backup,
+                    )
+                )
+            )
 
     def test_health_reports_managed_file_gid_drift_in_setgid_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -311,6 +324,65 @@ class LedgerStorageTests(unittest.TestCase):
             self.assertEqual(issue["type"], "file-gid")
             self.assertEqual(issue["expected_gid"], expected_gid)
             self.assertEqual(issue["actual_gid"], expected_gid + 1)
+
+    def test_transaction_rejects_managed_gid_drift_before_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "shared"
+            store = LedgerStore(data_dir, file_mode=0o660, dir_mode=0o2770)
+
+            def seed(ledger):
+                ledger["reservations"].append(_reservation("gid-seed"))
+                return ledger, None, [{"action": "seed"}], True
+
+            store.transaction(seed)
+            original_ledger = store.ledger_path.read_bytes()
+            original_log = store.log_path.read_bytes()
+            log_inode = store.log_path.stat().st_ino
+            real_fstat = os.fstat
+            mutator = mock.Mock()
+
+            def drifted_fstat(fd):
+                metadata = real_fstat(fd)
+                if metadata.st_ino == log_inode:
+                    return SimpleNamespace(
+                        st_mode=metadata.st_mode,
+                        st_nlink=metadata.st_nlink,
+                        st_gid=metadata.st_gid + 1,
+                    )
+                return metadata
+
+            with mock.patch("bk.fileio.os.fstat", side_effect=drifted_fstat):
+                with self.assertRaisesRegex(PermissionError, "GID"):
+                    store.transaction(mutator)
+
+            mutator.assert_not_called()
+            self.assertEqual(store.ledger_path.read_bytes(), original_ledger)
+            self.assertEqual(store.log_path.read_bytes(), original_log)
+
+    def test_atomic_ledger_write_rejects_bad_inherited_gid_and_cleans_temporary_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "shared"
+            store = LedgerStore(data_dir, file_mode=0o660, dir_mode=0o2770)
+            store.ensure()
+            expected_gid = data_dir.stat().st_gid
+            real_fstat = os.fstat
+
+            def bad_regular_gid(fd):
+                metadata = real_fstat(fd)
+                if stat.S_ISREG(metadata.st_mode):
+                    return SimpleNamespace(
+                        st_mode=metadata.st_mode,
+                        st_nlink=metadata.st_nlink,
+                        st_gid=expected_gid + 1,
+                    )
+                return metadata
+
+            with mock.patch("bk.storage.os.fstat", side_effect=bad_regular_gid):
+                with self.assertRaisesRegex(PermissionError, "temporary file"):
+                    store._atomic_write_ledger({"version": 1, "reservations": []})
+
+            self.assertFalse(store.ledger_path.exists())
+            self.assertEqual(list(data_dir.glob(".ledger.*.tmp")), [])
 
     def test_durable_journal_recovers_after_apply_failure(self):
         with tempfile.TemporaryDirectory() as tmp:

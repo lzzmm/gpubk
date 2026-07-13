@@ -48,6 +48,7 @@ def append_json_objects(
     max_file_bytes: Optional[int],
     record_name: str,
     compact: bool = True,
+    expected_gid: Optional[int] = None,
 ) -> JsonlAppendResult:
     if not records:
         return JsonlAppendResult(0)
@@ -66,8 +67,18 @@ def append_json_objects(
         serialized.append(line)
         total_bytes += len(line)
 
-    ensure_directory(path.parent, dir_mode, require_mode=True)
-    fd = open_or_create_regular(path, os.O_RDWR | os.O_APPEND, file_mode)
+    ensure_directory(
+        path.parent,
+        dir_mode,
+        require_mode=True,
+        expected_gid=expected_gid,
+    )
+    fd = open_or_create_regular(
+        path,
+        os.O_RDWR | os.O_APPEND,
+        file_mode,
+        expected_gid=expected_gid,
+    )
     warnings = []
     try:
         original_size = _repair_tail(fd, path, max_line_bytes, record_name, warnings)

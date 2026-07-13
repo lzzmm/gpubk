@@ -298,6 +298,16 @@ class UsageStoreTests(unittest.TestCase):
         self.assertNotIn("private", text)
         self.assertNotIn("secret", text)
 
+    def test_short_workload_key_write_is_rejected_and_cleaned_up(self):
+        self.store.ensure()
+
+        with mock.patch("bk.usage_store.os.write", return_value=1):
+            with self.assertRaisesRegex(OSError, "short write"):
+                self.store.register_workload(1001, describe_workload("python train.py"))
+
+        self.assertFalse(self.store.key_path.exists())
+        self.assertFalse(self.store.workloads_path.exists())
+
     def test_health_rejects_symlink_usage_root_without_reading_target(self):
         outside = self.data_dir / "outside-usage"
         outside.mkdir()
@@ -360,12 +370,16 @@ class UsageStoreTests(unittest.TestCase):
             )
             store.append_rollups([self._rollup_at(0)])
             partition = store._partition_path("minute", self.at.date())
+            expected_gid = store.data_dir.stat().st_gid
 
             self.assertEqual(stat.S_IMODE(partition.stat().st_mode), 0o660)
+            self.assertEqual(partition.stat().st_gid, expected_gid)
             cursor = partition.parent
             while cursor != store.usage_dir:
                 self.assertEqual(stat.S_IMODE(cursor.stat().st_mode), 0o2770)
+                self.assertEqual(cursor.stat().st_gid, expected_gid)
                 cursor = cursor.parent
+            self.assertEqual(store.usage_dir.stat().st_gid, expected_gid)
             self.assertEqual(store.health_issues(), [])
 
     def test_shared_mode_health_reports_partition_gid_drift(self):
@@ -392,11 +406,88 @@ class UsageStoreTests(unittest.TestCase):
 
             with mock.patch.object(Path, "lstat", autospec=True, side_effect=drifted_lstat):
                 issues = store.health_issues()
+                with self.assertRaisesRegex(UsageFormatError, "usage-file-gid"):
+                    store.maintain(
+                        UsageRetentionPolicy(),
+                        now=self.at + timedelta(days=40),
+                    )
 
             issue = next(item for item in issues if item.get("path") == str(partition))
             self.assertEqual(issue["type"], "usage-file-gid")
             self.assertEqual(issue["expected_gid"], expected_gid)
             self.assertEqual(issue["actual_gid"], expected_gid + 1)
+            self.assertTrue(partition.exists())
+
+    def test_append_rejects_partition_gid_drift_before_updating_users(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = UsageAuditStore(
+                Path(tmp) / "shared",
+                file_mode=0o660,
+                dir_mode=0o2770,
+            )
+            store.append_rollups([self._rollup_at(0)])
+            partition = store._partition_path("minute", self.at.date())
+            original_partition = partition.read_bytes()
+            original_users = store.users_path.read_bytes()
+            partition_inode = partition.stat().st_ino
+            real_fstat = os.fstat
+            changed = self._rollup_at(1)
+            changed["username"] = "changed-name"
+
+            def drifted_fstat(fd):
+                metadata = real_fstat(fd)
+                if metadata.st_ino == partition_inode:
+                    return SimpleNamespace(
+                        st_mode=metadata.st_mode,
+                        st_nlink=metadata.st_nlink,
+                        st_gid=metadata.st_gid + 1,
+                    )
+                return metadata
+
+            with mock.patch("bk.fileio.os.fstat", side_effect=drifted_fstat):
+                with self.assertRaisesRegex(PermissionError, "GID"):
+                    store.append_rollups([changed])
+
+            self.assertEqual(partition.read_bytes(), original_partition)
+            self.assertEqual(store.users_path.read_bytes(), original_users)
+
+    def test_atomic_usage_write_rejects_bad_inherited_gid_without_residue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = UsageAuditStore(
+                Path(tmp) / "shared",
+                file_mode=0o660,
+                dir_mode=0o2770,
+            )
+            store.ensure()
+            expected_gid = store.data_dir.stat().st_gid
+            captured_fds = set()
+            real_mkstemp = tempfile.mkstemp
+            real_fstat = os.fstat
+
+            def captured_mkstemp(*args, **kwargs):
+                fd, path = real_mkstemp(*args, **kwargs)
+                captured_fds.add(fd)
+                return fd, path
+
+            def bad_temporary_gid(fd):
+                metadata = real_fstat(fd)
+                if fd in captured_fds:
+                    return SimpleNamespace(
+                        st_mode=metadata.st_mode,
+                        st_nlink=metadata.st_nlink,
+                        st_gid=expected_gid + 1,
+                    )
+                return metadata
+
+            with (
+                mock.patch("bk.usage_store.tempfile.mkstemp", side_effect=captured_mkstemp),
+                mock.patch("bk.usage_store.os.fstat", side_effect=bad_temporary_gid),
+            ):
+                with self.assertRaisesRegex(PermissionError, "temporary file"):
+                    store.save_state({"one": {"pid": 1}})
+
+            self.assertFalse(store.state_path.exists())
+            self.assertEqual(list(store.usage_dir.glob(".state.*.tmp")), [])
 
     def test_maintenance_builds_all_resolutions_before_removing_old_minutes(self):
         workload_id = self.store.register_workload(1001, describe_workload("python train.py"))
