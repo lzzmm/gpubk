@@ -116,8 +116,8 @@ def system_unit_text(
         "@CONFIG_ENVIRONMENT@": _systemd_environment_line(
             "BK_CONFIG_FILE", str(trusted_config)
         ),
-        "@DATA_DIRECTORY@": _quote_systemd_argument(str(state_directory)),
-        "@SOCKET_DIRECTORY@": _quote_systemd_argument(str(runtime_directory)),
+        "@DATA_DIRECTORY@": _escape_systemd_path(str(state_directory)),
+        "@SOCKET_DIRECTORY@": _escape_systemd_path(str(runtime_directory)),
         "@RUNTIME_DIRECTORY@": runtime_directives,
     }
     rendered = template
@@ -249,6 +249,22 @@ def _quote_systemd_argument(value: str) -> str:
         raise BookingError("invalid Python executable path for systemd")
     escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$")
     return f'"{escaped}"'
+
+
+def _escape_systemd_path(value: str) -> str:
+    if not value or any(
+        ord(character) < 0x20 or ord(character) == 0x7F for character in value
+    ):
+        raise BookingError("invalid path for systemd")
+    escaped = []
+    for character in value:
+        if character == "%":
+            escaped.append("%%")
+        elif character in {" ", "\\", '"', "'"}:
+            escaped.extend(f"\\x{byte:02x}" for byte in character.encode("utf-8"))
+        else:
+            escaped.append(character)
+    return "".join(escaped)
 
 
 def _systemd_environment_line(name: str, value: str) -> str:

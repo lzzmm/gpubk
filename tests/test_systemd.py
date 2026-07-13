@@ -41,8 +41,8 @@ class BundledSystemdTests(unittest.TestCase):
             self.assertIn("User=1001", rendered)
             self.assertIn("Group=1002", rendered)
             self.assertIn('Environment="BK_CONFIG_FILE=/etc/gpubk/config.json"', rendered)
-            self.assertIn('WorkingDirectory="/var/lib/gpubk"', rendered)
-            self.assertIn('ReadWritePaths="/var/lib/gpubk" "/run/gpubk"', rendered)
+            self.assertIn("WorkingDirectory=/var/lib/gpubk", rendered)
+            self.assertIn("ReadWritePaths=/var/lib/gpubk /run/gpubk", rendered)
             self.assertIn("NoNewPrivileges=true", rendered)
             self.assertIn("ProtectSystem=strict", rendered)
             self.assertIn("WantedBy=multi-user.target", rendered)
@@ -74,6 +74,25 @@ class BundledSystemdTests(unittest.TestCase):
 
         self.assertIn("RuntimeDirectory=lab/gpubk", volatile)
         self.assertNotIn("RuntimeDirectory=", persistent)
+
+    def test_system_unit_escapes_paths_without_quoting_path_directives(self):
+        rendered = system_unit_text(
+            "monitor",
+            service_uid=1001,
+            service_gid=1001,
+            config_file=Path("/etc/gpubk/config.json"),
+            data_dir=Path('/srv/GPU lab/percent%/quote"'),
+            socket_directory=Path("/run/GPU lab"),
+            python_executable=Path("/opt/gpubk/bin/python"),
+        )
+
+        self.assertIn(
+            "WorkingDirectory=/srv/GPU\\x20lab/percent%%/quote\\x22", rendered
+        )
+        self.assertIn(
+            "ReadWritePaths=/srv/GPU\\x20lab/percent%%/quote\\x22 /run/GPU\\x20lab",
+            rendered,
+        )
 
     def test_system_unit_rejects_root_identity_and_relative_paths(self):
         common = {

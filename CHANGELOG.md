@@ -4,6 +4,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Render systemd path directives without surrounding quotes so system services load correctly on
+  releases that treat quoted `WorkingDirectory=` values as non-absolute paths.
 - Create the broker socket with its final configured mode at bind time, closing a
   startup race where an early client could observe and reject a transient `0700` mode.
 - Add a replayable, read-only CLI tutorial, a first-launch TUI tour, and private
