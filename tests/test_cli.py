@@ -2369,7 +2369,6 @@ class CliTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            start = iso(floor_5m(datetime.now(timezone.utc)))
             env = {
                 "BK_JOB_LOG_DIR": str(log_dir),
                 "BK_GPU_SIM_FILE": str(simulation),
@@ -2380,8 +2379,6 @@ class CliTests(unittest.TestCase):
                     "10m",
                     "--gpu",
                     "0",
-                    "--start",
-                    start,
                     "--mem",
                     "1g",
                     "--",
