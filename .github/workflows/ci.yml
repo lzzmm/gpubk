@@ -109,7 +109,7 @@ jobs:
           /tmp/bk-wheel-smoke/bin/python -m pip install --no-deps dist/*.whl
           BK_DATA_DIR=/tmp/bk-wheel-data BK_GPU_COUNT=2 /tmp/bk-wheel-smoke/bin/bk --version
           BK_DATA_DIR=/tmp/bk-wheel-data BK_GPU_COUNT=2 XDG_STATE_HOME=/tmp/bk-wheel-state /tmp/bk-wheel-smoke/bin/bk tutorial > /tmp/bk-tutorial.txt
-          grep -- "GPUbk tutorial 1/" /tmp/bk-tutorial.txt
+          grep -- "GPUBK tutorial 1/" /tmp/bk-tutorial.txt
           test ! -e /tmp/bk-wheel-data/ledger.json
           BK_DATA_DIR=/tmp/bk-wheel-data BK_GPU_COUNT=2 /tmp/bk-wheel-smoke/bin/bk agent context --compact > /tmp/bk-context.json
           /tmp/bk-wheel-smoke/bin/bk skill install --target /tmp/bk-wheel-skill

@@ -1,8 +1,8 @@
-# GPUbk
+# GPUBK
 
 **English** | [简体中文](https://github.com/lzzmm/gpubk/blob/main/README.zh-CN.md)
 
-GPUbk is a GPU booking tool for shared Linux servers. The package is named
+GPUBK is a GPU booking tool for shared Linux servers. The package is named
 `gpubk`; the command is the shorter `bk`.
 
 It works offline, stores data in local files, and has no required runtime
@@ -19,12 +19,12 @@ JSON commands, or an optional local MCP server.
 - Stable JSON, MCP tools, a bundled Codex Skill, and an optional external allocator.
 - Atomic file transactions, UID ownership checks, backups, and an append-only audit log.
 
-GPUbk is a cooperative scheduler. It does not replace Linux device permissions
+GPUBK is a cooperative scheduler. It does not replace Linux device permissions
 or stop a user with direct access to `/dev/nvidia*` from bypassing the tool.
 
 ## Install
 
-GPUbk requires Python 3.10 or newer.
+GPUBK requires Python 3.10 or newer.
 
 ```bash
 python3 -m pip install gpubk          # core CLI and TUI; no dependencies
@@ -54,7 +54,7 @@ python3 -m pip install .
 ```
 
 Some older Debian/Ubuntu pip builds ignore the isolated setuptools requested by
-`pyproject.toml` and silently create an unusable `UNKNOWN` package. GPUbk detects
+`pyproject.toml` and silently create an unusable `UNKNOWN` package. GPUBK detects
 that condition and fails with an upgrade hint instead.
 
 ## First Five Minutes
@@ -76,6 +76,7 @@ available after the reminders have been dismissed.
 A normal first session is:
 
 ```bash
+bk info              # administrator account and contact
 bk slots 1 30m       # preview choices, no write
 bk 1 30m             # book the earliest suitable shared GPU
 bk st                # check live state
@@ -120,7 +121,7 @@ bk doctor                         # read-only ledger checks
 Scheduling rules are intentionally small:
 
 - Start times and durations use the server's configured booking boundary.
-- Without `--at` or `--start`, GPUbk starts in the active booking interval when possible
+- Without `--at` or `--start`, GPUBK starts in the active booking interval when possible
   (`12:41` starts at `12:40`) and prints `queued:` when it must start later.
 - `--at` accepts `+30m`, `20:00`, `tomorrow 09:00`, or `07-13 20:00`.
   `--start` keeps exact ISO 8601 input for scripts and Agents. Either is exact;
@@ -254,7 +255,7 @@ Commands, working directories, and the submitting process's `PATH` stay in
 UID-owned `0600` job specs; they are signed by the digest and are not written to
 the shared ledger. Capturing `PATH` keeps a bare command such as `python` bound
 to the same search path when a systemd worker starts outside the interactive
-shell. GPUbk deliberately captures no other environment variable. Load project
+shell. GPUBK deliberately captures no other environment variable. Load project
 variables and credentials from a user-owned wrapper or configuration file.
 Changing `PATH` while retrying the same operation ID is a different command
 intent and is rejected. Existing v1 private specs remain readable.
@@ -335,7 +336,7 @@ interrupted, uncertain, pending, claimed, and running jobs keep their specs
 while they can still run or be retried. Creation, execution-time reads, and
 deletion stay pinned to validated UID-owned private directory descriptors;
 symbolic links and hard-linked spec files are rejected. An interrupted write
-removes its partial file. If booking completion is ambiguous, GPUbk first
+removes its partial file. If booking completion is ambiguous, GPUBK first
 recovers and rereads the ledger, then removes only a spec that has no committed
 reference. A stable operation ID also binds the full command digest and working
 directory without putting command arguments in the shared ledger. `bk jobs
@@ -399,8 +400,8 @@ or stale device handle enters a short backoff and is rebuilt, so a transient
 driver fault does not permanently degrade a long-running monitor. The monitor
 records bounded scheduling load plus sparse per-user history and process start,
 stop, authorization, and workload changes. It does not append a full snapshot
-every second. Without NVML, GPUbk falls back to `nvidia-smi` for device metrics.
-Because that fallback has no trustworthy process list, GPUbk preserves the last
+every second. Without NVML, GPUBK falls back to `nvidia-smi` for device metrics.
+Because that fallback has no trustworthy process list, GPUBK preserves the last
 observed process state and reports the telemetry gap instead of manufacturing
 stop/start events. Process-list and per-process-utilization capabilities are
 exposed in monitor warnings and Agent GPU details. The collector status tracks
@@ -482,7 +483,7 @@ bk agent cancel 6e957ef1 --compact
 
 Create and edit operations require a stable operation ID. An identical retry
 returns `status=exists`; reusing the ID for a different write is rejected.
-GPUbk resolves a committed exact retry before live GPU probing, external
+GPUBK resolves a committed exact retry before live GPU probing, external
 allocation, or private command-spec writes. JSON reports
 `allocator.source=idempotent-replay`; when the caller did not already supply
 advice, replay-only live fields are `unknown` rather than stale. This confirms
@@ -510,7 +511,7 @@ destructive, and closed-world annotations.
 An administrator may also set `BK_ALLOCATOR_COMMAND` to a trusted local program
 that reads `bk.allocator.v1` JSON and returns a GPU ordering. Its output is
 advisory: every result still passes the built-in conflict, VRAM, time, UID, and
-transaction checks. GPUbk validates the ledger-bound policy before invoking the
+transaction checks. GPUBK validates the ledger-bound policy before invoking the
 allocator for create, recommend, or edit operations. Timeout, invalid output,
 and ordinary allocator failures fall back to built-in ordering; an interrupt
 terminates the allocator process group before propagating. See the
@@ -518,7 +519,7 @@ terminates the allocator process group before propagating. See the
 
 ## Shared Server Setup
 
-For a shared server, keep GPUbk in an isolated system virtual environment. This
+For a shared server, keep GPUBK in an isolated system virtual environment. This
 avoids modifying the operating system's Python and gives upgrades one stable path:
 
 ```bash
@@ -545,6 +546,14 @@ only the selected owner can write the ledger files. Ordinary users cannot edit
 another UID's reservations or system policy and never need `sudo`. Using the
 administrator's own account is fully supported. A dedicated account remains an
 optional operational choice, not a security requirement.
+
+The selected broker owner is also the public GPUBK administrator. `bk info`
+shows that Linux account, numeric UID, and its `adduser`/GECOS Full Name, Room,
+Work Phone, Home Phone, and Other fields; `bk info --json` exposes the same
+versioned document to tools and Agents. In the TUI, press `i`. The administrator
+can update these local account fields with `sudo chfn USER`; changes and
+`bk admin transfer` take effect immediately without rewriting GPUBK data. Only
+put contact information there that may be shown to every local GPUBK user.
 
 Useful non-interactive forms:
 
@@ -579,6 +588,7 @@ Only process supervision differs from the systemd deployment. Do not pass
 Then, as an ordinary user:
 
 ```bash
+bk info                                  # find the responsible administrator
 bk config                                # storage transport should be broker
 bk doctor --probe --strict               # checks socket identity and connectivity
 bk 1 30m
@@ -622,7 +632,7 @@ bk doctor --probe --require-monitor --strict
 See [UPGRADING.md](UPGRADING.md) for service restart, rollback, and release-specific
 checks.
 
-Stop and disable the tracked services before uninstalling. GPUbk verifies each
+Stop and disable the tracked services before uninstalling. GPUBK verifies each
 unit against its root-only manifest, restores any reviewed pre-existing unit,
 and refuses drift. Non-empty data is never deleted without the explicit purge
 flag:
@@ -641,7 +651,7 @@ sudo rm -rf /opt/gpubk
 The uninstall manifest restores pre-existing empty-directory metadata and an
 older replaced configuration. It refuses to proceed if the broker is active,
 the managed configuration changed, or an unknown file appears in a directory
-GPUbk would remove. Accounts and groups are left untouched because GPUbk never
+GPUBK would remove. Accounts and groups are left untouched because GPUBK never
 creates them. These commands remove the tracked server state, command link, and
 isolated Python environment; pre-existing files and directories recorded by the
 install manifest are restored. Each user who installed a worker unit can remove
@@ -649,7 +659,7 @@ it in the same way with `systemctl --user disable --now bk-worker.service` and
 `bk service uninstall worker`.
 
 `bk admin services status` reports the tracked interpreter, UID/GID, unit file
-state, and remaining enable links. GPUbk writes unit files but leaves
+state, and remaining enable links. GPUBK writes unit files but leaves
 `systemctl enable`, `start`, `stop`, and `disable` visible in the deployment
 steps so an administrator can see exactly when a persistent process changes.
 
@@ -701,7 +711,7 @@ socket policy in addition to scheduling settings:
 }
 ```
 
-When neither `BK_DATA_DIR` nor `BK_CONFIG_FILE` is set, GPUbk automatically
+When neither `BK_DATA_DIR` nor `BK_CONFIG_FILE` is set, GPUBK automatically
 discovers `/etc/gpubk/config.json`. A system configuration must contain an
 absolute `data_dir`, so normal SSH sessions, MCP clients, and user services all
 reach the same ledger without shell startup files. A nonstandard trusted file
@@ -711,7 +721,7 @@ behavior and is required unless `BK_DATA_DIR` is also set. Explicit
 system discovery. Set both variables when deliberately combining an alternate
 data directory with an external configuration.
 
-For a private installation without those overrides, GPUbk uses
+For a private installation without those overrides, GPUBK uses
 `$XDG_DATA_HOME/bk` for the ledger, `$XDG_STATE_HOME/bk/jobs` for private job
 state, and `$XDG_CONFIG_HOME/systemd/user` for installed user units. Per the XDG
 base-directory rules, only absolute non-empty XDG values are accepted; relative
@@ -835,7 +845,7 @@ repairing a non-empty directory; only a service-account `--probe` writes tempora
 files.
 For NFS/FUSE used by multiple hosts, additionally verify locking from a second
 host because one machine cannot prove cross-host lock propagation. Every writer
-must use GPUbk.
+must use GPUBK.
 
 See [SECURITY.md](https://github.com/lzzmm/gpubk/blob/main/SECURITY.md) for the supported boundary, file safety, WAL
 recovery, private job specs, MCP isolation, and administrator responsibilities.

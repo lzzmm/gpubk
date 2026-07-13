@@ -169,7 +169,7 @@ class BrokerClient:
             response = _receive_frame(client)
         except (OSError, TimeoutError) as exc:
             raise BookingError(
-                f"GPUbk broker is unavailable at {self.socket_path}: {exc}"
+                f"GPUBK broker is unavailable at {self.socket_path}: {exc}"
             ) from exc
         finally:
             client.close()
@@ -470,7 +470,7 @@ class BrokerServer:
             raise BookingError(f"cannot verify existing broker socket: {exc}") from exc
         else:
             raise BookingError(
-                f"another GPUbk broker is already listening: {self.socket_path}"
+                f"another GPUBK broker is already listening: {self.socket_path}"
             )
         finally:
             probe.close()
@@ -541,7 +541,7 @@ def run_broker_cli(argv: list[str]) -> int:
 def _linux_peer_credentials(connection: socket.socket) -> tuple[int, int, int]:
     option = getattr(socket, "SO_PEERCRED", None)
     if option is None:
-        raise BookingError("GPUbk broker requires Linux SO_PEERCRED")
+        raise BookingError("GPUBK broker requires Linux SO_PEERCRED")
     size = struct.calcsize("3i")
     raw = connection.getsockopt(socket.SOL_SOCKET, option, size)
     if len(raw) != size:
@@ -601,7 +601,7 @@ def _validate_socket_leaf(
     try:
         metadata = path.lstat()
     except FileNotFoundError as exc:
-        raise BookingError(f"GPUbk broker socket does not exist: {path}") from exc
+        raise BookingError(f"GPUBK broker socket does not exist: {path}") from exc
     if not stat.S_ISSOCK(metadata.st_mode):
         raise BookingError(f"broker path is not a Unix socket: {path}")
     if metadata.st_uid != expected_uid:

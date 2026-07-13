@@ -4,6 +4,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Standardize the public brand as GPUBK and add `bk info`, TUI `i`, JSON, and Agent context
+  access to the responsible Linux administrator account and its sanitized GECOS contact fields.
 - Render systemd path directives without surrounding quotes so system services load correctly on
   releases that treat quoted `WorkingDirectory=` values as non-absolute paths.
 - Create the broker socket with its final configured mode at bind time, closing a
@@ -24,7 +26,7 @@ All notable changes are documented here. The project follows Semantic Versioning
   an explicit job-state allowlist, with compare-and-swap retries for concurrent workers.
 - Track administrator initialization in a root-only install manifest and add a dry-runnable
   `bk admin uninstall` that restores replaced configuration and pre-existing empty-directory
-  metadata, refuses drift or active services, and purges only validated GPUbk data on request.
+  metadata, refuses drift or active services, and purges only validated GPUBK data on request.
 - Teach `bk doctor --probe` to verify broker connectivity for ordinary users and retain direct
   durability probes for the service account that owns shared state.
 - Add `bk admin init`, a guided, dry-runnable, idempotent shared-server initializer with atomic
@@ -182,7 +184,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 ## 0.1.0 - 2026-07-12
 
 - Use a concise English README by default and ship a matching Simplified Chinese guide in source distributions.
-- Adopt GPUbk as the public project brand and `gpubk` as the PyPI distribution while retaining the `bk` command and protocol namespace.
+- Adopt GPUBK as the public project brand and `gpubk` as the PyPI distribution while retaining the `bk` command and protocol namespace.
 - Add 5-minute shared/exclusive scheduling with atomic queueing and VRAM admission.
 - Add compact curses TUI, date/weekday timeline, shared lanes, and interactive Add/Edit.
 - Add NVML monitoring, privacy-safe usage audits, historical load forecasts, and live-aware placement.

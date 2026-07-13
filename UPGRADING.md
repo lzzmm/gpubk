@@ -1,4 +1,4 @@
-# Upgrading GPUbk
+# Upgrading GPUBK
 
 ## Routine upgrade for `/opt/gpubk`
 
@@ -66,7 +66,7 @@ values change in the same recoverable transaction.
    reported by `bk config --json` and `bk service show`.
 3. Back up the shared data directory without following symbolic links. Keep its
    ownership, group, modes, and ACLs.
-4. Stop the one trusted monitor and ask users to stop their GPUbk workers. Do
+4. Stop the one trusted monitor and ask users to stop their GPUBK workers. Do
    not stop GPU workloads or unrelated services.
 5. Test the new wheel in a separate virtual environment and an isolated
    `BK_DATA_DIR` before changing the shared installation.
@@ -83,7 +83,7 @@ with `bk admin uninstall --dry-run` followed by an explicit uninstall.
 Do not point `bk admin init` at a non-empty legacy shared directory. It deliberately
 refuses to change ownership or replace policy around live data. For a legacy direct
 deployment, schedule maintenance, preserve an ownership-retaining backup, stop all
-GPUbk writers, and migrate the reviewed ledger into a separately initialized broker
+GPUBK writers, and migrate the reviewed ledger into a separately initialized broker
 deployment before reopening bookings. Keep the original data untouched until
 `bk doctor --probe --strict` passes as both the service account and an ordinary user.
 
@@ -109,11 +109,11 @@ the 0.2 monitor:
 
 Replace `1001` with `id -u <monitor-account>`. This is required when the
 configured data-directory mode is group-writable. With the standard path,
-GPUbk discovers `/etc/gpubk/config.json` without shell exports. An alternate
+GPUBK discovers `/etc/gpubk/config.json` without shell exports. An alternate
 trusted path still requires `BK_CONFIG_FILE`.
 
 Confirm `bk config` reports the new canonical path and a matching ledger policy.
-Reinstall monitor and worker units with `--force` so they capture it. GPUbk rejects
+Reinstall monitor and worker units with `--force` so they capture it. GPUBK rejects
 an existing configuration whose directory can be replaced by shared-group members.
 Both daemons now return `78` before normal startup when their effective policy
 does not match the ledger, and the bundled units deliberately do not restart
@@ -121,7 +121,7 @@ that persistent error. Stop the service, correct the trusted configuration,
 reinstall the unit if captured paths or overrides changed, then start and verify
 it again. Do not alter ledger-bound limits merely to clear the exit code.
 
-GPUbk does not require an in-place ledger migration. It preserves unknown
+GPUBK does not require an in-place ledger migration. It preserves unknown
 reservation extension fields and writes ledger changes atomically. Fields with
 current scheduling semantics still require valid identity, GPU, mode, status,
 and ordered timestamps; run `bk doctor --json --strict` before upgrading so a
@@ -163,13 +163,13 @@ intentionally shown as degraded until the current monitor replaces it.
 After starting the services, verify the monitor with
 `bk doctor --require-monitor --strict` and each user's worker with
 `bk doctor --require-worker --strict`.
-GPUbk now ignores empty or relative XDG base-directory values instead of
+GPUBK now ignores empty or relative XDG base-directory values instead of
 resolving them against the caller's working directory. Before restarting,
 inspect `bk config --json`; if an old shell used a relative XDG value, move or
 select the intended absolute data and private job directories deliberately,
 then reinstall the affected user units with `--force`.
 If those user services must survive logout or start at boot, have an
-administrator verify selective `loginctl enable-linger <user>` state; GPUbk
+administrator verify selective `loginctl enable-linger <user>` state; GPUBK
 never changes linger policy automatically.
 
 Run `bk usage migrate --yes` only after reviewing its dry-run report. Legacy
@@ -187,9 +187,9 @@ probe.
 Version 0.2 also requires configured modes on managed write targets, rejects
 files with hard-linked aliases, and in setgid mode requires every managed path to
 keep the data directory's numeric GID. Run plain `bk doctor --json --strict`
-after the upgrade. If it reports a mode, GID, or link-count issue, stop GPUbk
+after the upgrade. If it reports a mode, GID, or link-count issue, stop GPUBK
 writers and have an administrator repair that named path and its ownership
-deliberately; GPUbk does not silently `chmod` or `chgrp` existing shared data.
+deliberately; GPUBK does not silently `chmod` or `chgrp` existing shared data.
 Existing setgid configurations may omit `storage_gid`. To enable the stronger
 root-group binding, obtain the numeric lab-group GID with
 `getent group <group> | cut -d: -f3`, add it to the trusted configuration, and
@@ -216,7 +216,7 @@ accommodate the configurable grace and durable final state update.
 
 ## Rollback
 
-Stop GPUbk monitor and worker services before reinstalling the previous
+Stop GPUBK monitor and worker services before reinstalling the previous
 version. Do not run a 0.1 worker against job state already claimed by a 0.2
 worker.
 

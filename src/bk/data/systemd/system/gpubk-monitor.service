@@ -1,5 +1,5 @@
 [Unit]
-Description=GPUbk GPU usage monitor
+Description=GPUBK GPU usage monitor
 After=local-fs.target gpubk-broker.service
 Wants=gpubk-broker.service
 StartLimitIntervalSec=60

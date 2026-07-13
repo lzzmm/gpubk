@@ -1,5 +1,5 @@
 [Unit]
-Description=GPUbk reservation broker
+Description=GPUBK reservation broker
 After=local-fs.target
 StartLimitIntervalSec=60
 StartLimitBurst=3

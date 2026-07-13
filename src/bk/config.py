@@ -427,7 +427,7 @@ def _validate_config_document(raw: Dict[str, Any], path: Path) -> None:
         raise ValueError(f"{path}: config_version must be the integer {CONFIG_VERSION}")
     if version != CONFIG_VERSION:
         raise ValueError(
-            f"{path}: unsupported config_version {version}; this GPUbk supports {CONFIG_VERSION}"
+            f"{path}: unsupported config_version {version}; this GPUBK supports {CONFIG_VERSION}"
         )
     unknown = sorted(set(raw) - CONFIG_FILE_KEYS)
     if not unknown:

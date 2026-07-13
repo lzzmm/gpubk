@@ -2,10 +2,10 @@
 
 ## Scope
 
-GPUbk is a local POSIX scheduler. In a shared installation, one non-root service
+GPUBK is a local POSIX scheduler. In a shared installation, one non-root service
 account owns the ledger and ordinary clients submit closed operations over a Unix
 socket. It is not a kernel GPU access-control system and cannot prevent a user
-with direct device permission from launching CUDA outside GPUbk.
+with direct device permission from launching CUDA outside GPUBK.
 
 Supported security boundaries:
 
@@ -101,7 +101,7 @@ Supported security boundaries:
   unreferenced spec. Operation-ID retries compare the private command digest, not just its public
   summary; raw command arguments remain outside the shared ledger.
 - Trusted configuration can live outside the writable ledger through the automatically
-  discovered `/etc/gpubk/config.json` or an explicit `BK_CONFIG_FILE`. GPUbk canonicalizes
+  discovered `/etc/gpubk/config.json` or an explicit `BK_CONFIG_FILE`. GPUBK canonicalizes
   its parent, pins every directory component and the leaf by file descriptor, rejects
   replaceable non-sticky directories, and never follows a leaf symlink.
 - A shared monitor requires the trusted root-owned broker configuration and matching numeric
@@ -132,12 +132,12 @@ Supported security boundaries:
 Administrator responsibilities:
 
 - Choose the local socket access policy explicitly. `bk admin init` defaults to `0666` on the
-  broker socket so every local account can use GPUbk; ledger files remain service-owned `0644`
+  broker socket so every local account can use GPUBK; ledger files remain service-owned `0644`
   inside service-owned `0755` directories. Use `--access group --group NAME` to restrict socket
   connections to an existing group.
 - Run the broker and monitor under one selected non-root account. The account that invoked `sudo`
   is the default and is fully supported; a dedicated non-login account is optional operational
-  isolation. GPUbk never creates, deletes, or changes accounts, groups, or memberships. Use
+  isolation. GPUBK never creates, deletes, or changes accounts, groups, or memberships. Use
   `bk admin transfer` instead of copying state or editing identity fields during a handoff.
 - Prefer the tracked system-level broker and monitor units on a shared server. User-level monitor
   units and linger are suitable for private installations, but they are not part of the root-owned
@@ -154,13 +154,16 @@ Administrator responsibilities:
   unauthenticated network write endpoint or allow users to submit records for arbitrary UIDs.
 - Put the selected telemetry account's numeric UID in `monitor_uid`; do not reuse a username
   as an identity. Exit status 77 is a persistent role/configuration error, not a retry signal.
+- `bk info`, the TUI, and Agent context expose the selected administrator account's sanitized
+  Linux GECOS fields to local GPUBK users. Store only non-secret contact details in Full Name,
+  Room, Work Phone, Home Phone, and Other.
 - The bundled monitor service bounds other failure restarts to three attempts per 60 seconds,
   allowing brief I/O recovery without retrying a persistent failure indefinitely.
 - Review generated user units before enabling them. `bk service install` captures absolute data
   and private job-log paths, an explicit trusted config path, and validated values for explicitly
   active non-secret configuration overrides. It never captures the allocator command. Reinstall
   the unit after those paths or overrides change; prefer a trusted config file on shared hosts.
-- Keep XDG base-directory variables absolute. GPUbk ignores empty or relative XDG values and uses
+- Keep XDG base-directory variables absolute. GPUBK ignores empty or relative XDG values and uses
   the account's absolute HOME defaults, preventing ledger, private worker, or unit paths from
   changing with a caller's working directory. Explicit private job-log paths must be absolute.
 - Enabling systemd linger allows an account's user manager and background services to run

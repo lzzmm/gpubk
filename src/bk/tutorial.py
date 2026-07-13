@@ -72,6 +72,7 @@ def tutorial_pages(config) -> tuple[TutorialPage, ...]:
             "See and manage",
             "List numbers and unique short IDs both work for your reservations.",
             (
+                ("bk info", "show the responsible administrator and contact"),
                 ("bk st", "show compact live status"),
                 ("bk tl 8h --step 15m", "show a detailed eight-hour timeline"),
                 ("bk l", "list your active reservations"),
@@ -228,7 +229,7 @@ def _print_page(
     color: bool,
 ) -> None:
     print(file=output)
-    heading = f"GPUbk tutorial {index + 1}/{total}  {page.title}"
+    heading = f"GPUBK tutorial {index + 1}/{total}  {page.title}"
     print(_style(heading, "heading", color), file=output)
     print(_style(page.summary, "muted", color), file=output)
     print(file=output)

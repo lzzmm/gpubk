@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
+from bk.admin_info import AdministratorInfo
 from bk.config import Config
 from bk.gpu import GpuProcessSnapshot, GpuSnapshot
 from bk.models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingRequest
@@ -164,12 +165,14 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertIn("Quick Tour", pages)
         self.assertIn("auto-refresh", pages["Navigate"]["r"])
         self.assertIn("live NOW", pages["Navigate"]["n"])
+        self.assertIn("administrator", pages["Navigate"]["i"])
         self.assertIn("any GPUs", pages["Add / Edit"]["f"])
         self.assertIn("exactly the selected GPUs", pages["Add / Edit"]["g"])
         self.assertIn("restore", pages["Add / Edit"]["r"])
         self.assertIn("collector health", pages["Timeline"]["Monitor"])
         self.assertIn("scheduled-command worker", pages["Timeline"]["Worker"])
         self.assertIn("bk u", pages["Quick Tour"])
+        self.assertIn("administrator", pages["Quick Tour"]["i"])
 
         minimum_window_width = 70
         for _title, entries in HELP_PAGES:
@@ -182,6 +185,28 @@ class TuiAddPreviewTests(unittest.TestCase):
                 if key:
                     self.assertLessEqual(len(key), key_width - 2)
                     self.assertLessEqual(len(description), description_width, (key, description))
+
+    def test_info_key_opens_the_administrator_contact_dialog(self):
+        config = Config(data_dir=Path("/tmp/gpubk-tui-info"))
+        store = LedgerStore(config.data_dir)
+        state = TuiState()
+        info = AdministratorInfo(
+            uid=1003,
+            username="chenyuhan",
+            full_name="Chen Yuhan",
+            other="admin@example.com",
+        )
+
+        with (
+            mock.patch("bk.tui.administrator_info", return_value=info),
+            mock.patch("bk.tui._message_dialog") as dialog,
+        ):
+            _handle_key(mock.Mock(), ord("i"), config, store, state)
+
+        dialog.assert_called_once()
+        self.assertEqual(dialog.call_args.args[1], "GPUBK administrator")
+        self.assertIn("Administrator: Chen Yuhan", dialog.call_args.args[2][0])
+        self.assertIn("admin@example.com", dialog.call_args.args[2][-1])
 
     def test_collector_labels_are_compact_and_defensive(self):
         expected = {

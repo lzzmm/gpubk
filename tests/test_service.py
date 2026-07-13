@@ -80,6 +80,11 @@ class AgentServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(context["schema_version"], AGENT_SCHEMA_VERSION)
+        self.assertEqual(
+            context["administrator"]["schema_version"],
+            "gpubk.administrator.v1",
+        )
+        self.assertEqual(context["administrator"]["account"]["uid"], os.getuid())
         self.assertEqual(context["policy"]["granularity_minutes"], 5)
         self.assertEqual(context["policy"]["access_mode"], "private")
         self.assertIsNone(context["policy"]["storage_gid"])

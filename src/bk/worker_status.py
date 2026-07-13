@@ -269,7 +269,7 @@ def _parse_lease(
             instance_warning = (
                 None
                 if instance_match
-                else "worker lease belongs to another GPUbk data directory"
+                else "worker lease belongs to another GPUBK data directory"
             )
         else:
             instance_id = None

@@ -2,7 +2,7 @@
 
 ## One-time trusted-publisher setup
 
-GPUbk publishes without a stored PyPI API token. Before the first release:
+GPUBK publishes without a stored PyPI API token. Before the first release:
 
 1. In GitHub, create environments named `testpypi` and `pypi`. Require the `lzzmm` reviewer for `pypi`, restrict it to `v*.*.*` tags, and keep `main` protected by the complete CI check set. The public repository currently enforces these rules for administrators too.
 2. In TestPyPI's trusted-publisher settings, add owner `lzzmm`, repository `gpubk`, workflow `release.yml`, and environment `testpypi`.
@@ -78,7 +78,7 @@ replacing an uploaded file.
 
    ```bash
    VERSION=$(PYTHONPATH=src python -c 'from bk import __version__; print(__version__)')
-   git tag -a "v$VERSION" -m "GPUbk $VERSION"
+   git tag -a "v$VERSION" -m "GPUBK $VERSION"
    git push origin "v$VERSION"
    ```
 

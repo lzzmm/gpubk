@@ -1,5 +1,5 @@
 [Unit]
-Description=GPUbk usage monitor
+Description=GPUBK usage monitor
 After=default.target
 StartLimitIntervalSec=60
 StartLimitBurst=3

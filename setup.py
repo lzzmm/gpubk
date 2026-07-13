@@ -13,9 +13,9 @@ def _require_setuptools(build_version: str) -> None:
         ) from exc
     if major < MIN_SETUPTOOLS_MAJOR:
         raise RuntimeError(
-            "GPUbk source builds require setuptools>=77, but this installer loaded "
+            "GPUBK source builds require setuptools>=77, but this installer loaded "
             f"setuptools {build_version}. Upgrade pip before installing from source, "
-            "or install the published GPUbk wheel."
+            "or install the published GPUBK wheel."
         )
 
 
@@ -24,8 +24,8 @@ def _main() -> None:
         build_version = version("setuptools")
     except PackageNotFoundError as exc:
         raise RuntimeError(
-            "GPUbk source builds require setuptools>=77; upgrade pip before installing "
-            "from source, or install the published GPUbk wheel."
+            "GPUBK source builds require setuptools>=77; upgrade pip before installing "
+            "from source, or install the published GPUBK wheel."
         ) from exc
     _require_setuptools(build_version)
 

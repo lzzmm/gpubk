@@ -220,7 +220,7 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="bk admin",
         description=(
-            "Initialize, supervise, transfer, or safely remove a shared GPUbk server."
+            "Initialize, supervise, transfer, or safely remove a shared GPUBK server."
         ),
     )
     commands = parser.add_subparsers(dest="action", required=True)
@@ -237,7 +237,7 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     init_parser.add_argument(
         "--service-user",
         help=(
-            "existing non-root account that exclusively writes GPUbk state "
+            "existing non-root account that exclusively writes GPUBK state "
             "(default: the account that invoked sudo)"
         ),
     )
@@ -274,7 +274,7 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     transfer_parser.add_argument(
         "service_user",
         nargs="?",
-        help="existing non-root account that will own GPUbk state",
+        help="existing non-root account that will own GPUBK state",
     )
     transfer_parser.add_argument(
         "--config-file", type=Path, default=SYSTEM_CONFIG_FILE
@@ -301,7 +301,7 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     uninstall_parser.add_argument(
         "--purge-data",
         action="store_true",
-        help="remove validated GPUbk ledger and usage data",
+        help="remove validated GPUBK ledger and usage data",
     )
     uninstall_parser.add_argument(
         "--yes", action="store_true", help="apply without confirmation"
@@ -456,9 +456,9 @@ def _run_admin_services(args: argparse.Namespace) -> int:
     if args.json and not args.yes:
         print(json.dumps(inspection, ensure_ascii=False, sort_keys=True))
     prompt = (
-        "Install tracked GPUbk system services? [y/N]: "
+        "Install tracked GPUBK system services? [y/N]: "
         if operation == "install"
-        else "Restore or remove tracked GPUbk system services? [y/N]: "
+        else "Restore or remove tracked GPUBK system services? [y/N]: "
     )
     message = f"pass --yes to apply this system service {operation} plan"
     if not _confirm_admin_action(args, prompt, message):
@@ -490,7 +490,7 @@ def _run_admin_services(args: argparse.Namespace) -> int:
         )
         print("verify: bk doctor --probe --require-monitor --strict")
     else:
-        print("removed: tracked GPUbk system service files")
+        print("removed: tracked GPUBK system service files")
         print("next: sudo systemctl daemon-reload")
     return 0
 
@@ -780,7 +780,7 @@ def _print_admin_services_inspection(inspection: dict, *, json_output: bool) -> 
     if json_output:
         print(json.dumps(inspection, ensure_ascii=False, sort_keys=True))
         return
-    print("GPUbk system services")
+    print("GPUBK system services")
     print(f"  operation:  {inspection['operation']}")
     print(f"  status:     {inspection['status']}")
     if inspection.get("unit_directory"):
@@ -873,7 +873,7 @@ def _run_admin_transfer(args: argparse.Namespace) -> int:
             print(json.dumps(inspection, ensure_ascii=False, sort_keys=True))
         if not _confirm_admin_action(
             args,
-            f"Transfer GPUbk to {target.username} ({target.uid})? [y/N]: ",
+            f"Transfer GPUBK to {target.username} ({target.uid})? [y/N]: ",
             "pass --yes to apply this service-account transfer",
         ):
             return 1
@@ -889,10 +889,10 @@ def _run_admin_transfer(args: argparse.Namespace) -> int:
         )
     else:
         if args.recover:
-            print("recovered: GPUbk ownership and configuration returned to the prior account")
+            print("recovered: GPUBK ownership and configuration returned to the prior account")
         else:
             print(
-                f"transferred: GPUbk broker and monitor ownership now belongs to "
+                f"transferred: GPUBK broker and monitor ownership now belongs to "
                 f"{result['service_username']} (UID {result['service_uid']})"
             )
             print("preserved: reservations, user UIDs, audit logs, and usage history")
@@ -928,7 +928,7 @@ def _confirm_admin_action(
 
 
 def _print_transfer_inspection(inspection: dict) -> None:
-    print("GPUbk service-account transfer")
+    print("GPUBK service-account transfer")
     print(
         f"  from:       {inspection['from']['username']} "
         f"({inspection['from']['uid']}:{inspection['from']['gid']})"
@@ -2747,7 +2747,7 @@ def _restore_config_file(path: Path, state: dict) -> None:
 
 
 def _print_uninstall_plan(inspection: dict) -> None:
-    print("GPUbk administrator uninstall")
+    print("GPUBK administrator uninstall")
     print(f"  config:     {inspection['config_file']}")
     print(f"  data:       {inspection['data_dir']}")
     print(f"  socket:     {inspection['broker_socket']} ({inspection['socket_state']})")
@@ -3350,7 +3350,7 @@ def _paths_overlap(left: Path, right: Path) -> bool:
 
 
 def _print_plan(plan: AdminInitPlan, inspection: AdminInspection) -> None:
-    print("GPUbk administrator setup")
+    print("GPUBK administrator setup")
     print(f"  GPUs:       {plan.gpu_count}")
     print(f"  data:       {plan.data_dir}")
     print(f"  config:     {plan.config_file}")

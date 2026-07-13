@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Sequence, Tuple
 
+from .admin_info import administrator_display_lines, administrator_info
 from .advisor import build_gpu_advice
 from .allocator import AllocatorDecision, apply_external_allocator
 from .config import Config
@@ -112,8 +113,9 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
             ("Up / Down", "Move through reservations or GPU rows"),
             ("Tab", "Switch between reservation and GPU focus"),
             ("a / e / d", "Add, edit, or delete a reservation"),
+            ("i", "Show the administrator account and contact"),
             ("?", "Open this help"),
-            ("q / Esc", "Quit GPUbk"),
+            ("q / Esc", "Quit GPUBK"),
         ),
     ),
     (
@@ -165,6 +167,7 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
             ("bk 1 1h --share 2", "Request two integer shared slots per GPU"),
             ("bk x 1 1h", "Book one GPU exclusively; x means exclusive"),
             ("bk tui", "Open this timeline"),
+            ("i", "Show the administrator account and contact"),
             ("a then 2", "Find earliest two-GPU slot; Enter confirms"),
             ("Tab", "Inspect a GPU's sharers and processes"),
             ("e", "Edit a selected future reservation"),
@@ -458,6 +461,18 @@ def _handle_key(stdscr, key: int, config: Config, store: LedgerStore, state: Tui
             return
         _delete_selected(stdscr, config, store, state)
         return
+    if key in (ord("i"), ord("I")):
+        info = administrator_info(config)
+        if stdscr is None:
+            state.message = administrator_display_lines(info)[0]
+            state.error = False
+        else:
+            _message_dialog(
+                stdscr,
+                "GPUBK administrator",
+                administrator_display_lines(info),
+            )
+        return
     if key in (ord("?"), ord("p"), ord("P")):
         if stdscr is None:
             state.message = "help: navigation, add/edit, timeline, and quick tour"
@@ -722,7 +737,7 @@ def _header_lines(
     else:
         window_mode = "LIVE"
     wide_title = (
-        f" GPUbk | {window_mode} | now {local_now:%Y-%m-%d %H:%M:%S %z} "
+        f" GPUBK | {window_mode} | now {local_now:%Y-%m-%d %H:%M:%S %z} "
         f"| window {local_start:%m-%d %H:%M} -> {local_end:%m-%d %H:%M} "
         f"| {state.slot_minutes}m/col "
     )
@@ -737,7 +752,7 @@ def _header_lines(
         details = wide_details
     else:
         title = (
-            f" GPUbk {window_mode} | {_weekday_label(local_now)} {local_now:%m-%d %H:%M:%S} "
+            f" GPUBK {window_mode} | {_weekday_label(local_now)} {local_now:%m-%d %H:%M:%S} "
             f"| {local_start:%m-%d %H:%M}->{local_end:%m-%d %H:%M} | {state.slot_minutes}m"
         )
         suffix = (
@@ -1302,18 +1317,18 @@ def _footer_label(state: TuiState, preview: Optional[AddPreview], width: int) ->
             "| r reset | Enter/Esc | ? help "
         )
     elif state.focus == FOCUS_GPUS:
-        short = " GPU | arrows | Tab RSV | a add | v speed | n NOW | ? help | q quit "
+        short = " GPU | arrows | Tab RSV | a add | n NOW | i info | ? help | q quit "
         long = (
             " GPU FOCUS | up/down select GPU | Tab reservations | a add here "
             "| -/= zoom | <-/-> history/future | Shift faster | v speed | n NOW "
-            "| r refresh | ? help | q quit "
+            "| r refresh | i administrator | ? help | q quit "
         )
     else:
-        short = " RSV | arrows | Tab GPU | a/e/d | v speed | n NOW | ? help | q quit "
+        short = " RSV | arrows | Tab GPU | a/e/d | n NOW | i info | ? help | q quit "
         long = (
             " RESERVATIONS | up/down select | Tab GPUs | a add | e edit | d delete "
             f"| -/= zoom {state.slot_minutes}m/col | <-/-> history/future | Shift faster "
-            "| v speed | n NOW | r refresh | ? help | q quit "
+            "| v speed | n NOW | r refresh | i administrator | ? help | q quit "
         )
     footer = long if len(long) < width else short
     return footer[: max(0, width - 1)]
@@ -2035,7 +2050,7 @@ def _help_dialog(
             max(14, win_width // 3),
         )
         dialog_name = "Tutorial" if tutorial else "Help"
-        heading = f" GPUbk {dialog_name} {page + 1}/{len(HELP_PAGES)}  {title} "
+        heading = f" GPUBK {dialog_name} {page + 1}/{len(HELP_PAGES)}  {title} "
         _win_addstr(win, 0, 2, heading, COLOR_HEADER, curses.A_BOLD)
         for offset, (key_label, description) in enumerate(entries):
             row = offset + 2
@@ -3075,7 +3090,8 @@ def _win_addstr(win, row: int, col: int, text: str, color: int = 0, attr: int = 
 
 def _print_fallback(config: Config, store: LedgerStore) -> None:
     now = utc_now()
-    print("GPUbk TUI fallback")
+    print("GPUBK TUI fallback")
+    print(f"{administrator_display_lines(administrator_info(config))[0]}; details: bk info")
     print(f"data={config.data_dir} shared_capacity={config.max_shared_users} slots/GPU")
     print("active reservations:")
     active = list_active(store.load(), now)

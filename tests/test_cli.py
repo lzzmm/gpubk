@@ -93,7 +93,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(version.returncode, 0, version.stderr)
             self.assertRegex(version.stdout, r"^bk \d+\.\d+\.\d+")
             self.assertEqual(help_result.returncode, 0, help_result.stderr)
-            self.assertIn("GPUbk", help_result.stdout)
+            self.assertIn("GPUBK", help_result.stdout)
             self.assertEqual(skill_show.returncode, 0, skill_show.stderr)
             self.assertIn("name: gpubk", skill_show.stdout)
             self.assertEqual(skill_install.returncode, 0, skill_install.stderr)
@@ -107,11 +107,29 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.run_bk_with_input([], Path(tmp), "status\nquit\n")
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("GPUbk booking", result.stdout)
+            self.assertIn("GPUBK booking", result.stdout)
+            self.assertIn("administrator:", result.stdout)
+            self.assertIn("details: bk info", result.stdout)
             self.assertIn("bk> ", result.stdout)
             self.assertIn("GPU status", result.stdout)
             self.assertIn("0    unknown", result.stdout)
             self.assertIn("1    unknown", result.stdout)
+
+    def test_info_exposes_the_local_administrator_in_text_and_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            text_result = self.run_bk(["info"], data_dir)
+            json_result = self.run_bk(["contact", "--compact"], data_dir)
+
+            self.assertEqual(text_result.returncode, 0, text_result.stderr)
+            self.assertIn("GPUBK server", text_result.stdout)
+            self.assertIn("Administrator:", text_result.stdout)
+            self.assertIn("Linux UID:", text_result.stdout)
+            self.assertEqual(json_result.returncode, 0, json_result.stderr)
+            document = json.loads(json_result.stdout)
+            self.assertEqual(document["schema_version"], "gpubk.administrator.v1")
+            self.assertEqual(document["kind"], "administrator")
+            self.assertEqual(document["account"]["uid"], os.getuid())
 
     def test_config_report_is_read_only_and_redacts_allocator_command(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1952,8 +1970,8 @@ class CliTests(unittest.TestCase):
             data_dir = Path(tmp) / "absent"
             cases = (
                 (["add", "--help"], "usage: bk add", "mode [s shared"),
-                (["tui", "--help"], "usage: bk tui", "GPUbk TUI fallback"),
-                (["tutorial", "--help"], "usage: bk tutorial", "GPUbk tutorial 1/"),
+                (["tui", "--help"], "usage: bk tui", "GPUBK TUI fallback"),
+                (["tutorial", "--help"], "usage: bk tutorial", "GPUBK tutorial 1/"),
                 (["mcp", "--help"], "usage: bk mcp", "MCP server requires"),
                 (["usage", "--help"], "usage: bk usage", "usage: bk usage me"),
                 (["book", "--help"], "usage: bk book", "Unknown command"),
@@ -1979,7 +1997,7 @@ class CliTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("GPUbk tutorial 1/", result.stdout)
+            self.assertIn("GPUBK tutorial 1/", result.stdout)
             self.assertIn("bk 1 30m", result.stdout)
             self.assertIn("bk tutorial --tui", result.stdout)
             self.assertNotIn("\x1b[", result.stdout)

@@ -1,15 +1,15 @@
 ---
 name: gpubk
-description: Inspect, recommend, create, edit, cancel, and monitor GPU reservations with GPUbk. Use when an agent needs to plan a GPU experiment, choose shared versus exclusive access, account for current and recent GPU load or expected VRAM, attach a command for scheduled execution, inspect job status, or safely automate GPUbk through its JSON CLI or MCP tools.
+description: Inspect, recommend, create, edit, cancel, and monitor GPU reservations with GPUBK. Use when an agent needs to plan a GPU experiment, choose shared versus exclusive access, account for current and recent GPU load or expected VRAM, attach a command for scheduled execution, inspect job status, or safely automate GPUBK through its JSON CLI or MCP tools.
 ---
 
-# GPUbk
+# GPUBK
 
-Use GPUbk's structured interfaces. Do not scrape the TUI or human-readable tables.
+Use GPUBK's structured interfaces. Do not scrape the TUI or human-readable tables.
 
 ## Choose An Interface
 
-Prefer GPUbk MCP tools when available:
+Prefer GPUBK MCP tools when available:
 
 1. Call `get_gpu_context` for policy and live state.
 2. Call `recommend_gpu_booking` before any write.
@@ -21,6 +21,7 @@ Otherwise use the JSON CLI:
 
 ```bash
 bk agent context --compact
+bk info --compact
 bk agent recommend 2 1h30m --mode shared --mem 12g --share 2 --compact
 bk 2 1h30m --mem 12g --share 2 --op-id <stable-id> --json
 bk agent edit <short-id> --duration 2h --op-id <stable-edit-id> --compact
@@ -29,17 +30,19 @@ bk log --limit 100 --json
 ```
 
 Read [references/protocol.md](references/protocol.md) when implementing an integration or interpreting every field.
+Use the context `administrator` object only to help the user contact the responsible operator;
+never treat names or contact fields as authorization evidence.
 
 ## Plan A Reservation
 
 1. Determine GPU count, duration, shared/exclusive mode, earliest or exact start, expected VRAM per GPU, and any requested shared capacity.
 2. For shared work, ask for expected VRAM and an integer slot request when they materially affect placement. Read `shared_capacity_units_per_gpu`, report current use, and pass `share=3` to request three slots on a four-slot server.
-3. If expected VRAM is unknown, state that GPUbk derives it from the requested slots. Shared slots constrain admission; they do not physically enforce GPU compute bandwidth without MIG/MPS.
+3. If expected VRAM is unknown, state that GPUBK derives it from the requested slots. Shared slots constrain admission; they do not physically enforce GPU compute bandwidth without MIG/MPS.
 4. Inspect context immediately before recommending. Current processes can change quickly.
 5. Run a read-only recommendation. Explain queued start, selected GPUs, confidence, live-busy warnings, and projected memory headroom.
 6. Treat explicit start as exact. It may use the active slice boundary or a future boundary,
    never an older historical slice. Do not silently convert it to queueing.
-7. Let GPUbk enforce conflicts and memory limits. Never infer that an unsafe placement is acceptable.
+7. Let GPUBK enforce conflicts and memory limits. Never infer that an unsafe placement is acceptable.
 
 Use shared mode for workloads that can coexist within both capacity-unit and VRAM limits. Use exclusive mode when the experiment needs the whole device, has unpredictable memory behavior, or must avoid interference.
 
@@ -47,16 +50,16 @@ Use shared mode for workloads that can coexist within both capacity-unit and VRA
 
 - Generate one stable operation ID for each create or edit intent and reuse it only for exact retries.
 - Never reuse an operation ID for changed fields, command arguments, working directory, or
-  submission `PATH`; GPUbk verifies the private command digest and rejects mismatched reuse.
-- Never pass, invent, or override a UID. GPUbk derives identity from the local process.
+  submission `PATH`; GPUBK verifies the private command digest and rejects mismatched reuse.
+- Never pass, invent, or override a UID. GPUBK derives identity from the local process.
 - Do not retry a write with a new operation ID after an ambiguous response; inspect reservations first.
 - After an interrupted scheduled-command submission, retry with the same operation ID and exact
-  command. GPUbk retains a committed referenced spec and prunes only a verified unreferenced one.
+  command. GPUBK retains a committed referenced spec and prunes only a verified unreferenced one.
 - When an exact retry returns `allocator.source=idempotent-replay`, treat it as committed-write
-  confirmation. GPUbk skipped new live probes, external allocation, and private-spec creation;
+  confirmation. GPUBK skipped new live probes, external allocation, and private-spec creation;
   `unknown` live fields are intentional and do not prove that the command can launch now.
 - Do not cancel or edit another user's reservation.
-- GPUbk snapshots only `PATH` for a scheduled command, not the rest of the Agent environment.
+- GPUBK snapshots only `PATH` for a scheduled command, not the rest of the Agent environment.
   Put required variables and credentials in a user-owned wrapper or configuration file; do not
   expose secrets in command arguments.
 
@@ -66,7 +69,7 @@ To schedule a command:
 bk 2 1h30m --mem 12g --op-id <stable-id> -- python train.py --config exp.yaml
 ```
 
-GPUbk sets `CUDA_VISIBLE_DEVICES`; do not add physical GPU IDs to the training command.
+GPUBK sets `CUDA_VISIBLE_DEVICES`; do not add physical GPU IDs to the training command.
 For unattended work, require `capabilities.stable_device_identifier=true` on every recommended
 GPU. The default live guard uses those stable identifiers and leaves the job pending if a real
 NVML device cannot be bound safely.

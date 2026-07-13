@@ -1,4 +1,4 @@
-# GPUbk Agent Protocol
+# GPUBK Agent Protocol
 
 ## JSON CLI
 
@@ -8,6 +8,7 @@ audit-tail response uses `schema_version: "gpubk.audit.v1"`; worker liveness use
 
 ```bash
 bk agent context --compact
+bk info --compact
 bk agent recommend COUNT DURATION [--mode s|x] [--start ISO] [--gpu 0,1] [--mem 12g] [--share SLOTS] --compact
 bk COUNT DURATION [--mem 12g] [--share SLOTS] --op-id ID --json
 bk agent edit RESERVATION --duration 2h [--share SLOTS] --op-id ID --compact
@@ -26,6 +27,9 @@ The ledger binds scheduling and storage policy on first write. Agents must surfa
 
 Recommendation fields:
 
+- Context `administrator` and `bk info` use `gpubk.administrator.v1`. They expose the selected
+  Linux administrator account and sanitized GECOS contact fields so an Agent can direct an
+  operational issue to a human; they are not authentication or authorization data.
 - `available`: whether the requested semantics have a legal slot.
 - `recommendation.gpus`, `start_at`, `end_at`, `queued`, `confidence`.
 - Context GPU entries include model name, temperature, live status, physical VRAM, recent load
@@ -84,7 +88,7 @@ privacy-safe `reservation`, per-GPU `allocation.selected` explanations, allocato
 and `null` when the reservation has no command. Only `worker.running=true` together with
 `lease_held=true` and `instance_match=true` proves that unattended launch is currently available.
 Status is `created`, `updated`, `queued`, or retry-safe `exists`.
-For an exact committed create/edit replay, `allocator.source=idempotent-replay`: GPUbk did not rerun
+For an exact committed create/edit replay, `allocator.source=idempotent-replay`: GPUBK did not rerun
 GPU telemetry, history loading, the external allocator, or private-spec creation. Unless advice was
 already supplied by the in-process caller, `allocation.selected.live_status=unknown` and load
 history is empty. This is committed-write evidence, not current launch-readiness evidence.
@@ -130,7 +134,7 @@ command's submission `PATH`. Exact retries return
 `status=exists`, including confirmation after the original start; reusing that ID with another
 reservation, different fields, different command arguments, or a different working directory
 returns a structured error. The shared ledger stores only the command digest and public summary.
-After an ambiguous interruption, GPUbk recovers and rereads the ledger before deleting only an
+After an ambiguous interruption, GPUBK recovers and rereads the ledger before deleting only an
 unreferenced private spec, so integrations should retry the exact intent with the same operation
 ID. The preflight replay can still confirm a committed command after its old working directory was
 removed; inspect `worker` and job state separately because execution may no longer be possible. New
@@ -154,6 +158,6 @@ Return exactly one JSON object:
 ```
 
 `gpu_order` must be a complete permutation. It is blended into local scores and cannot bypass
-deterministic placement validation. GPUbk rejects ledger-policy mismatch before invoking the
+deterministic placement validation. GPUBK rejects ledger-policy mismatch before invoking the
 allocator. Timeout, malformed output, nonzero exit, and ordinary execution errors use built-in
 fallback ordering; process interrupts terminate the allocator process group before propagating.

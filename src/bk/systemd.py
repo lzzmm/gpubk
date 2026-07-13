@@ -19,13 +19,13 @@ UNITS = {
     "monitor": "bk-monitor.service",
     "worker": "bk-worker.service",
 }
-MANAGED_UNIT_MARKER = "# Managed by GPUbk; remove with `bk service uninstall`.\n"
+MANAGED_UNIT_MARKER = "# Managed by GPUBK; remove with `bk service uninstall`.\n"
 SYSTEM_UNITS = {
     "broker": "gpubk-broker.service",
     "monitor": "gpubk-monitor.service",
 }
 SYSTEM_MANAGED_UNIT_MARKER = (
-    "# Managed by GPUbk; use `bk admin services` for lifecycle changes.\n"
+    "# Managed by GPUBK; use `bk admin services` for lifecycle changes.\n"
 )
 DEFAULT_SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
 

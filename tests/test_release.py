@@ -14,13 +14,37 @@ APACHE_2_NORMALIZED_SHA256 = "c71d239df91726fc519c6eb72d318ec65820627232b2f79621
 
 
 class ReleaseConfigurationTests(unittest.TestCase):
+    def test_user_facing_brand_uses_consistent_capitalization(self):
+        legacy = "GPU" + "bk"
+        files = [
+            ROOT / "README.md",
+            ROOT / "README.zh-CN.md",
+            ROOT / "CHANGELOG.md",
+            ROOT / "RELEASING.md",
+            ROOT / "SECURITY.md",
+            ROOT / "TELEMETRY.md",
+            ROOT / "UPGRADING.md",
+            ROOT / "setup.py",
+        ]
+        files.extend((ROOT / "src").rglob("*.py"))
+        files.extend((ROOT / "src").rglob("*.md"))
+        files.extend((ROOT / "src").rglob("*.service"))
+        files.extend((ROOT / ".github").rglob("*.yml"))
+
+        offenders = [
+            str(path.relative_to(ROOT))
+            for path in files
+            if legacy in path.read_text(encoding="utf-8")
+        ]
+        self.assertEqual(offenders, [])
+
     def test_source_build_guard_rejects_an_ignored_build_isolation(self):
         setup_namespace = runpy.run_path(str(ROOT / "setup.py"))
         require_setuptools = setup_namespace["_require_setuptools"]
 
         require_setuptools("77.0.0")
         require_setuptools("83.0.0")
-        with self.assertRaisesRegex(RuntimeError, "Upgrade pip.*published GPUbk wheel"):
+        with self.assertRaisesRegex(RuntimeError, "Upgrade pip.*published GPUBK wheel"):
             require_setuptools("59.6.0")
         with self.assertRaisesRegex(RuntimeError, "cannot verify"):
             require_setuptools("unknown")
@@ -226,7 +250,7 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("nvmlDeviceGetProcessUtilization", workflow)
         self.assertIn("Verify scheduled-command wheel flow", workflow)
         self.assertIn('"bk/tutorial.py"', workflow)
-        self.assertIn("GPUbk tutorial 1/", workflow)
+        self.assertIn("GPUBK tutorial 1/", workflow)
         self.assertIn("service uninstall worker --target-dir", workflow)
         self.assertIn('"BK_WORKER_LIVE_GUARD": "0"', workflow)
         self.assertIn('stored["job"]["status"] != "succeeded"', workflow)

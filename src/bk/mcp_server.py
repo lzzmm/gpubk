@@ -324,7 +324,7 @@ def create_mcp_server(backend: Optional[BkMcpBackend] = None):
 
     api = backend or BkMcpBackend()
     mcp = FastMCP(
-        "GPUbk",
+        "GPUBK",
         json_response=True,
         instructions=(
             "Inspect context or call recommend before booking. "
@@ -492,7 +492,7 @@ def create_mcp_server(backend: Optional[BkMcpBackend] = None):
 def main(argv: Optional[List[str]] = None, *, prog: str = "bk-mcp") -> int:
     parser = argparse.ArgumentParser(
         prog=prog,
-        description="Run the GPUbk Model Context Protocol server over stdio.",
+        description="Run the GPUBK Model Context Protocol server over stdio.",
     )
     parser.add_argument(
         "--version",

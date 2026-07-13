@@ -101,7 +101,7 @@ class WorkerStatusTests(unittest.TestCase):
         self.assertFalse(status["instance_lease_held"])
         self.assertTrue(status["metadata_valid"])
         self.assertFalse(status["instance_match"])
-        self.assertIn("another GPUbk data directory", status["warning"])
+        self.assertIn("another GPUBK data directory", status["warning"])
 
     def test_matching_instance_lock_is_authoritative_over_stale_valid_metadata(self):
         lease = acquire_job_worker_lease(self.config, self.actor, "worker-1", "host-a")

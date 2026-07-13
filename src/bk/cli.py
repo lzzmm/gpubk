@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from . import __version__
+from .admin_info import administrator_display_lines, administrator_info
 from .advisor import GpuAdvice, build_gpu_advice
 from .config import CONFIG_ENV_MAP, CONFIG_VERSION, Config, load_config
 from .fileio import open_existing_regular
@@ -166,6 +167,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _job_retry_command(argv[1:], store)
         if head in {"status", "st"}:
             return _status_command(argv[1:], config, store)
+        if head in {"info", "contact", "about", "i"}:
+            return _info_command(argv[1:], config)
         if head in {"timeline", "tl"}:
             return _status_command(argv[1:], config, store, timeline_only=True)
         if head in {"slots", "slot", "free", "sl"}:
@@ -241,14 +244,19 @@ def _looks_like_auto_request(argv: List[str]) -> bool:
 
 
 def _interactive_shell(config: Config, store: LedgerStore) -> int:
-    print("GPUbk booking")
+    print("GPUBK booking")
+    administrator = administrator_info(config)
+    administrator_name = administrator.username
+    if administrator.full_name:
+        administrator_name = f"{administrator.full_name} ({administrator.username})"
+    print(f"administrator: {administrator_name}; details: bk info")
     print(f"data: {config.data_dir}")
     print(f"booking slice: {config.slot_minutes} minutes")
     print(f"shared capacity: {config.max_shared_users} slots per GPU (default request: 1 slot)")
     print("Type 'help' for commands. Type 'quit' to exit.")
     if sys.stdin.isatty():
         _maybe_print_first_use_tip(
-            "New to GPUbk? Run 'tutorial' for a safe five-minute tour."
+            "New to GPUBK? Run 'tutorial' for a safe five-minute tour."
         )
     print()
     _print_status(config, store)
@@ -294,6 +302,9 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
         return True
     if head in {"status", "refresh", "r", "st"}:
         _status_command(args[1:], config, store)
+        return True
+    if head in {"info", "contact", "about", "i"}:
+        _info_command(args[1:], config)
         return True
     if head in {"timeline", "tl"}:
         _status_command(args[1:], config, store, timeline_only=True)
@@ -1073,7 +1084,7 @@ def _service_command(argv: List[str], config: Config) -> int:
     show_parser.add_argument("kind", choices=["monitor", "worker"])
     uninstall_parser = subparsers.add_parser(
         "uninstall",
-        help="remove a GPUbk-managed user unit without calling systemctl",
+        help="remove a GPUBK-managed user unit without calling systemctl",
     )
     uninstall_parser.add_argument("kind", choices=["monitor", "worker"])
     uninstall_parser.add_argument("--target-dir", type=Path)
@@ -1167,6 +1178,33 @@ def _print_scheduled_job_worker(
         print(f"warning: {warning}", file=sys.stderr)
 
 
+def _info_command(argv: List[str], config: Config) -> int:
+    parser = argparse.ArgumentParser(
+        prog="bk info",
+        description="Show the GPUBK administrator and Linux account contact details.",
+    )
+    parser.add_argument("--json", action="store_true", help="emit structured JSON")
+    parser.add_argument("--compact", action="store_true", help="emit compact JSON")
+    args = parser.parse_args(argv)
+    info = administrator_info(config)
+    if args.json or args.compact:
+        print(
+            json.dumps(
+                info.as_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=None if args.compact else 2,
+                separators=(",", ":") if args.compact else None,
+            )
+        )
+        return 0
+    print("GPUBK server")
+    for line in administrator_display_lines(info):
+        print(line)
+    print("The administrator can update these fields with `chfn`.")
+    return 0
+
+
 def _config_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     parser = argparse.ArgumentParser(prog="bk config")
     parser.add_argument("--json", action="store_true", help="emit a stable machine-readable report")
@@ -1235,7 +1273,7 @@ def _config_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         return 0 if healthy else 2
 
     effective = report["effective"]
-    print("GPUbk configuration")
+    print("GPUBK configuration")
     print(
         f"source: {config_path} "
         f"({'present' if report['config_file']['present'] else 'defaults/environment'})"
@@ -2753,7 +2791,7 @@ def _get_reservation(store: LedgerStore, reservation_id: str) -> dict:
 def _print_help(file=None) -> None:
     file = file or sys.stdout
     print(
-        """GPUbk - shared GPU booking from the terminal
+        """GPUBK - shared GPU booking from the terminal
 
 START HERE
   bk tutorial                    safe, replayable CLI walkthrough
@@ -2770,6 +2808,7 @@ BOOK
   bk a                            guided booking with input recovery
 
 VIEW
+  bk info                         administrator account and contact
   bk st                           compact live status
   bk tl [window] [--step auto]   fine-grained aligned timeline
   bk slots 2 1h                  read-only earliest alternatives
@@ -2842,6 +2881,7 @@ def _print_shell_help() -> None:
   d <number|short_id>       cancel your reservation
   l | list                  list active reservations
   lg | log [--limit 100]    show your recent operation log
+  i | info                  show administrator account and contact
   cfg | config              inspect effective configuration and ledger policy
   dr | doctor               report policy or deployment issues
   m | monitor               continuously audit GPU process usage

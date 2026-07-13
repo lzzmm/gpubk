@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Sequence
 
+from .admin_info import administrator_info
 from .advisor import GpuAdvice, build_gpu_advice
 from .allocator import AllocatorDecision, apply_external_allocator
 from .config import Config
@@ -491,6 +492,7 @@ def build_agent_context(
         "kind": "context",
         "generated_at": to_iso(generated_at),
         "actor": {"uid": actor.uid, "username": actor.username},
+        "administrator": administrator_info(config).as_dict(),
         "policy": {
             "gpu_count": config.gpu_count,
             "default_mode": MODE_SHARED,
@@ -949,7 +951,7 @@ def scheduled_job_worker_warning(status: Optional[dict]) -> Optional[str]:
     if state == "unverified":
         return (
             "scheduled command worker identity is unverified; restart it with the current "
-            "GPUbk version before relying on automatic launch"
+            "GPUBK version before relying on automatic launch"
         )
     return (
         f"scheduled command worker status is {state}; verify `bk w --status --json` "

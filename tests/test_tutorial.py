@@ -47,7 +47,7 @@ class TutorialTests(unittest.TestCase):
 
             text = output.getvalue()
             self.assertEqual(result, "done")
-            self.assertEqual(text.count("GPUbk tutorial "), len(tutorial_pages(self.config(root))))
+            self.assertEqual(text.count("GPUBK tutorial "), len(tutorial_pages(self.config(root))))
             self.assertIn("bk 1 30m", text)
             self.assertIn("bk tutorial --tui", text)
             self.assertNotIn("\x1b[", text)

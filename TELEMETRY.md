@@ -1,13 +1,13 @@
-# GPUbk Telemetry
+# GPUBK Telemetry
 
-GPUbk keeps collection, storage, and presentation separate:
+GPUBK keeps collection, storage, and presentation separate:
 
 - A collector produces process events and per-user minute records.
 - A `TelemetrySink` validates and stores those records.
 - `UsageQueryService` returns a stable public model.
 - The CLI, TUI, MCP server, and external visualizers consume the query model.
 
-Code outside GPUbk should not parse files under `usage/`. Their short field names,
+Code outside GPUBK should not parse files under `usage/`. Their short field names,
 partitioning, and compression are storage details and may change behind compatible
 readers.
 
@@ -103,7 +103,7 @@ in front of `UsageQueryService`.
 ## Workload Model
 
 Workloads have independent launcher, entrypoint, purpose, framework, execution,
-source, confidence, and safe-label fields. `unknown` is a valid result. GPUbk does
+source, confidence, and safe-label fields. `unknown` is a valid result. GPUBK does
 not pretend that every `main.py` is training.
 
 Raw arguments, environment variables, stdout, secrets, and absolute paths are not
@@ -189,5 +189,5 @@ records remain explicit `unknown` or `unattributed` data rather than guessed dat
 The collector publishes those active gaps through `process_identity_gap`, and a
 strict post-start doctor check rejects the degraded heartbeat.
 If command-line access is restricted but `/proc/<pid>` ownership is visible,
-GPUbk retains the numeric UID with an empty command label instead of discarding
+GPUBK retains the numeric UID with an empty command label instead of discarding
 the known owner. Process command reads are bounded to 4096 bytes.
