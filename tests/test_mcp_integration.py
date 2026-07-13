@@ -140,11 +140,19 @@ class McpProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(created.structuredContent["allocation"]["selected"][0]["gpu"], 0)
             self.assertEqual(retried.structuredContent["status"], "exists")
             self.assertEqual(
+                retried.structuredContent["allocator"]["source"],
+                "idempotent-replay",
+            )
+            self.assertEqual(
                 created.structuredContent["reservation"]["id"],
                 retried.structuredContent["reservation"]["id"],
             )
             self.assertEqual(edited.structuredContent["status"], "updated")
             self.assertEqual(edit_retried.structuredContent["status"], "exists")
+            self.assertEqual(
+                edit_retried.structuredContent["allocator"]["source"],
+                "idempotent-replay",
+            )
             self.assertEqual(cancelled.structuredContent["reservation"]["status"], "cancelled")
             self.assertEqual(cleanup.structuredContent["kind"], "job-spec-cleanup")
             self.assertEqual(log_cleanup.structuredContent["kind"], "job-log-cleanup")

@@ -92,6 +92,12 @@ class JobSpecReference:
 
 
 @dataclass(frozen=True)
+class JobSubmissionIdentity:
+    digest: str
+    summary: str
+
+
+@dataclass(frozen=True)
 class JobSpecCleanupResult:
     removed: int = 0
     retained: int = 0
@@ -115,9 +121,12 @@ def prepare_job_spec(
     command_argv: List[str],
     working_directory: str,
 ) -> JobSpecReference:
-    if actor.uid != os.getuid():
-        raise BookingError("job spec actor must match the current process UID")
-    argv, cwd = _validate_submission_payload(command_argv, working_directory)
+    argv, cwd, identity = _job_submission_components(
+        actor,
+        command_argv,
+        working_directory,
+        require_working_directory=True,
+    )
     spec_id = str(uuid.uuid4())
     payload = {
         "version": 1,
@@ -127,8 +136,7 @@ def prepare_job_spec(
         "cwd": cwd,
         "created_at": to_iso(utc_now()),
     }
-    digest = _job_spec_digest(payload)
-    payload["digest"] = digest
+    payload["digest"] = identity.digest
     path = job_spec_path(config, spec_id)
     spec_dir_fd = _open_job_spec_directory(config, actor, create=True)
     if spec_dir_fd is None:
@@ -172,7 +180,37 @@ def prepare_job_spec(
         raise
     finally:
         os.close(spec_dir_fd)
-    return JobSpecReference(spec_id, digest, _job_command_summary(argv))
+    return JobSpecReference(spec_id, identity.digest, identity.summary)
+
+
+def job_submission_identity(
+    actor: Actor,
+    command_argv: List[str],
+    working_directory: str,
+) -> JobSubmissionIdentity:
+    """Fingerprint a retry intent without requiring its old working directory to remain."""
+    _argv, _cwd, identity = _job_submission_components(
+        actor,
+        command_argv,
+        working_directory,
+        require_working_directory=False,
+    )
+    return identity
+
+
+def validate_job_submission(
+    actor: Actor,
+    command_argv: List[str],
+    working_directory: str,
+) -> JobSubmissionIdentity:
+    """Validate a new command submission without writing its private spec."""
+    _argv, _cwd, identity = _job_submission_components(
+        actor,
+        command_argv,
+        working_directory,
+        require_working_directory=True,
+    )
+    return identity
 
 
 def delete_job_spec(config: Config, spec_id: str) -> bool:
@@ -996,7 +1034,12 @@ def _validated_job_payload(
     return _validate_submission_payload(raw_argv, cwd)
 
 
-def _validate_submission_payload(raw_argv, cwd) -> Tuple[List[str], str]:
+def _validate_submission_payload(
+    raw_argv,
+    cwd,
+    *,
+    require_working_directory: bool = True,
+) -> Tuple[List[str], str]:
     if (
         not isinstance(raw_argv, list)
         or not raw_argv
@@ -1015,9 +1058,34 @@ def _validate_submission_payload(raw_argv, cwd) -> Tuple[List[str], str]:
     if len(cwd.encode("utf-8")) > 4096:
         raise BookingError("invalid job working directory")
     path = Path(cwd)
-    if not path.is_dir():
+    if require_working_directory and not path.is_dir():
         raise BookingError(f"job working directory does not exist: {cwd}")
     return list(raw_argv), cwd
+
+
+def _job_submission_components(
+    actor: Actor,
+    command_argv: List[str],
+    working_directory: str,
+    *,
+    require_working_directory: bool,
+) -> Tuple[List[str], str, JobSubmissionIdentity]:
+    if actor.uid != os.getuid():
+        raise BookingError("job spec actor must match the current process UID")
+    argv, cwd = _validate_submission_payload(
+        command_argv,
+        working_directory,
+        require_working_directory=require_working_directory,
+    )
+    digest = _job_spec_digest(
+        {
+            "version": 1,
+            "uid": actor.uid,
+            "argv": argv,
+            "cwd": cwd,
+        }
+    )
+    return argv, cwd, JobSubmissionIdentity(digest, _job_command_summary(argv))
 
 
 def _read_job_spec(config: Config, actor: Actor, spec_id: str) -> dict:

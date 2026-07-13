@@ -208,6 +208,72 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
     return store.transaction(mutate)
 
 
+def find_applied_create(
+    ledger: dict,
+    config: Config,
+    request: BookingRequest,
+) -> Optional[BookingResult]:
+    """Return an already committed exact create replay without performing a write."""
+    op_id = _normalize_operation_id(request.op_id)
+    if op_id is None:
+        return None
+    validate_ledger_policy(ledger, config)
+    if request.mode not in {MODE_SHARED, MODE_EXCLUSIVE}:
+        raise BookingError(f"unsupported booking mode: {request.mode}")
+    if request.count < 1:
+        raise BookingError("GPU count must be >= 1")
+    if request.duration_seconds <= 0:
+        raise BookingError("duration must be positive")
+    _validate_duration_granularity(request.duration_seconds, config.slot_minutes)
+    job_intent = _normalize_job_intent(request.job_digest, request.job_summary)
+    expected_memory_mb = _normalize_expected_memory(request.expected_memory_mb)
+    share_units = _request_share_units(
+        request.mode,
+        request.share_units,
+        config.max_shared_users,
+    )
+    if request.mode == MODE_SHARED and config.require_shared_memory and expected_memory_mb is None:
+        raise BookingError("shared reservations must declare expected memory with --mem")
+    start = _normalize_start(
+        request.start_at,
+        request.allow_queue,
+        utc_now(),
+        config.slot_minutes,
+    )
+    preferred = _normalize_preferred_gpus(request.preferred_gpus)
+    if preferred is not None:
+        if len(preferred) != request.count:
+            raise BookingError("--gpu count must match requested GPU count")
+        for gpu in preferred:
+            _validate_gpu_index(config, gpu)
+    operation_signature = _create_operation_signature(
+        request,
+        start,
+        preferred,
+        expected_memory_mb,
+        job_intent,
+        share_units,
+    )
+    applied = _find_applied_operation(ledger, request.actor.uid, op_id)
+    if applied is None:
+        return None
+    action, existing, existing_signature = applied
+    if existing_signature is None:
+        return None
+    if (
+        action != "create"
+        or existing_signature != operation_signature
+        or not _same_request_metadata(
+            existing,
+            expected_memory_mb,
+            job_intent,
+            share_units,
+        )
+    ):
+        raise BookingError("operation ID was already used for a different write")
+    return BookingResult(existing, False, "operation already applied")
+
+
 def cancel_booking(store: LedgerStore, reservation_id: str, actor: Actor) -> dict:
     def mutate(ledger: dict):
         now = utc_now()
@@ -433,6 +499,30 @@ def edit_booking(store: LedgerStore, config: Config, request: EditRequest) -> Bo
         return ledger, BookingResult(reservation, True, "queued" if queued else "updated", queued), [log], True
 
     return store.transaction(mutate)
+
+
+def find_applied_edit(
+    ledger: dict,
+    config: Config,
+    request: EditRequest,
+) -> Optional[BookingResult]:
+    """Return an already committed exact edit replay without performing a write."""
+    op_id = _normalize_operation_id(request.op_id)
+    if op_id is None:
+        return None
+    validate_ledger_policy(ledger, config)
+    operation_signature = _edit_operation_signature(request)
+    applied = _find_applied_operation(ledger, request.actor.uid, op_id)
+    if applied is None:
+        return None
+    action, existing, existing_signature = applied
+    if (
+        action != "edit"
+        or existing.get("id") != request.reservation_id
+        or existing_signature != operation_signature
+    ):
+        raise BookingError("operation ID was already used for a different write")
+    return BookingResult(existing, False, "operation already applied")
 
 
 def list_active(ledger: dict, now: Optional[datetime] = None) -> List[dict]:
@@ -1259,6 +1349,20 @@ def _normalize_job_metadata(
         normalized_spec_id = str(uuid.UUID(str(spec_id)))
     except (ValueError, AttributeError) as exc:
         raise BookingError("invalid job spec ID") from exc
+    return {
+        "spec_id": normalized_spec_id,
+        **_normalize_job_intent(digest, summary),
+    }
+
+
+def _normalize_job_intent(
+    digest: Optional[str],
+    summary: Optional[str],
+) -> Optional[dict]:
+    if digest is None and summary is None:
+        return None
+    if digest is None or summary is None:
+        raise BookingError("job digest and summary must be provided together")
     normalized_digest = str(digest).lower()
     if re.fullmatch(r"[0-9a-f]{64}", normalized_digest) is None:
         raise BookingError("invalid job spec digest")
@@ -1268,7 +1372,6 @@ def _normalize_job_metadata(
     if any(ord(char) < 32 for char in normalized_summary):
         raise BookingError("job summary contains control characters")
     return {
-        "spec_id": normalized_spec_id,
         "digest": normalized_digest,
         "summary": normalized_summary,
     }

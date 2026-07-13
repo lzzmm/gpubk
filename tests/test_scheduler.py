@@ -13,6 +13,8 @@ from bk.scheduler import (
     add_booking,
     cancel_booking,
     edit_booking,
+    find_applied_create,
+    find_applied_edit,
     find_available_gpus,
     find_earliest_slot,
 )
@@ -115,6 +117,11 @@ class SchedulerModeTests(unittest.TestCase):
             self.config,
             self.request(1001, MODE_SHARED, op_id="agent-create-1"),
         )
+        replayed = find_applied_create(
+            self.store.load(),
+            self.config,
+            self.request(1001, MODE_SHARED, op_id="agent-create-1"),
+        )
         with self.assertRaisesRegex(BookingError, "different write"):
             add_booking(
                 self.store,
@@ -128,7 +135,9 @@ class SchedulerModeTests(unittest.TestCase):
             )
 
         self.assertFalse(retried.created)
+        self.assertFalse(replayed.created)
         self.assertEqual(retried.reservation["id"], first.reservation["id"])
+        self.assertEqual(replayed.reservation["id"], first.reservation["id"])
         self.assertEqual(len(self.store.load()["reservations"]), 1)
 
     def test_create_operation_retry_remains_idempotent_after_its_start(self):
@@ -209,6 +218,7 @@ class SchedulerModeTests(unittest.TestCase):
 
         first = edit_booking(self.store, self.config, request)
         retried = edit_booking(self.store, self.config, request)
+        replayed = find_applied_edit(self.store.load(), self.config, request)
         with self.assertRaisesRegex(BookingError, "different write"):
             edit_booking(
                 self.store,
@@ -229,7 +239,9 @@ class SchedulerModeTests(unittest.TestCase):
 
         self.assertTrue(first.created)
         self.assertFalse(retried.created)
+        self.assertFalse(replayed.created)
         self.assertEqual(first.reservation["end_at"], retried.reservation["end_at"])
+        self.assertEqual(first.reservation["end_at"], replayed.reservation["end_at"])
         self.assertEqual(len(first.reservation["edit_operations"]), 1)
         self.assertEqual(len(self.store.log_path.read_text(encoding="utf-8").splitlines()), 2)
 

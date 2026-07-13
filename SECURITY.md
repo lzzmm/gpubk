@@ -61,6 +61,10 @@ Supported security boundaries:
 - External allocators can advise ordering but cannot bypass deterministic validation.
 - Ledger policy is validated before allocator invocation. Output is bounded, and timeouts,
   exceptions, or process interrupts terminate the isolated allocator process group.
+- Exact operation-ID replays are matched against the committed request before GPU probes,
+  external allocators, or new private-spec files run. Concurrent first submissions still pass
+  through the locked transaction; a replay reports unknown live state instead of presenting
+  unobserved telemetry as current.
 - Telemetry stores only sanitized workload labels and keyed identities, not raw arguments,
   environments, stdout, or absolute script paths.
 - Closed telemetry partitions carry record counts and SHA-256 checksums. Unknown future

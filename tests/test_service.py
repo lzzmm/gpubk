@@ -1,7 +1,9 @@
 import os
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -13,6 +15,7 @@ from bk.gpu import GpuProcessSnapshot, GpuSnapshot
 from bk.joblogs import acquire_job_worker_lease
 from bk.models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest
 from bk.scheduler import add_booking
+from bk.scheduler import find_applied_create as scheduler_find_applied_create
 from bk.service import (
     AGENT_SCHEMA_VERSION,
     booking_result_payload,
@@ -87,6 +90,7 @@ class AgentServiceTests(unittest.TestCase):
             context["gpu_advice"]["gpus"][1]["capabilities"]["stable_device_identifier"]
         )
         self.assertTrue(context["capabilities"]["idempotent_edit"])
+        self.assertTrue(context["capabilities"]["preflight_idempotent_replay"])
         self.assertEqual(context["capabilities"]["idempotent_edit_history_limit"], 256)
         self.assertTrue(context["capabilities"]["structured_cancel"])
         self.assertTrue(context["capabilities"]["scheduled_job_live_guard"])
@@ -618,7 +622,7 @@ class AgentServiceTests(unittest.TestCase):
         reservation = self.store.load()["reservations"][0]
         self.assertTrue(job_spec_path(config, reservation["job"]["spec_id"]).exists())
 
-    def test_scheduled_job_operation_retry_reuses_booking_and_prunes_unused_spec(self):
+    def test_scheduled_job_operation_retry_has_no_new_external_or_file_side_effects(self):
         actor = Actor(os.getuid(), "current")
         config = Config(
             data_dir=self.data_dir,
@@ -634,17 +638,30 @@ class AgentServiceTests(unittest.TestCase):
             "working_directory": self.tmp.name,
             "allow_queue": False,
             "operation_id": "scheduled-retry-1",
-            "advice": self.advice,
         }
 
-        first = submit_booking(config, self.store, actor, **kwargs)
-        second = submit_booking(config, self.store, actor, **kwargs)
+        first = submit_booking(config, self.store, actor, advice=self.advice, **kwargs)
+        with (
+            mock.patch("bk.service._allocation_decision") as allocator,
+            mock.patch("bk.service.prepare_job_spec") as prepare,
+            mock.patch("bk.service.delete_job_spec") as delete,
+            mock.patch("bk.advisor.snapshot") as live_probe,
+            mock.patch("bk.advisor.UsageAuditStore") as history_store,
+        ):
+            second = submit_booking(config, self.store, actor, **kwargs)
 
         self.assertTrue(first.result.created)
         self.assertFalse(second.result.created)
         self.assertEqual(
             first.result.reservation["id"], second.result.reservation["id"]
         )
+        self.assertEqual(second.allocator.source, "idempotent-replay")
+        self.assertEqual(second.advice.live_states[0].status, "unknown")
+        allocator.assert_not_called()
+        prepare.assert_not_called()
+        delete.assert_not_called()
+        live_probe.assert_not_called()
+        history_store.assert_not_called()
         self.assertEqual(len(list((config.job_log_dir / "specs").glob("*.json"))), 1)
 
     def test_scheduled_job_operation_id_rejects_a_different_private_command(self):
@@ -672,19 +689,25 @@ class AgentServiceTests(unittest.TestCase):
             **common,
         )
 
-        with self.assertRaisesRegex(BookingError, "different write"):
-            submit_booking(
-                config,
-                self.store,
-                actor,
-                command_argv=[sys.executable, "-c", "print('second')"],
-                **common,
-            )
+        with (
+            mock.patch("bk.service._allocation_decision") as allocator,
+            mock.patch("bk.service.prepare_job_spec") as prepare,
+        ):
+            with self.assertRaisesRegex(BookingError, "different write"):
+                submit_booking(
+                    config,
+                    self.store,
+                    actor,
+                    command_argv=[sys.executable, "-c", "print('second')"],
+                    **common,
+                )
 
+        allocator.assert_not_called()
+        prepare.assert_not_called()
         self.assertEqual(len(self.store.load()["reservations"]), 1)
         self.assertEqual(len(list((config.job_log_dir / "specs").glob("*.json"))), 1)
 
-    def test_scheduled_job_retry_reports_deferred_unused_spec_cleanup(self):
+    def test_scheduled_job_retry_does_not_attempt_unused_spec_cleanup(self):
         actor = Actor(os.getuid(), "current")
         config = Config(
             data_dir=self.data_dir,
@@ -704,20 +727,117 @@ class AgentServiceTests(unittest.TestCase):
         }
         submit_booking(config, self.store, actor, **kwargs)
 
-        with mock.patch(
-            "bk.service.delete_job_spec",
-            side_effect=BookingError("unsafe private directory"),
-        ):
+        with mock.patch("bk.service.delete_job_spec") as delete:
             retried = submit_booking(config, self.store, actor, **kwargs)
 
         payload = booking_result_payload(
             "existing", retried, actor, self.store.last_warning
         )
         self.assertFalse(retried.result.created)
-        self.assertIn("cleanup deferred", self.store.last_warning)
-        self.assertTrue(
-            any("cleanup deferred" in warning for warning in payload["warnings"])
+        self.assertEqual(retried.allocator.source, "idempotent-replay")
+        self.assertIsNone(self.store.last_warning)
+        self.assertFalse(any("cleanup" in warning for warning in payload["warnings"]))
+        delete.assert_not_called()
+
+    def test_scheduled_job_retry_survives_a_removed_working_directory(self):
+        actor = Actor(os.getuid(), "current")
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=2,
+            job_log_dir=self.data_dir / "private-jobs",
         )
+        work_dir = self.data_dir / "temporary-work"
+        work_dir.mkdir()
+        kwargs = {
+            "count": 1,
+            "duration_seconds": 30 * 60,
+            "start_at": self.start,
+            "command_argv": [sys.executable, "-c", "print('private')"],
+            "working_directory": str(work_dir),
+            "allow_queue": False,
+            "operation_id": "scheduled-retry-missing-cwd",
+        }
+        first = submit_booking(config, self.store, actor, advice=self.advice, **kwargs)
+        work_dir.rmdir()
+
+        retried = submit_booking(config, self.store, actor, **kwargs)
+
+        self.assertTrue(first.result.created)
+        self.assertFalse(retried.result.created)
+        self.assertEqual(first.result.reservation["id"], retried.result.reservation["id"])
+        self.assertEqual(retried.allocator.source, "idempotent-replay")
+
+    def test_concurrent_scheduled_retries_fall_back_to_atomic_create(self):
+        actor = Actor(os.getuid(), "current")
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=2,
+            job_log_dir=self.data_dir / "private-jobs",
+        )
+        barrier = threading.Barrier(2)
+
+        def synchronized_find(ledger, runtime_config, request):
+            result = scheduler_find_applied_create(ledger, runtime_config, request)
+            if result is None:
+                barrier.wait(timeout=2)
+            return result
+
+        def submit():
+            return submit_booking(
+                config,
+                self.store,
+                actor,
+                count=1,
+                duration_seconds=30 * 60,
+                start_at=self.start,
+                command_argv=[sys.executable, "-c", "print('private')"],
+                working_directory=self.tmp.name,
+                allow_queue=False,
+                operation_id="concurrent-scheduled-retry",
+                advice=self.advice,
+            )
+
+        with mock.patch("bk.service.find_applied_create", side_effect=synchronized_find):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                submissions = list(pool.map(lambda _index: submit(), range(2)))
+
+        self.assertEqual(sum(item.result.created for item in submissions), 1)
+        self.assertEqual(len(self.store.load()["reservations"]), 1)
+        self.assertEqual(len(list((config.job_log_dir / "specs").glob("*.json"))), 1)
+
+    def test_new_scheduled_job_rejects_missing_cwd_before_allocation(self):
+        actor = Actor(os.getuid(), "current")
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=2,
+            job_log_dir=self.data_dir / "private-jobs",
+        )
+        missing = self.data_dir / "missing-work"
+
+        with (
+            mock.patch("bk.service._allocation_decision") as allocator,
+            mock.patch("bk.service.prepare_job_spec") as prepare,
+        ):
+            with self.assertRaisesRegex(BookingError, "working directory does not exist"):
+                submit_booking(
+                    config,
+                    self.store,
+                    actor,
+                    count=1,
+                    duration_seconds=30 * 60,
+                    start_at=self.start,
+                    command_argv=[sys.executable, "-c", "print('private')"],
+                    working_directory=str(missing),
+                    allow_queue=False,
+                    operation_id="missing-cwd-new-command",
+                    advice=self.advice,
+                )
+
+        allocator.assert_not_called()
+        prepare.assert_not_called()
 
     def test_scheduled_job_submission_rejects_worker_readiness_from_another_instance(
         self,
@@ -909,20 +1029,26 @@ class AgentServiceTests(unittest.TestCase):
             operation_id="service-edit-1",
             advice=self.advice,
         )
-        retried = submit_edit(
-            self.config,
-            self.store,
-            self.actor,
-            created.reservation["id"],
-            duration_seconds=45 * 60,
-            operation_id="service-edit-1",
-            advice=self.advice,
-        )
+        with (
+            mock.patch("bk.service._allocation_decision") as allocator,
+            mock.patch("bk.advisor.snapshot") as live_probe,
+        ):
+            retried = submit_edit(
+                self.config,
+                self.store,
+                self.actor,
+                created.reservation["id"],
+                duration_seconds=45 * 60,
+                operation_id="service-edit-1",
+            )
 
         self.assertTrue(first.result.created)
         self.assertFalse(retried.result.created)
         self.assertEqual(first.result.reservation["end_at"], "2030-01-01T12:45:00Z")
         self.assertEqual(first.allocator.source, "fixed-gpu")
+        self.assertEqual(retried.allocator.source, "idempotent-replay")
+        allocator.assert_not_called()
+        live_probe.assert_not_called()
         self.assertEqual(len(self.store.load()["reservations"]), 1)
 
     def test_structured_edit_rejects_explicit_zero_before_allocation(self):

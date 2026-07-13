@@ -82,6 +82,10 @@ privacy-safe `reservation`, per-GPU `allocation.selected` explanations, allocato
 and `null` when the reservation has no command. Only `worker.running=true` together with
 `lease_held=true` and `instance_match=true` proves that unattended launch is currently available.
 Status is `created`, `updated`, `queued`, or retry-safe `exists`.
+For an exact committed create/edit replay, `allocator.source=idempotent-replay`: GPUbk did not rerun
+GPU telemetry, history loading, the external allocator, or private-spec creation. Unless advice was
+already supplied by the in-process caller, `allocation.selected.live_status=unknown` and load
+history is empty. This is committed-write evidence, not current launch-readiness evidence.
 
 Cancellation returns `kind=cancellation_result`, the cancelled reservation, and
 `private_job_cleanup`. A non-null cleanup warning means cancellation committed but the owning UID
@@ -125,9 +129,11 @@ reservation, different fields, different command arguments, or a different worki
 returns a structured error. The shared ledger stores only the command digest and public summary.
 After an ambiguous interruption, GPUbk recovers and rereads the ledger before deleting only an
 unreferenced private spec, so integrations should retry the exact intent with the same operation
-ID. New exact starts before the active booking slice, started reservation edits, and explicit edit
-starts in the past are rejected. A valid edit start remains exact unless `allow_queue=true` is
-explicitly supplied to resolve a resource conflict.
+ID. The preflight replay can still confirm a committed command after its old working directory was
+removed; inspect `worker` and job state separately because execution may no longer be possible. New
+exact starts before the active booking slice, started reservation edits, and explicit edit starts
+in the past are rejected. A valid edit start remains exact unless `allow_queue=true` is explicitly
+supplied to resolve a resource conflict.
 Each retained reservation keeps at most 256 idempotent edit intents so malformed automation cannot grow one hot record without bound. Recreate an unusually long-lived reservation before exceeding that limit.
 
 ## External Allocator

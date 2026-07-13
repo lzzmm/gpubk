@@ -375,6 +375,11 @@ bk agent cancel 6e957ef1 --compact
 
 create 和 edit 必须使用稳定的 operation ID。完全相同的重试返回 `status=exists`；
 同一个 ID 被用于不同写入时会拒绝执行。recommend 只读，身份始终来自本地进程 UID。
+对于已经提交的完全相同重试，GPUbk 会在实时 GPU 探测、外部 allocator 和私有命令
+spec 写入之前直接确认。JSON 中会显示 `allocator.source=idempotent-replay`；调用方没有
+预先提供 advice 时，重放专用的实时字段明确为 `unknown`，不会伪装成最新数据。它只证明
+预约已经提交，不证明旧工作目录或 worker 此刻仍可执行。Agent context 通过
+`capabilities.preflight_idempotent_replay` 暴露这项能力。
 
 启动可选的 stdio MCP 服务：
 

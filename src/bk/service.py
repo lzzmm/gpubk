@@ -24,6 +24,8 @@ from .scheduler import (
     add_booking,
     cancel_booking,
     edit_booking,
+    find_applied_create,
+    find_applied_edit,
     find_earliest_slot,
     list_active,
     reservation_pressure_scores,
@@ -40,7 +42,9 @@ from .worker import (
     JobSpecCleanupResult,
     cleanup_job_specs,
     delete_job_spec,
+    job_submission_identity,
     prepare_job_spec,
+    validate_job_submission,
 )
 from .worker_status import inspect_worker_status
 
@@ -97,7 +101,49 @@ def submit_booking(
         allow_queue,
         share_units,
     )
-    validate_ledger_policy(store.load(), config)
+    if command_argv is not None and working_directory is None:
+        working_directory = os.getcwd()
+    job_identity = (
+        job_submission_identity(
+            actor,
+            command_argv,
+            str(working_directory),
+        )
+        if operation_id is not None and command_argv is not None
+        else None
+    )
+    ledger = store.load()
+    validate_ledger_policy(ledger, config)
+    replay = find_applied_create(
+        ledger,
+        config,
+        BookingRequest(
+            actor=actor,
+            count=count,
+            duration_seconds=duration_seconds,
+            start_at=effective_start,
+            mode=mode,
+            preferred_gpus=list(preferred_gpus)
+            if preferred_gpus is not None
+            else None,
+            op_id=operation_id,
+            allow_queue=allow_queue,
+            job_digest=job_identity.digest if job_identity else None,
+            job_summary=job_identity.summary if job_identity else None,
+            expected_memory_mb=expected_memory_mb,
+            share_units=effective_share_units if mode == MODE_SHARED else None,
+        ),
+    )
+    if replay is not None:
+        return _replayed_submission(
+            config,
+            actor,
+            replay,
+            advice,
+            generated_at,
+        )
+    if command_argv is not None:
+        validate_job_submission(actor, command_argv, str(working_directory))
     gpu_advice = advice or build_gpu_advice(config)
     allocator = _allocation_decision(
         config,
@@ -112,8 +158,6 @@ def submit_booking(
         expected_memory_mb,
         effective_share_units,
     )
-    if command_argv is not None and working_directory is None:
-        working_directory = os.getcwd()
     job_spec = (
         prepare_job_spec(config, actor, command_argv, str(working_directory))
         if command_argv is not None
@@ -186,8 +230,33 @@ def submit_edit(
     operation_id: Optional[str] = None,
     advice: Optional[GpuAdvice] = None,
 ) -> BookingSubmission:
+    generated_at = utc_now()
     ledger = store.load()
     validate_ledger_policy(ledger, config)
+    replay_request = EditRequest(
+        actor=actor,
+        reservation_id=reservation_id,
+        op_id=operation_id,
+        start_at=start_at,
+        duration_seconds=duration_seconds,
+        mode=mode,
+        preferred_gpus=list(preferred_gpus) if preferred_gpus is not None else None,
+        count=count,
+        allow_queue=allow_queue,
+        expected_memory_mb=expected_memory_mb,
+        update_expected_memory=update_expected_memory,
+        share_units=share_units,
+        update_share_units=update_share_units,
+    )
+    replay = find_applied_edit(ledger, config, replay_request)
+    if replay is not None:
+        return _replayed_submission(
+            config,
+            actor,
+            replay,
+            advice,
+            generated_at,
+        )
     reservation = next(
         (
             item
@@ -453,6 +522,7 @@ def build_agent_context(
             "read_only_recommendation": True,
             "idempotent_booking": True,
             "idempotent_edit": True,
+            "preflight_idempotent_replay": True,
             "weighted_shared_capacity": True,
             "configurable_booking_granularity": True,
             "idempotent_edit_history_limit": MAX_EDIT_OPERATIONS_PER_RESERVATION,
@@ -689,6 +759,37 @@ def _allocation_decision(
         mode=mode,
         expected_memory_mb=expected_memory_mb,
         share_units=share_units,
+    )
+
+
+def _replayed_submission(
+    config: Config,
+    actor: Actor,
+    result: BookingResult,
+    advice: Optional[GpuAdvice],
+    generated_at: datetime,
+) -> BookingSubmission:
+    replay_advice = advice or build_gpu_advice(
+        config,
+        snapshots=(),
+        history={},
+        at=generated_at,
+    )
+    selected = [int(gpu) for gpu in result.reservation.get("gpus", [])]
+    selected_set = set(selected)
+    order = [*selected, *(gpu for gpu in range(config.gpu_count) if gpu not in selected_set)]
+    allocator = AllocatorDecision(
+        order,
+        dict(replay_advice.scores),
+        "idempotent-replay",
+        reason="committed allocation reused without rerunning allocation",
+    )
+    return BookingSubmission(
+        result,
+        replay_advice,
+        allocator,
+        config.max_shared_users,
+        _scheduled_job_worker_status(config, actor, result.reservation),
     )
 
 

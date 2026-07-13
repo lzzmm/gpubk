@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Resolve exact create and edit operation-ID replays before GPU probing, external allocation, or
+  private-spec writes. Replay responses preserve the committed allocation with explicit
+  `idempotent-replay` provenance, while concurrent first submissions still converge through the
+  locked scheduler transaction and new commands validate their working directory before allocation.
 - Pin private scheduled-command spec creation, reads, and deletion to validated UID-owned
   directory descriptors; remove partial files on process interrupts, reject linked aliases, and
   recheck the recovered ledger before rollback so an ambiguous interruption cannot delete a

@@ -440,6 +440,12 @@ bk agent cancel 6e957ef1 --compact
 
 Create and edit operations require a stable operation ID. An identical retry
 returns `status=exists`; reusing the ID for a different write is rejected.
+GPUbk resolves a committed exact retry before live GPU probing, external
+allocation, or private command-spec writes. JSON reports
+`allocator.source=idempotent-replay`; when the caller did not already supply
+advice, replay-only live fields are `unknown` rather than stale. This confirms
+the committed reservation, not that an old working directory or worker remains
+launchable. Agent context advertises `capabilities.preflight_idempotent_replay`.
 Recommendations are read-only. Identity always comes from the local process UID.
 
 Run the optional stdio MCP server with:

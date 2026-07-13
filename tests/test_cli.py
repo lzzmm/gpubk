@@ -2418,6 +2418,8 @@ class CliTests(unittest.TestCase):
             ledger = json.loads((data_dir / "ledger.json").read_text(encoding="utf-8"))
             self.assertEqual(len(ledger["reservations"]), 1)
             self.assertIn("exists:", second.stdout)
+            self.assertIn("committed operation replayed", second.stdout)
+            self.assertNotIn("memory telemetry unavailable", second.stdout)
             self.assertIn("different write", json.loads(mismatch.stdout)["error"]["message"])
 
     def test_agent_context_and_recommendation_are_valid_json(self):
@@ -2493,12 +2495,17 @@ class CliTests(unittest.TestCase):
             retry_after_cancel_payload = json.loads(retry_after_cancel.stdout)
             self.assertEqual(edited_payload["status"], "updated")
             self.assertEqual(retried_payload["status"], "exists")
+            self.assertEqual(retried_payload["allocator"]["source"], "idempotent-replay")
             self.assertIn("operation ID is required", missing_operation_payload["error"]["message"])
             self.assertEqual(edited_payload["reservation"]["expected_memory_mb_per_gpu"], 8192)
             self.assertIn("different write", mismatch_payload["error"]["message"])
             self.assertEqual(cancelled_payload["kind"], "cancellation_result")
             self.assertEqual(cancelled_payload["reservation"]["status"], "cancelled")
             self.assertEqual(retry_after_cancel_payload["status"], "exists")
+            self.assertEqual(
+                retry_after_cancel_payload["allocator"]["source"],
+                "idempotent-replay",
+            )
             self.assertEqual(retry_after_cancel_payload["reservation"]["status"], "cancelled")
 
     def test_booking_and_list_json_outputs_need_no_text_scraping(self):

@@ -448,14 +448,17 @@ def _book_command(
                 f"{share_text(share_units or 1, config.max_shared_users)} per GPU; "
                 "this is admission weight, not enforced compute bandwidth"
             )
-        _print_booking_advice(
-            config,
-            store,
-            reservation,
-            advice,
-            expected_memory_mb,
-            verbose=args.verbose,
-        )
+        if allocator.source == "idempotent-replay":
+            print("note: committed operation replayed; live GPU state and allocator were not rerun")
+        else:
+            _print_booking_advice(
+                config,
+                store,
+                reservation,
+                advice,
+                expected_memory_mb,
+                verbose=args.verbose,
+            )
     if not args.quiet:
         if allocator.source == "external":
             print(f"allocator: external{f' ({allocator.reason})' if allocator.reason else ''}")

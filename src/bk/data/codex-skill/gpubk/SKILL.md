@@ -52,6 +52,9 @@ Use shared mode for workloads that can coexist within both capacity-unit and VRA
 - Do not retry a write with a new operation ID after an ambiguous response; inspect reservations first.
 - After an interrupted scheduled-command submission, retry with the same operation ID and exact
   command. GPUbk retains a committed referenced spec and prunes only a verified unreferenced one.
+- When an exact retry returns `allocator.source=idempotent-replay`, treat it as committed-write
+  confirmation. GPUbk skipped new live probes, external allocation, and private-spec creation;
+  `unknown` live fields are intentional and do not prove that the command can launch now.
 - Do not cancel or edit another user's reservation.
 - Do not expose secrets in command arguments. GPUbk stores commands privately, but process environments or user scripts are preferable for credentials.
 
@@ -71,7 +74,8 @@ NVML device cannot be bound safely.
 - `created`: reservation starts at the returned time.
 - `updated`: the approved edit was applied.
 - `queued`: reservation was moved to the earliest legal future slot because start was implicit.
-- `exists`: the operation ID was already applied; treat this as idempotent success.
+- `exists`: the operation ID was already applied; treat this as idempotent success. Check worker
+  state separately before promising that a scheduled command remains launchable.
 - JSON exit `2`: invalid request or write conflict. Inspect `error.message`.
 - Recommendation exit `3`: no legal exact slot; present `nearest_available` without booking it.
 - Daemon exit `78`: trusted configuration does not match the ledger. Stop retrying and surface an

@@ -77,6 +77,8 @@ class McpBackendTests(unittest.TestCase):
 
         self.assertEqual(first["status"], "created")
         self.assertEqual(second["status"], "exists")
+        self.assertEqual(second["allocator"]["source"], "idempotent-replay")
+        self.assertEqual(second["allocation"]["selected"][0]["live_status"], "unknown")
         self.assertEqual(first["allocation"]["selected"][0]["gpu"], 0)
         self.assertEqual(first["reservation"]["id"], second["reservation"]["id"])
         self.assertEqual(len(self.store.load()["reservations"]), 1)
