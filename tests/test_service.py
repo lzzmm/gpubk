@@ -760,6 +760,43 @@ class AgentServiceTests(unittest.TestCase):
                         )
                 allocator.assert_not_called()
 
+    def test_structured_edit_rejects_policy_mismatch_before_allocation(self):
+        created = add_booking(
+            self.store,
+            self.config,
+            BookingRequest(
+                actor=self.actor,
+                count=1,
+                duration_seconds=30 * 60,
+                start_at=self.start,
+                mode=MODE_SHARED,
+            ),
+        )
+        mismatch = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=3,
+            allocator_command=(sys.executable, "-c", "raise SystemExit('must not run')"),
+        )
+        before = self.store.ledger_path.read_bytes()
+
+        with mock.patch("bk.service._allocation_decision") as allocator:
+            with self.assertRaisesRegex(
+                BookingError, "max_shared_reservations_per_gpu"
+            ):
+                submit_edit(
+                    mismatch,
+                    self.store,
+                    self.actor,
+                    created.reservation["id"],
+                    count=1,
+                    duration_seconds=45 * 60,
+                    advice=self.advice,
+                )
+
+        allocator.assert_not_called()
+        self.assertEqual(self.store.ledger_path.read_bytes(), before)
+
 
 if __name__ == "__main__":
     unittest.main()

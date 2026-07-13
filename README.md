@@ -450,7 +450,11 @@ destructive, and closed-world annotations.
 An administrator may also set `BK_ALLOCATOR_COMMAND` to a trusted local program
 that reads `bk.allocator.v1` JSON and returns a GPU ordering. Its output is
 advisory: every result still passes the built-in conflict, VRAM, time, UID, and
-transaction checks. See the [Agent protocol](https://github.com/lzzmm/gpubk/blob/main/src/bk/data/codex-skill/gpubk/references/protocol.md).
+transaction checks. GPUbk validates the ledger-bound policy before invoking the
+allocator for create, recommend, or edit operations. Timeout, invalid output,
+and ordinary allocator failures fall back to built-in ordering; an interrupt
+terminates the allocator process group before propagating. See the
+[Agent protocol](https://github.com/lzzmm/gpubk/blob/main/src/bk/data/codex-skill/gpubk/references/protocol.md).
 
 ## Shared Server Setup
 

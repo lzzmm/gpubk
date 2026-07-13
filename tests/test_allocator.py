@@ -212,6 +212,24 @@ class ExternalAllocatorTests(unittest.TestCase):
         self.assertIn("timed out", decision.warning)
         self.assertFalse(marker.exists())
 
+    def test_keyboard_interrupt_kills_allocator_process_group(self):
+        marker = self.data_dir / "interrupt-escaped-child"
+        command = (
+            sys.executable,
+            "-c",
+            f"import time; time.sleep(.25); open({str(marker)!r}, 'w').write('bad')",
+        )
+
+        with mock.patch(
+            "bk.allocator.selectors.DefaultSelector.select",
+            side_effect=KeyboardInterrupt,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                _run_allocator_process(command, "{}", 2.0)
+        time.sleep(0.4)
+
+        self.assertFalse(marker.exists())
+
     def test_successful_allocator_cleans_up_background_descendants(self):
         marker = self.data_dir / "background-child"
         child = f"import time; time.sleep(.4); open({str(marker)!r}, 'w').write('bad')"

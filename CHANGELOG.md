@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Validate ledger policy before edit-time allocator invocation, and terminate the allocator's
+  isolated process group on interrupts as well as ordinary errors and timeouts so rejected edits
+  and Ctrl+C cannot leave external side effects running.
 - Fail worker and monitor startup closed when their trusted configuration disagrees with the
   ledger, revalidate every daemon cycle and each worker transaction, discard buffered telemetry
   on runtime policy drift, and reserve non-restarting exit status `78` for operator repair.

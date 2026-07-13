@@ -385,7 +385,9 @@ schema 标明 read-only、idempotent、destructive 和 closed-world 属性。
 
 管理员还可以通过 `BK_ALLOCATOR_COMMAND` 配置受信任的本地程序。它读取
 `bk.allocator.v1` JSON，并返回 GPU 排序。外部结果只提供建议，最终仍须通过内置的
-冲突、显存、时间、UID 和事务校验。完整格式见
+冲突、显存、时间、UID 和事务校验。create、recommend、edit 都会先核对台账绑定策略，
+再调用 allocator；超时、输出无效或普通错误会回退到内置排序，收到中断时则先终止
+allocator 进程组再继续抛出中断。完整格式见
 [Agent 协议](src/bk/data/codex-skill/gpubk/references/protocol.md)。
 
 ## 多人服务器配置

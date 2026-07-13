@@ -110,7 +110,9 @@ evidence of unattended command execution.
 
 ## Respect Safety Boundaries
 
-- External AI allocator output is advisory ordering only. Local time, capacity, VRAM, identity, and transaction checks remain authoritative.
+- External AI allocator output is advisory ordering only. Local time, capacity, VRAM, identity,
+  ledger-policy, and transaction checks remain authoritative and run before edit-time allocator
+  invocation where applicable.
 - Treat live utilization as a soft forecast because running processes have no reliable end time.
 - Check `policy.monitoring.collector.fresh` before treating recent telemetry as current. A
   degraded, stale, stopped, topology-mismatched, missing, or invalid collector is never proof

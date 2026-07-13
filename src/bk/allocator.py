@@ -154,7 +154,7 @@ def _run_allocator_process(argv: List[str], payload: str, timeout_seconds: float
         returncode = process.wait(timeout=remaining)
         _kill_allocator_process_group(process)
         return returncode, stdout.decode("utf-8"), stderr.decode("utf-8", errors="replace")
-    except Exception:
+    except BaseException:
         _kill_allocator_process_group(process)
         raise
     finally:

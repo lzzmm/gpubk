@@ -171,6 +171,7 @@ def submit_edit(
     advice: Optional[GpuAdvice] = None,
 ) -> BookingSubmission:
     ledger = store.load()
+    validate_ledger_policy(ledger, config)
     reservation = next(
         (item for item in ledger.get("reservations", []) if item.get("id") == reservation_id),
         None,

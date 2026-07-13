@@ -59,7 +59,8 @@ Supported security boundaries:
   not enforce proportional SM time, memory isolation, or performance without MIG/MPS or
   another administrator-controlled GPU partitioning mechanism.
 - External allocators can advise ordering but cannot bypass deterministic validation.
-- External allocator output is bounded and allocator timeouts terminate the isolated process group.
+- Ledger policy is validated before allocator invocation. Output is bounded, and timeouts,
+  exceptions, or process interrupts terminate the isolated allocator process group.
 - Telemetry stores only sanitized workload labels and keyed identities, not raw arguments,
   environments, stdout, or absolute script paths.
 - Closed telemetry partitions carry record counts and SHA-256 checksums. Unknown future

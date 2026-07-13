@@ -136,4 +136,7 @@ Return exactly one JSON object:
 }
 ```
 
-`gpu_order` must be a complete permutation. It is blended into local scores and cannot bypass deterministic placement validation.
+`gpu_order` must be a complete permutation. It is blended into local scores and cannot bypass
+deterministic placement validation. GPUbk rejects ledger-policy mismatch before invoking the
+allocator. Timeout, malformed output, nonzero exit, and ordinary execution errors use built-in
+fallback ordering; process interrupts terminate the allocator process group before propagating.
