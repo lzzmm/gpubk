@@ -18,9 +18,9 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade 'pip>=26.1.2'
       - run: python -m pip install -e '.[mcp]' bandit coverage ruff pip-audit
-      - run: python -m compileall -q src tests benchmarks
-      - run: ruff check src tests benchmarks
-      - run: bandit -q -r src/bk --severity-level medium
+      - run: python -m compileall -q src tests benchmarks tools
+      - run: ruff check src tests benchmarks tools
+      - run: bandit -q -r src/bk tools --severity-level medium
       - name: Verify real root-owned admin lifecycle
         run: sudo env PYTHONPATH="$PWD/src" "$(command -v python)" -m unittest tests.test_admin.AdminRootLifecycleTests
       - run: PYTHONPATH=src python benchmarks/scheduler_queue.py --days 1

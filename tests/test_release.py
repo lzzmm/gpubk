@@ -72,6 +72,13 @@ class ReleaseConfigurationTests(unittest.TestCase):
             self.assertNotIn(old_distribution, text, str(path.relative_to(ROOT)))
             self.assertNotIn(old_skill, text, str(path.relative_to(ROOT)))
 
+    def test_source_distribution_keeps_release_tests_self_contained(self):
+        manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+
+        self.assertIn("recursive-include tests test_*.py", manifest)
+        self.assertIn("recursive-include tools *.py", manifest)
+        self.assertIn("recursive-include .github/workflows *.yml", manifest)
+
     def test_version_entrypoint_does_not_import_the_full_cli(self):
         code = (
             "import sys\n"
@@ -262,7 +269,8 @@ class ReleaseConfigurationTests(unittest.TestCase):
     def test_ci_runs_security_and_package_structure_checks(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
-        self.assertIn("bandit -q -r src/bk --severity-level medium", workflow)
+        self.assertIn("bandit -q -r src/bk tools --severity-level medium", workflow)
+        self.assertIn("ruff check src tests benchmarks tools", workflow)
         self.assertIn("AdminRootLifecycleTests", workflow)
         self.assertIn("validate-pyproject pyproject.toml", workflow)
         self.assertIn("check-wheel-contents dist/*.whl", workflow)
@@ -304,6 +312,11 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn('LAST_PUBLIC_VERSION: "0.1.0"', workflow)
         self.assertIn('old[0]["share_units_per_gpu"] != 1', workflow)
         self.assertIn('new["share_units_per_gpu"] != 2', workflow)
+        self.assertIn("Record distribution hashes", workflow)
+        self.assertEqual(workflow.count("Verify uploaded artifact hashes"), 2)
+        self.assertEqual(workflow.count("tools/verify_index_artifacts.py"), 3)
+        self.assertIn("--index testpypi", workflow)
+        self.assertIn("--index pypi", workflow)
         self.assertNotIn("merge-base --is-ancestor", workflow)
         self.assertIn("already exists on TestPyPI", workflow)
         self.assertIn("already exists on PyPI", workflow)
@@ -330,7 +343,8 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("Enable GitHub release immutability", guide)
         self.assertIn("create a draft GitHub Release", guide)
         self.assertIn("attach the wheel and sdist, then publish the draft", guide)
-        self.assertIn("verify its hashes against PyPI", guide)
+        self.assertIn("automatic digest comparison", guide)
+        self.assertIn("confirm its recorded hashes", guide)
         self.assertIn("prerelease-only TestPyPI path", guide)
         self.assertNotIn("git tag -a v0.1.0", guide)
 

@@ -30,9 +30,9 @@ jobs:
       - run: >-
           python -m pip install -e '.[mcp]'
           bandit build check-wheel-contents packaging pip-audit ruff twine validate-pyproject
-      - run: python -m compileall -q src tests benchmarks
-      - run: ruff check src tests benchmarks
-      - run: bandit -q -r src/bk --severity-level medium
+      - run: python -m compileall -q src tests benchmarks tools
+      - run: ruff check src tests benchmarks tools
+      - run: bandit -q -r src/bk tools --severity-level medium
       - run: PYTHONPATH=src python benchmarks/scheduler_queue.py --days 1
       - run: PYTHONPATH=src python benchmarks/usage_store.py --days 1
       - run: python -m unittest discover -s tests -p 'test_*.py'
@@ -84,6 +84,9 @@ jobs:
       - run: python -m build
       - run: python -m twine check dist/*
       - run: check-wheel-contents dist/*.whl
+      - name: Record distribution hashes
+        shell: bash
+        run: (cd dist && sha256sum * > ../SHA256SUMS)
       - name: Smoke-test built wheel
         shell: bash
         run: |
@@ -139,7 +142,10 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: python-package-distributions
-          path: dist/
+          path: |
+            dist/
+            SHA256SUMS
+            tools/verify_index_artifacts.py
           if-no-files-found: error
           retention-days: 7
 
@@ -191,6 +197,16 @@ jobs:
     needs: [build, publish-testpypi]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-package-distributions
+      - name: Verify uploaded artifact hashes
+        run: >-
+          python tools/verify_index_artifacts.py
+          --index testpypi
+          --project gpubk
+          --version '${{ needs.build.outputs.version }}'
+          --checksums SHA256SUMS
       - name: Install the uploaded package
         shell: bash
         run: |
@@ -260,6 +276,16 @@ jobs:
     needs: [build, publish-pypi]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-package-distributions
+      - name: Verify uploaded artifact hashes
+        run: >-
+          python tools/verify_index_artifacts.py
+          --index pypi
+          --project gpubk
+          --version '${{ needs.build.outputs.version }}'
+          --checksums SHA256SUMS
       - name: Install the uploaded package
         shell: bash
         run: |

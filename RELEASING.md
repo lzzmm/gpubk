@@ -35,8 +35,8 @@ replacing an uploaded file.
 
    ```bash
    python -m pip install --upgrade pip
-   python -m compileall -q src tests benchmarks
-   ruff check src tests benchmarks
+   python -m compileall -q src tests benchmarks tools
+   ruff check src tests benchmarks tools
    PYTHONPATH=src python benchmarks/scheduler_queue.py
    PYTHONPATH=src python benchmarks/usage_store.py
    coverage run -m unittest discover -s tests -p 'test_*.py'
@@ -90,8 +90,15 @@ replacing an uploaded file.
    `origin/main` tip; an older commit that merely exists in main history is
    rejected.
 
-10. The `Release` workflow rebuilds and tests the tag, uploads that artifact to TestPyPI, and installs it back from TestPyPI. Only then does the protected `pypi` environment request approval to promote the exact same wheel and sdist.
-11. Approve `pypi` and wait for the PyPI installation smoke test. Download the exact workflow artifact, verify its hashes against PyPI, create a draft GitHub Release for the same tag, attach the wheel and sdist, then publish the draft. Never rebuild an artifact locally for promotion. Release immutability locks the published tag and assets and creates a release attestation.
+10. The `Release` workflow rebuilds and tests the tag, records the wheel and sdist SHA-256
+    digests, uploads those artifacts to TestPyPI, verifies both indexed files against the recorded
+    digests, and installs the wheel back from TestPyPI. Only then does the protected `pypi`
+    environment request approval to promote the exact same wheel and sdist.
+11. Approve `pypi` and wait for its automatic digest comparison and installation smoke test.
+    Download the exact workflow artifact, confirm its recorded hashes, create a draft GitHub Release
+    for the same tag, attach the wheel and sdist, then publish the draft. Never rebuild an artifact
+    locally for promotion. Release immutability locks the published tag and assets and creates a
+    release attestation.
 
 The workflow rejects a tag that is lightweight, points anywhere other than the
 current `main` tip, is a prerelease, does not match the package, or still has an
