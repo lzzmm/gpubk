@@ -768,7 +768,7 @@ def _receive_exact(connection: socket.socket, length: int) -> bytes:
 
 
 def _booking_request_payload(request: BookingRequest) -> dict:
-    return {
+    payload = {
         "count": request.count,
         "duration_seconds": request.duration_seconds,
         "start_at": to_iso(request.start_at),
@@ -783,10 +783,13 @@ def _booking_request_payload(request: BookingRequest) -> dict:
         "expected_memory_mb": request.expected_memory_mb,
         "share_units": request.share_units,
     }
+    if request.excluded_gpus is not None:
+        payload["excluded_gpus"] = request.excluded_gpus
+    return payload
 
 
 def _edit_request_payload(request: EditRequest) -> dict:
-    return {
+    payload = {
         "reservation_id": request.reservation_id,
         "op_id": request.op_id,
         "start_at": to_iso(request.start_at) if request.start_at is not None else None,
@@ -800,6 +803,9 @@ def _edit_request_payload(request: EditRequest) -> dict:
         "share_units": request.share_units,
         "update_share_units": request.update_share_units,
     }
+    if request.excluded_gpus is not None:
+        payload["excluded_gpus"] = request.excluded_gpus
+    return payload
 
 
 def _decode_booking_request(payload: dict, actor: Actor) -> BookingRequest:
@@ -809,6 +815,7 @@ def _decode_booking_request(payload: dict, actor: Actor) -> BookingRequest:
         "start_at",
         "mode",
         "preferred_gpus",
+        "excluded_gpus",
         "op_id",
         "allow_queue",
         "job_spec_id",
@@ -832,6 +839,9 @@ def _decode_booking_request(payload: dict, actor: Actor) -> BookingRequest:
         mode=_string(payload.get("mode"), "mode"),
         preferred_gpus=_optional_int_list(
             payload.get("preferred_gpus"), "preferred_gpus"
+        ),
+        excluded_gpus=_optional_int_list(
+            payload.get("excluded_gpus"), "excluded_gpus"
         ),
         op_id=_optional_string(payload.get("op_id"), "op_id"),
         allow_queue=_boolean(payload.get("allow_queue", False), "allow_queue"),
@@ -858,6 +868,7 @@ def _decode_edit_request(payload: dict, actor: Actor) -> EditRequest:
         "duration_seconds",
         "mode",
         "preferred_gpus",
+        "excluded_gpus",
         "count",
         "allow_queue",
         "expected_memory_mb",
@@ -881,6 +892,9 @@ def _decode_edit_request(payload: dict, actor: Actor) -> EditRequest:
         mode=_optional_string(payload.get("mode"), "mode"),
         preferred_gpus=_optional_int_list(
             payload.get("preferred_gpus"), "preferred_gpus"
+        ),
+        excluded_gpus=_optional_int_list(
+            payload.get("excluded_gpus"), "excluded_gpus"
         ),
         count=_optional_integer(payload.get("count"), "count"),
         allow_queue=_boolean(payload.get("allow_queue", False), "allow_queue"),

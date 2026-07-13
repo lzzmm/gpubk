@@ -354,6 +354,42 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertEqual(preview.start, datetime(2030, 1, 1, 17, 40, tzinfo=timezone.utc))
         self.assertTrue(preview.valid, preview.reason)
 
+    def test_add_starts_on_an_enabled_gpu_and_rejects_disabled_selection(self):
+        config = Config(
+            data_dir=Path("/tmp/bk-tui-disabled-test"),
+            gpu_count=3,
+            disabled_gpus=(0, 2),
+        )
+        state = TuiState(add_cursor_gpu=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LedgerStore(Path(tmp))
+            _start_add_select(config, state)
+            self.assertEqual(state.add_cursor_gpu, 1)
+            self.assertEqual(state.add_selected_gpus, {1})
+
+            state.add_cursor_gpu = 2
+            _handle_add_key(ord(" "), config, store, state)
+
+        self.assertEqual(state.add_selected_gpus, {1})
+        self.assertTrue(state.error)
+        self.assertIn("disabled by the administrator", state.message)
+
+    def test_preview_and_gpu_label_expose_administrator_disabled_gpu(self):
+        config = Config(
+            data_dir=Path("/tmp/bk-tui-disabled-preview"),
+            gpu_count=2,
+            disabled_gpus=(1,),
+        )
+        state = self.state(gpus={1})
+
+        preview = _build_add_preview({}, config, state, self.start)
+        label = _gpu_label(GpuSnapshot(1, "gpu1"), 24, disabled=True)
+
+        self.assertFalse(preview.valid)
+        self.assertIn("disabled by the administrator", preview.reason)
+        self.assertIn("OFF", label)
+
     def test_add_uses_configured_booking_slice_independently_of_timeline_zoom(self):
         now = datetime(2030, 1, 1, 17, 47, 23, tzinfo=timezone.utc)
         config = Config(

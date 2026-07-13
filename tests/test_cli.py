@@ -2809,6 +2809,69 @@ class CliTests(unittest.TestCase):
                 created_payload["reservation"]["id"],
             )
 
+    def test_direct_and_guided_booking_can_exclude_gpus_without_extra_prompts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            direct_dir = Path(tmp) / "direct"
+            direct = self.run_bk(
+                ["1", "30m", "--exclude", "0,1", "--json"],
+                direct_dir,
+                {"BK_GPU_COUNT": "3"},
+            )
+
+            self.assertEqual(direct.returncode, 0, direct.stderr)
+            self.assertEqual(json.loads(direct.stdout)["reservation"]["gpus"], [2])
+
+            guided_dir = Path(tmp) / "guided"
+            guided_input = "\n".join(
+                [
+                    "",             # shared
+                    "1",
+                    "30m",
+                    "now",
+                    "except 0,1",   # one concise placement choice
+                    "",             # one shared slot
+                    "",             # automatic VRAM estimate
+                    "",             # no command
+                    "",             # confirm
+                    "",
+                ]
+            )
+            guided = self.run_bk_with_input(
+                ["add"],
+                guided_dir,
+                guided_input,
+                {"BK_GPU_COUNT": "3"},
+            )
+
+            self.assertEqual(guided.returncode, 0, guided.stderr)
+            self.assertIn("excluded GPUs=0,1", guided.stdout)
+            ledger = json.loads((guided_dir / "ledger.json").read_text(encoding="utf-8"))
+            self.assertEqual(ledger["reservations"][0]["gpus"], [2])
+
+    def test_cli_reports_administrator_gpu_policy_and_rejects_disabled_fixed_gpu(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            environment = {
+                "BK_GPU_COUNT": "3",
+                "BK_DISABLED_GPUS": "1",
+                "BK_GPU_PRIORITY": "2=9",
+            }
+
+            report = self.run_bk(["config", "--json"], data_dir, environment)
+            rejected = self.run_bk(
+                ["1", "30m", "--gpu", "1"],
+                data_dir,
+                environment,
+            )
+
+            self.assertEqual(report.returncode, 0, report.stderr)
+            effective = json.loads(report.stdout)["effective"]
+            self.assertEqual(effective["enabled_gpus"], [0, 2])
+            self.assertEqual(effective["disabled_gpus"], [1])
+            self.assertEqual(effective["gpu_priority"], {"2": 9})
+            self.assertEqual(rejected.returncode, 2)
+            self.assertIn("disabled by the administrator", rejected.stderr)
+
     def test_booking_json_error_is_structured(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

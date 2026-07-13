@@ -9,7 +9,13 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
-from bk.broker import BrokerClient, BrokerLedgerStore, BrokerServer
+from bk.broker import (
+    BrokerClient,
+    BrokerLedgerStore,
+    BrokerServer,
+    _booking_request_payload,
+    _edit_request_payload,
+)
 from bk.config import (
     BROKER_ALL_SOCKET_MODE,
     BROKER_DIR_MODE,
@@ -50,6 +56,33 @@ class RunningBroker:
 
 
 class BrokerTests(unittest.TestCase):
+    def test_optional_gpu_exclusions_are_only_sent_when_requested(self):
+        actor = Actor(1001, "alice")
+        start = floor_to_slot(utc_now())
+        booking = BookingRequest(actor, 1, 1800, start, "shared")
+        edit = EditRequest(actor, "reservation-id")
+
+        self.assertNotIn("excluded_gpus", _booking_request_payload(booking))
+        self.assertNotIn("excluded_gpus", _edit_request_payload(edit))
+
+        excluded_booking = BookingRequest(
+            actor,
+            1,
+            1800,
+            start,
+            "shared",
+            excluded_gpus=[1],
+        )
+        excluded_edit = EditRequest(
+            actor,
+            "reservation-id",
+            excluded_gpus=[],
+        )
+        self.assertEqual(
+            _booking_request_payload(excluded_booking)["excluded_gpus"], [1]
+        )
+        self.assertEqual(_edit_request_payload(excluded_edit)["excluded_gpus"], [])
+
     def setup_broker(self, root: Path, peer: dict) -> tuple[Config, BrokerServer]:
         data_dir = root / "data"
         data_dir.mkdir(mode=BROKER_DIR_MODE)

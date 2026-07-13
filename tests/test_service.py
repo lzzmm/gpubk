@@ -88,6 +88,9 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(context["policy"]["granularity_minutes"], 5)
         self.assertEqual(context["policy"]["access_mode"], "private")
         self.assertIsNone(context["policy"]["storage_gid"])
+        self.assertEqual(context["policy"]["enabled_gpus"], [0, 1])
+        self.assertEqual(context["policy"]["disabled_gpus"], [])
+        self.assertEqual(context["policy"]["gpu_priority"], {})
         self.assertTrue(context["policy"]["worker_live_guard"])
         self.assertEqual(context["gpu_advice"]["order"], [1, 0])
         self.assertEqual(context["gpu_advice"]["gpus"][1]["name"], "idle")
@@ -145,8 +148,38 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(context["policy"]["daemon_policy_exit_code"], 78)
         self.assertTrue(context["capabilities"]["configurable_monitor_cadence"])
         self.assertTrue(context["capabilities"]["collector_liveness"])
+        self.assertTrue(context["capabilities"]["request_gpu_exclusions"])
+        self.assertTrue(
+            context["capabilities"]["administrator_gpu_eligibility_policy"]
+        )
         self.assertEqual(context["worker"]["state"], "unavailable")
         self.assertNotIn("secret", str(context))
+
+    def test_agent_context_exposes_administrator_gpu_policy(self):
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            disabled_gpus=(1,),
+            gpu_priority=((0, 8),),
+        )
+        advice = build_gpu_advice(
+            config,
+            snapshots=self.snapshots,
+            history={},
+            at=self.start,
+        )
+
+        context = build_agent_context(
+            config,
+            self.store,
+            self.actor,
+            at=self.start,
+            advice=advice,
+        )
+
+        self.assertEqual(context["policy"]["enabled_gpus"], [0])
+        self.assertEqual(context["policy"]["disabled_gpus"], [1])
+        self.assertEqual(context["policy"]["gpu_priority"], {"0": 8})
 
     def test_agent_context_exposes_current_uid_worker_liveness(self):
         actor = Actor(os.getuid(), "current")

@@ -8,7 +8,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from .advisor import GpuAdvice
 from .config import Config
@@ -46,6 +46,7 @@ def apply_external_allocator(
     mode: str,
     expected_memory_mb: Optional[int],
     share_units: int = 1,
+    excluded_gpus: Optional[Sequence[int]] = None,
 ) -> AllocatorDecision:
     if not config.allocator_command:
         return AllocatorDecision(list(advice.order), dict(advice.scores), "builtin")
@@ -60,6 +61,7 @@ def apply_external_allocator(
         mode=mode,
         expected_memory_mb=expected_memory_mb,
         share_units=share_units,
+        excluded_gpus=excluded_gpus,
     )
     try:
         returncode, stdout, stderr = _run_allocator_process(
@@ -211,6 +213,7 @@ def _allocator_payload(
     mode: str,
     expected_memory_mb: Optional[int],
     share_units: int,
+    excluded_gpus: Optional[Sequence[int]] = None,
 ) -> dict:
     reservations = list_active(store.load(), start_at)
     return {
@@ -225,9 +228,15 @@ def _allocator_payload(
             "mode": mode,
             "expected_memory_mb_per_gpu": expected_memory_mb,
             "share_units_per_gpu": share_units if mode == "shared" else None,
+            "excluded_gpus": list(excluded_gpus or ()),
         },
         "policy": {
             "gpu_count": config.gpu_count,
+            "enabled_gpus": list(config.enabled_gpus),
+            "disabled_gpus": list(config.disabled_gpus),
+            "gpu_priority": {
+                str(gpu): priority for gpu, priority in config.gpu_priority
+            },
             "granularity_minutes": config.slot_minutes,
             "max_shared_reservations_per_gpu": config.max_shared_users,
             "shared_capacity_units_per_gpu": config.max_shared_users,
@@ -255,6 +264,7 @@ def _allocator_payload(
         "response_contract": {
             "schema_version": ALLOCATOR_SCHEMA_VERSION,
             "gpu_order": "permutation of every configured GPU index",
+            "eligibility": "disabled and request-excluded GPUs are never selectable",
             "reason": "optional privacy-safe text, max 500 chars",
         },
     }

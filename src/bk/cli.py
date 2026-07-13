@@ -408,7 +408,16 @@ def _book_command(
         "--at",
         help="exact local-friendly time: +30m, 20:00, 'tomorrow 09:00', or 07-13 20:00",
     )
-    parser.add_argument("--gpu", help="comma separated GPU indexes, for example 0,1")
+    gpu_group = parser.add_mutually_exclusive_group()
+    gpu_group.add_argument(
+        "--gpu", help="comma separated fixed GPU indexes, for example 0,1"
+    )
+    gpu_group.add_argument(
+        "--exclude-gpu",
+        "--exclude",
+        dest="exclude_gpu",
+        help="comma separated GPU indexes to avoid during automatic selection",
+    )
     parser.add_argument("--mem", help="expected memory on each GPU, for example 12g or 4096m")
     _add_share_arguments(parser, config)
     parser.add_argument("--op-id", help="idempotency key for agents and retry-safe scripts")
@@ -418,6 +427,11 @@ def _book_command(
     args = parser.parse_args(booking_argv)
 
     preferred = _parse_gpu_list(args.gpu) if args.gpu else None
+    excluded = (
+        _parse_gpu_list(args.exclude_gpu, label="--exclude-gpu")
+        if args.exclude_gpu
+        else None
+    )
     if args.memory and args.mem:
         parser.error("memory may be given either positionally or with --mem, not both")
     memory_value = args.mem or args.memory
@@ -440,6 +454,7 @@ def _book_command(
         start_at=start_at,
         mode=mode,
         preferred_gpus=preferred,
+        excluded_gpus=excluded,
         allow_queue=args.start is None and args.at is None,
         operation_id=args.op_id,
         command_argv=command_argv,
@@ -562,7 +577,16 @@ def _slots_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         default="now",
         help="earliest start: now, +30m, 20:00, 'tomorrow 09:00', or ISO",
     )
-    parser.add_argument("--gpu", help="restrict the search to one exact GPU set, e.g. 0,1")
+    gpu_group = parser.add_mutually_exclusive_group()
+    gpu_group.add_argument(
+        "--gpu", help="restrict the search to one exact GPU set, e.g. 0,1"
+    )
+    gpu_group.add_argument(
+        "--exclude-gpu",
+        "--exclude",
+        dest="exclude_gpu",
+        help="GPU indexes to avoid during automatic search",
+    )
     parser.add_argument("--mem", help="expected VRAM on each GPU, e.g. 12g")
     _add_share_arguments(parser, config)
     parser.add_argument("--limit", type=int, default=5, help="number of alternatives to show (default: 5)")
@@ -581,12 +605,32 @@ def _slots_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     expected_memory_mb = parse_memory_mb(args.mem) if args.mem else None
     share_units = _share_units_from_args(args, config, mode)
     preferred = _parse_gpu_list(args.gpu) if args.gpu else None
+    excluded = set(
+        _parse_gpu_list(args.exclude_gpu, label="--exclude-gpu")
+        if args.exclude_gpu
+        else []
+    )
+    invalid_excluded = [gpu for gpu in excluded if gpu < 0 or gpu >= config.gpu_count]
+    if invalid_excluded:
+        raise ValueError(f"GPU IDs must be between 0 and {config.gpu_count - 1}")
     if preferred is not None:
         if len(preferred) != args.count:
             raise ValueError("--gpu count must match requested GPU count")
         invalid = [gpu for gpu in preferred if gpu < 0 or gpu >= config.gpu_count]
         if invalid:
             raise ValueError(f"GPU IDs must be between 0 and {config.gpu_count - 1}")
+        disabled = sorted(set(preferred) & set(config.disabled_gpus))
+        if disabled:
+            raise ValueError(
+                f"GPU {','.join(map(str, disabled))} disabled by the administrator"
+            )
+    else:
+        eligible_count = len(set(config.enabled_gpus) - excluded)
+        if args.count > eligible_count:
+            raise ValueError(
+                f"only {eligible_count} GPU(s) remain after administrator and request "
+                f"exclusions; request {args.count}"
+            )
 
     advice = build_gpu_advice(config)
     ledger = store.load()
@@ -597,7 +641,12 @@ def _slots_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         gpu_sets = [tuple(preferred)]
         truncated = False
     else:
-        all_sets = combinations(advice.order, args.count)
+        candidates = [
+            gpu
+            for gpu in advice.order
+            if gpu in config.enabled_gpus and gpu not in excluded
+        ]
+        all_sets = combinations(candidates, args.count)
         gpu_sets = list(islice(all_sets, evaluated_limit + 1))
         truncated = len(gpu_sets) > evaluated_limit
         gpu_sets = gpu_sets[:evaluated_limit]
@@ -624,10 +673,11 @@ def _slots_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         if slot is None:
             continue
         scheduled_start, gpus = slot
+        priority = sum(config.gpu_priority_map.get(gpu, 0) for gpu in gpus)
         score = sum(advice.scores[gpu] for gpu in gpus)
-        options.append((scheduled_start, score, tuple(gpus)))
+        options.append((scheduled_start, priority, score, tuple(gpus)))
 
-    options.sort(key=lambda item: (item[0], item[1], item[2]))
+    options.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
     options = options[: args.limit]
     if not options:
         print(f"No legal {mode} slot found in the next {config.queue_search_hours}h.")
@@ -643,7 +693,7 @@ def _slots_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         print(f"{'#':>2} {'GPUs':<12} {'Start':<22} {'End':<22} {'Live':<9} {'Free now':>10}")
     else:
         print(f"{'#':>2} {'GPUs':<8} {'Start':<11} {'End':<11} {'Live':<7} {'Free':>8}")
-    for index, (scheduled_start, _score, gpus) in enumerate(options, 1):
+    for index, (scheduled_start, _priority, _score, gpus) in enumerate(options, 1):
         scheduled_end = scheduled_start + duration
         states = [advice.live_states[gpu].status for gpu in gpus]
         live = "idle" if all(state == "idle" for state in states) else ("busy" if "busy" in states else "unknown")
@@ -668,7 +718,7 @@ def _slots_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             )
     if truncated:
         print(f"note: evaluated the best {evaluated_limit} GPU combinations")
-    first_start, _first_score, first_gpus = options[0]
+    first_start, _first_priority, _first_score, first_gpus = options[0]
     mode_prefix = "x " if mode == MODE_EXCLUSIVE else ""
     first_gpu_text = ",".join(map(str, first_gpus))
     first_at = first_start.astimezone().strftime("%m-%d %H:%M")
@@ -920,7 +970,14 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         "--start",
         help="exact ISO start, e.g. 2030-01-01T20:00:00+08:00; omitted means earliest slot",
     )
-    recommend_parser.add_argument("--gpu", help="fixed comma-separated GPU indexes")
+    recommend_gpu = recommend_parser.add_mutually_exclusive_group()
+    recommend_gpu.add_argument("--gpu", help="fixed comma-separated GPU indexes")
+    recommend_gpu.add_argument(
+        "--exclude-gpu",
+        "--exclude",
+        dest="exclude_gpu",
+        help="GPU indexes to avoid during automatic selection",
+    )
     recommend_parser.add_argument("--mem", help="expected memory per GPU, e.g. 12g")
     _add_share_arguments(recommend_parser, config)
     recommend_parser.add_argument("--compact", action="store_true")
@@ -932,7 +989,14 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         "--start",
         help="exact ISO start, e.g. 2030-01-01T20:00:00+08:00, unless --queue is used",
     )
-    edit_parser.add_argument("--gpu", help="fixed comma-separated GPU indexes")
+    edit_gpu = edit_parser.add_mutually_exclusive_group()
+    edit_gpu.add_argument("--gpu", help="fixed comma-separated GPU indexes")
+    edit_gpu.add_argument(
+        "--exclude-gpu",
+        "--exclude",
+        dest="exclude_gpu",
+        help="GPU indexes to avoid while reallocating",
+    )
     edit_parser.add_argument("--count", type=int, help="new GPU count with automatic selection")
     edit_parser.add_argument("--mode", choices=["s", "shared", "x", "exclusive"])
     edit_parser.add_argument("--mem", help="new expected memory per GPU; use - to clear")
@@ -960,6 +1024,11 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
                 start_at=parse_start(args.start or "now"),
                 mode=mode,
                 preferred_gpus=_parse_gpu_list(args.gpu) if args.gpu else None,
+                excluded_gpus=(
+                    _parse_gpu_list(args.exclude_gpu, label="--exclude-gpu")
+                    if args.exclude_gpu
+                    else None
+                ),
                 expected_memory_mb=parse_memory_mb(args.mem) if args.mem else None,
                 share_units=_share_units_from_args(args, config, mode),
                 allow_queue=args.start is None,
@@ -974,6 +1043,7 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
                     args.duration,
                     args.start,
                     args.gpu,
+                    args.exclude_gpu,
                     args.count,
                     args.mode,
                     args.mem,
@@ -1000,6 +1070,11 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
                 start_at=parse_start(args.start) if args.start else None,
                 mode=edit_mode,
                 preferred_gpus=_parse_gpu_list(args.gpu) if args.gpu else None,
+                excluded_gpus=(
+                    _parse_gpu_list(args.exclude_gpu, label="--exclude-gpu")
+                    if args.exclude_gpu
+                    else None
+                ),
                 count=args.count,
                 expected_memory_mb=expected_memory_mb,
                 update_expected_memory=args.mem is not None,
@@ -1292,6 +1367,16 @@ def _config_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         f"scheduling: GPUs={effective['gpu_count']} slice={effective['slot_minutes']}m "
         f"shared={effective['max_shared_users']} queue={effective['queue_search_hours']}h"
     )
+    if effective["disabled_gpus"] or effective["gpu_priority"]:
+        enabled = ",".join(map(str, effective["enabled_gpus"])) or "none"
+        disabled = ",".join(map(str, effective["disabled_gpus"])) or "none"
+        priority = ",".join(
+            f"{gpu}={level}" for gpu, level in effective["gpu_priority"].items()
+        ) or "default"
+        print(
+            f"GPU policy: enabled={enabled} disabled={disabled} "
+            f"priority={priority} (larger is later)"
+        )
     print(
         f"storage: data={effective['data_dir']} transport={effective['storage_transport']} "
         f"access={effective['access_mode']} "
@@ -1350,6 +1435,11 @@ def _effective_config(config: Config) -> dict:
         "broker_gid": config.broker_gid,
         "broker_socket_mode": f"{config.broker_socket_mode:04o}",
         "gpu_count": config.gpu_count,
+        "enabled_gpus": list(config.enabled_gpus),
+        "disabled_gpus": list(config.disabled_gpus),
+        "gpu_priority": {
+            str(gpu): priority for gpu, priority in config.gpu_priority
+        },
         "slot_minutes": config.slot_minutes,
         "max_shared_users": config.max_shared_users,
         "queue_search_hours": config.queue_search_hours,
@@ -1406,6 +1496,8 @@ def _add_command(argv: List[str], config: Config, store: LedgerStore) -> int:
 
 
 def _add_interactive(config: Config, store: LedgerStore) -> int:
+    if not config.enabled_gpus:
+        raise BookingError("no GPUs are enabled for booking; contact the administrator")
     print("Guided booking. Enter accepts a default; type back or cancel at any field.")
     actor = _current_actor()
     while True:
@@ -1427,7 +1519,7 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
     count = values["count"]
     duration = values["duration"]
     start, allow_queue = values["start"]
-    preferred = values["gpus"]
+    preferred, excluded = values["placement"]
     expected_memory_mb = values["memory"]
     share_units = values["share"]
     command_argv = values["command"]
@@ -1438,6 +1530,8 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
     memory_text = "share-weighted estimate" if expected_memory_mb is None else _format_memory_mb(expected_memory_mb)
     print("Review")
     print(f"  mode={mode_raw} GPUs={count} ({gpu_text}) duration={_duration_compact(duration)}")
+    if excluded:
+        print(f"  excluded GPUs={','.join(map(str, excluded))}")
     if mode_raw == MODE_SHARED:
         print(f"  share={share_text(share_units, config.max_shared_users)} per GPU")
     queue_note = " (queued earliest)" if recommendation["queued"] else ""
@@ -1463,6 +1557,7 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
         start_at=start,
         mode=mode_raw,
         preferred_gpus=preferred,
+        excluded_gpus=excluded,
         expected_memory_mb=expected_memory_mb,
         share_units=share_units if mode_raw == MODE_SHARED else None,
         allow_queue=allow_queue,
@@ -1483,6 +1578,7 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
 
 
 def _guided_booking_fields(config: Config, store: LedgerStore) -> Optional[dict]:
+    enabled_count = len(config.enabled_gpus)
     fields = [
         (
             "mode",
@@ -1491,8 +1587,8 @@ def _guided_booking_fields(config: Config, store: LedgerStore) -> Optional[dict]
         ),
         (
             "count",
-            lambda _values: f"GPU count [1-{config.gpu_count}]: ",
-            lambda raw, _values: _guided_gpu_count(raw, config.gpu_count),
+            lambda _values: f"GPU count [1-{enabled_count} enabled]: ",
+            lambda raw, _values: _guided_gpu_count(raw, enabled_count),
         ),
         (
             "duration",
@@ -1508,9 +1604,18 @@ def _guided_booking_fields(config: Config, store: LedgerStore) -> Optional[dict]
             lambda raw, _values: _guided_start(raw, config.slot_minutes),
         ),
         (
-            "gpus",
-            lambda values: f"GPU IDs [auto or {','.join(map(str, range(min(values['count'], config.gpu_count))))}] (auto): ",
-            lambda raw, values: _guided_gpus(raw, values["count"], config.gpu_count),
+            "placement",
+            lambda values: (
+                "GPU choice [auto | fixed "
+                f"{','.join(map(str, config.enabled_gpus[: values['count']]))}"
+                " | except 2,3] (auto): "
+            ),
+            lambda raw, values: _guided_placement(
+                raw,
+                values["count"],
+                config.gpu_count,
+                config.disabled_gpus,
+            ),
         ),
         (
             "share",
@@ -1575,14 +1680,30 @@ def _guided_edit_fields(
             ),
         ),
         (
-            "gpus",
-            lambda _values: f"GPU IDs [keep {current_gpus} | e.g. 0,1] (keep): ",
-            lambda raw, _values: _guided_optional_gpus(raw, config.gpu_count),
+            "placement",
+            lambda _values: (
+                f"GPU choice [keep {current_gpus} | fixed 0,1 | auto | except 2,3] "
+                "(keep): "
+            ),
+            lambda raw, _values: _guided_optional_placement(
+                raw,
+                config.gpu_count,
+                config.disabled_gpus,
+            ),
         ),
         (
             "count",
-            lambda _values: f"GPU count for auto-pick [keep | 1-{config.gpu_count}] (keep): ",
-            lambda raw, values: _guided_optional_count(raw, config.gpu_count, values.get("gpus")),
+            lambda _values: (
+                f"GPU count for auto-pick [keep | 1-{len(config.enabled_gpus)}] "
+                "(keep): "
+            ),
+            lambda raw, values: _guided_optional_count(
+                raw,
+                len(config.enabled_gpus),
+                values["placement"][0]
+                if values.get("placement") is not None
+                else None,
+            ),
         ),
         (
             "share",
@@ -1670,7 +1791,13 @@ def _guided_share_prompt(config: Config, store: LedgerStore, values: dict) -> st
     if values["mode"] == MODE_EXCLUSIVE:
         return "shared slots [not used by exclusive] (Enter): "
     start, _allow_queue = values["start"]
-    gpus = values["gpus"] if values["gpus"] is not None else range(config.gpu_count)
+    preferred, excluded_values = values["placement"]
+    excluded = set(excluded_values)
+    gpus = (
+        preferred
+        if preferred is not None
+        else [gpu for gpu in config.enabled_gpus if gpu not in excluded]
+    )
     usage = _shared_slot_usage(
         store,
         config,
@@ -1698,10 +1825,17 @@ def _guided_edit_share_prompt(
         duration = parse_iso(reservation["end_at"]) - parse_iso(reservation["start_at"])
     else:
         duration = timedelta(seconds=values["duration"])
-    if values.get("gpus") is not None:
-        gpus = values["gpus"]
+    placement = values.get("placement")
+    if placement is not None:
+        preferred, excluded_values = placement
+        excluded = set(excluded_values)
+        gpus = (
+            preferred
+            if preferred is not None
+            else [gpu for gpu in config.enabled_gpus if gpu not in excluded]
+        )
     elif values.get("count") is not None:
-        gpus = range(config.gpu_count)
+        gpus = list(config.enabled_gpus)
     else:
         gpus = reservation.get("gpus", [])
     usage = _shared_slot_usage(
@@ -1804,7 +1938,12 @@ def _guided_start(raw: str, slot_minutes: int) -> tuple[datetime, bool]:
     )
 
 
-def _guided_gpus(raw: str, count: int, gpu_count: int) -> Optional[List[int]]:
+def _guided_gpus(
+    raw: str,
+    count: int,
+    gpu_count: int,
+    disabled_gpus=(),
+) -> Optional[List[int]]:
     if not raw or raw.lower() == "auto":
         return None
     gpus = _parse_gpu_list(raw)
@@ -1813,7 +1952,78 @@ def _guided_gpus(raw: str, count: int, gpu_count: int) -> Optional[List[int]]:
     invalid = [gpu for gpu in gpus if gpu < 0 or gpu >= gpu_count]
     if invalid:
         raise ValueError(f"GPU IDs must be between 0 and {gpu_count - 1}")
+    disabled = sorted(set(gpus) & set(disabled_gpus))
+    if disabled:
+        raise ValueError(
+            f"GPU {','.join(map(str, disabled))} disabled by the administrator"
+        )
     return gpus
+
+
+def _guided_placement(
+    raw: str,
+    count: int,
+    gpu_count: int,
+    disabled_gpus=(),
+) -> tuple[Optional[List[int]], List[int]]:
+    text = raw.strip()
+    lowered = text.lower()
+    if not text or lowered == "auto":
+        return None, []
+    excluded_text = _placement_exclusion_text(text)
+    if excluded_text is not None:
+        excluded = _guided_optional_gpus(excluded_text, gpu_count)
+        if excluded is None:
+            raise ValueError("enter GPU IDs after 'except', for example except 2,3")
+        excluded = sorted(set(excluded) - set(disabled_gpus))
+        eligible = gpu_count - len(set(disabled_gpus) | set(excluded))
+        if count > eligible:
+            raise ValueError(
+                f"only {eligible} GPU(s) remain after exclusions; request {count}"
+            )
+        return None, excluded
+    if lowered.startswith("fixed "):
+        text = text[6:].strip()
+    return _guided_gpus(text, count, gpu_count, disabled_gpus), []
+
+
+def _guided_optional_placement(
+    raw: str,
+    gpu_count: int,
+    disabled_gpus=(),
+) -> Optional[tuple[Optional[List[int]], List[int]]]:
+    text = raw.strip()
+    lowered = text.lower()
+    if not text:
+        return None
+    if lowered == "auto":
+        return None, []
+    excluded_text = _placement_exclusion_text(text)
+    if excluded_text is not None:
+        excluded = _guided_optional_gpus(excluded_text, gpu_count)
+        if excluded is None:
+            raise ValueError("enter GPU IDs after 'except', for example except 2,3")
+        return None, sorted(set(excluded) - set(disabled_gpus))
+    if lowered.startswith("fixed "):
+        text = text[6:].strip()
+    gpus = _guided_optional_gpus(text, gpu_count)
+    disabled = sorted(set(gpus or ()) & set(disabled_gpus))
+    if disabled:
+        raise ValueError(
+            f"GPU {','.join(map(str, disabled))} disabled by the administrator"
+        )
+    return gpus, []
+
+
+def _placement_exclusion_text(value: str) -> Optional[str]:
+    lowered = value.lower()
+    if lowered == "except":
+        return ""
+    if lowered.startswith("except "):
+        return value[7:].strip()
+    if value.startswith("!"):
+        return value[1:].strip()
+    return None
 
 
 def _guided_optional_gpus(raw: str, gpu_count: int) -> Optional[List[int]]:
@@ -1854,6 +2064,7 @@ def _guided_booking_preview(
     values: dict,
 ) -> dict:
     start, allow_queue = values["start"]
+    preferred, excluded = values["placement"]
     preview = recommend_booking(
         config,
         store,
@@ -1862,7 +2073,8 @@ def _guided_booking_preview(
         duration_seconds=values["duration"],
         start_at=start,
         mode=values["mode"],
-        preferred_gpus=values["gpus"],
+        preferred_gpus=preferred,
+        excluded_gpus=excluded,
         expected_memory_mb=values["memory"],
         share_units=(
             values["share"] if values["mode"] == MODE_SHARED else None
@@ -1966,7 +2178,17 @@ def _edit_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         "--at",
         help="local-friendly time: +30m, 20:00, 'tomorrow 09:00', or 07-13 20:00",
     )
-    parser.add_argument("--gpu", help="comma separated GPU indexes; use with --count to change GPU count")
+    gpu_group = parser.add_mutually_exclusive_group()
+    gpu_group.add_argument(
+        "--gpu",
+        help="comma separated fixed GPU indexes; use with --count to change GPU count",
+    )
+    gpu_group.add_argument(
+        "--exclude-gpu",
+        "--exclude",
+        dest="exclude_gpu",
+        help="GPU indexes to avoid while automatically reallocating",
+    )
     parser.add_argument("--count", type=int)
     parser.add_argument("--mode", choices=["s", MODE_SHARED, "x", MODE_EXCLUSIVE])
     parser.add_argument("--mem", help="expected memory per GPU; use - to clear")
@@ -1983,6 +2205,7 @@ def _edit_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             args.start,
             args.at,
             args.gpu,
+            args.exclude_gpu,
             args.count is not None,
             args.mode,
             args.mem,
@@ -1993,6 +2216,11 @@ def _edit_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         return _edit_interactive(config, store, reservation_id, actor)
 
     preferred = _parse_gpu_list(args.gpu) if args.gpu else None
+    excluded = (
+        _parse_gpu_list(args.exclude_gpu, label="--exclude-gpu")
+        if args.exclude_gpu
+        else None
+    )
     expected_memory_mb = None if args.mem == "-" else (parse_memory_mb(args.mem) if args.mem else None)
     edit_mode = MODE_EXCLUSIVE if args.mode == "x" else (MODE_SHARED if args.mode == "s" else args.mode)
     share_units = _share_units_from_args(args, config, edit_mode)
@@ -2010,6 +2238,7 @@ def _edit_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         duration_seconds=parse_duration_seconds(args.duration) if args.duration else None,
         mode=edit_mode,
         preferred_gpus=preferred,
+        excluded_gpus=excluded,
         count=args.count,
         allow_queue=args.queue,
         expected_memory_mb=expected_memory_mb,
@@ -2044,7 +2273,12 @@ def _edit_interactive(config: Config, store: LedgerStore, reservation_id: str, a
     mode = values["mode"]
     duration = values["duration"]
     start = values["start"]
-    preferred = values["gpus"]
+    placement = values["placement"]
+    if placement is None:
+        preferred = None
+        excluded = None
+    else:
+        preferred, excluded = placement
     count = values["count"]
     expected_memory_mb, update_expected_memory = values["memory"]
     share_units, update_share_units = values["share"]
@@ -2056,8 +2290,12 @@ def _edit_interactive(config: Config, store: LedgerStore, reservation_id: str, a
         changes.append(f"duration={_duration_compact(duration)}")
     if start is not None:
         changes.append(f"start={format_local(start)}")
-    if preferred is not None:
+    if placement is not None and preferred is not None:
         changes.append(f"GPU={','.join(map(str, preferred))}")
+    elif placement is not None and excluded:
+        changes.append(f"GPU=automatic except {','.join(map(str, excluded))}")
+    elif placement is not None:
+        changes.append("GPU=automatic")
     if count is not None:
         changes.append(f"GPU count={count} (auto-pick)")
     if update_expected_memory:
@@ -2092,6 +2330,7 @@ def _edit_interactive(config: Config, store: LedgerStore, reservation_id: str, a
         duration_seconds=duration,
         mode=mode,
         preferred_gpus=preferred,
+        excluded_gpus=excluded,
         count=count,
         allow_queue=allow_queue,
         expected_memory_mb=expected_memory_mb,
@@ -2594,15 +2833,20 @@ def _reset_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     return 0
 
 
-def _parse_gpu_list(value: str) -> List[int]:
+def _parse_gpu_list(value: str, *, label: str = "--gpu") -> List[int]:
     gpus = []
     for part in value.split(","):
         part = part.strip()
         if not part:
             continue
-        gpus.append(int(part))
+        try:
+            gpus.append(int(part))
+        except ValueError as exc:
+            raise ValueError(f"{label} must contain comma-separated GPU indexes") from exc
     if not gpus:
-        raise ValueError("--gpu must contain at least one GPU index")
+        raise ValueError(f"{label} must contain at least one GPU index")
+    if len(set(gpus)) != len(gpus):
+        raise ValueError(f"{label} must not contain repeated GPU indexes")
     return gpus
 
 

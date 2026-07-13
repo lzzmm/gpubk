@@ -78,13 +78,10 @@ def add_booking(
         duration = timedelta(seconds=request.duration_seconds)
         end = start + duration
         preferred = _normalize_preferred_gpus(request.preferred_gpus)
+        excluded = _normalize_excluded_gpus(request.excluded_gpus, config)
         gpu_order = _normalize_gpu_order(request.gpu_order, config)
         gpu_scores = _normalize_gpu_scores(request.gpu_scores, config)
-        if preferred is not None:
-            if len(preferred) != request.count:
-                raise BookingError("--gpu count must match requested GPU count")
-            for gpu in preferred:
-                _validate_gpu_index(config, gpu)
+        _validate_gpu_scope(config, request.count, preferred, excluded)
 
         operation_signature = _create_operation_signature(
             request,
@@ -93,6 +90,7 @@ def add_booking(
             expected_memory_mb,
             job_metadata,
             share_units,
+            excluded,
         )
         if op_id:
             applied = _find_applied_operation(ledger, request.actor.uid, op_id)
@@ -170,6 +168,7 @@ def add_booking(
             expected_memory_mb,
             memory_capacities,
             share_units,
+            excluded,
         )
         if slot is None:
             reason = _availability_failure_message(ledger, config, request, start, end, preferred)
@@ -257,11 +256,8 @@ def find_applied_create(
         config.slot_minutes,
     )
     preferred = _normalize_preferred_gpus(request.preferred_gpus)
-    if preferred is not None:
-        if len(preferred) != request.count:
-            raise BookingError("--gpu count must match requested GPU count")
-        for gpu in preferred:
-            _validate_gpu_index(config, gpu)
+    excluded = _normalize_excluded_gpus(request.excluded_gpus, config)
+    _validate_gpu_scope(config, request.count, preferred, excluded)
     operation_signature = _create_operation_signature(
         request,
         start,
@@ -269,6 +265,7 @@ def find_applied_create(
         expected_memory_mb,
         job_intent,
         share_units,
+        excluded,
     )
     applied = _find_applied_operation(ledger, request.actor.uid, op_id)
     if applied is None:
@@ -424,7 +421,8 @@ def edit_booking(
         end = start + duration
 
         preferred = _normalize_preferred_gpus(request.preferred_gpus) if request.preferred_gpus is not None else None
-        if preferred is None and request.count is None:
+        excluded = _normalize_excluded_gpus(request.excluded_gpus, config)
+        if preferred is None and request.count is None and request.excluded_gpus is None:
             preferred = _normalize_preferred_gpus(reservation.get("gpus", []))
         count = (
             request.count
@@ -435,13 +433,7 @@ def edit_booking(
                 else len(reservation.get("gpus", []))
             )
         )
-        if count < 1:
-            raise BookingError("GPU count must be >= 1")
-        if preferred is not None:
-            if len(preferred) != count:
-                raise BookingError("--gpu count must match requested GPU count")
-            for gpu in preferred:
-                _validate_gpu_index(config, gpu)
+        _validate_gpu_scope(config, count, preferred, excluded)
 
         shadow_ledger = {
             **ledger,
@@ -464,6 +456,7 @@ def edit_booking(
             expected_memory_mb,
             memory_capacities,
             share_units,
+            excluded,
         )
         if slot is None:
             reason_request = BookingRequest(
@@ -479,6 +472,7 @@ def edit_booking(
                 expected_memory_mb=expected_memory_mb,
                 gpu_memory_capacity_mb=memory_capacities,
                 share_units=share_units if mode == MODE_SHARED else None,
+                excluded_gpus=list(excluded),
             )
             reason = _availability_failure_message(shadow_ledger, config, reason_request, start, end, preferred)
             raise BookingError(reason)
@@ -568,6 +562,7 @@ def find_available_gpus(
     expected_memory_mb: Optional[int] = None,
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None,
     share_units: int = 1,
+    excluded_gpus: Optional[Sequence[int]] = None,
 ) -> List[int]:
     gpus, _reason = find_available_gpus_with_reason(
         ledger,
@@ -582,6 +577,7 @@ def find_available_gpus(
         expected_memory_mb,
         gpu_memory_capacity_mb,
         share_units,
+        excluded_gpus,
     )
     return gpus
 
@@ -599,6 +595,7 @@ def find_available_gpus_with_reason(
     expected_memory_mb: Optional[int] = None,
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None,
     share_units: int = 1,
+    excluded_gpus: Optional[Sequence[int]] = None,
 ) -> Tuple[List[int], str]:
     validate_ledger_policy(ledger, config)
     index = ReservationIndex.from_ledger(ledger, start)
@@ -614,6 +611,7 @@ def find_available_gpus_with_reason(
         expected_memory_mb,
         gpu_memory_capacity_mb,
         share_units,
+        excluded_gpus,
     )
 
 
@@ -629,11 +627,16 @@ def _find_available_gpus_with_reason(
     expected_memory_mb: Optional[int] = None,
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None,
     share_units: int = 1,
+    excluded_gpus: Optional[Sequence[int]] = None,
 ) -> Tuple[List[int], str]:
     available = []
     reasons = []
-    order = _normalize_gpu_order(gpu_order, config)
+    excluded = set(_normalize_excluded_gpus(excluded_gpus, config))
+    order = [gpu for gpu in _normalize_gpu_order(gpu_order, config) if gpu not in excluded]
+    if count > len(order):
+        return [], _eligible_gpu_count_message(config, excluded, count)
     base_rank = {gpu: rank for rank, gpu in enumerate(order)}
+    priorities = config.gpu_priority_map
     for gpu in order:
         ok, reason = _availability_detail_indexed(
             index,
@@ -650,11 +653,11 @@ def _find_available_gpus_with_reason(
         if ok:
             pressure = _reservation_pressure_score_indexed(index, gpu, start, end, config.max_shared_users)
             score = float((gpu_scores or {}).get(gpu, 0.0)) + pressure
-            available.append((score, base_rank[gpu], gpu))
+            available.append((priorities.get(gpu, 0), score, base_rank[gpu], gpu))
         else:
             reasons.append(reason)
     available.sort()
-    result = [gpu for _score, _rank, gpu in available[:count]]
+    result = [gpu for _priority, _score, _rank, gpu in available[:count]]
     if len(result) == count:
         return result, ""
     return result, _combine_reasons(reasons)
@@ -675,6 +678,7 @@ def find_earliest_slot(
     expected_memory_mb: Optional[int] = None,
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None,
     share_units: int = 1,
+    excluded_gpus: Optional[Sequence[int]] = None,
 ) -> Optional[Tuple[datetime, List[int]]]:
     validate_ledger_policy(ledger, config)
     now = utc_now()
@@ -705,6 +709,7 @@ def find_earliest_slot(
             expected_memory_mb,
             gpu_memory_capacity_mb,
             share_units,
+            excluded_gpus,
         )
         if len(gpus) == count:
             return candidate_start, gpus
@@ -725,6 +730,7 @@ def find_nearest_slot(
     expected_memory_mb: Optional[int] = None,
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None,
     share_units: int = 1,
+    excluded_gpus: Optional[Sequence[int]] = None,
 ) -> Optional[Tuple[datetime, List[int]]]:
     validate_ledger_policy(ledger, config)
     now = utc_now()
@@ -767,6 +773,7 @@ def find_nearest_slot(
             expected_memory_mb,
             gpu_memory_capacity_mb,
             share_units,
+            excluded_gpus,
         )
         if len(gpus) == count:
             return candidate_start, gpus
@@ -786,10 +793,14 @@ def _gpus_at_start(
     expected_memory_mb: Optional[int],
     gpu_memory_capacity_mb: Optional[Dict[int, int]],
     share_units: int,
+    excluded_gpus: Optional[Sequence[int]],
 ) -> List[int]:
     end = start + duration
+    excluded = set(_normalize_excluded_gpus(excluded_gpus, config))
     if preferred_gpus is not None:
         for gpu in preferred_gpus:
+            if gpu in config.disabled_gpus or gpu in excluded:
+                return []
             ok, _reason = _availability_detail_indexed(
                 index,
                 gpu,
@@ -818,6 +829,7 @@ def _gpus_at_start(
         expected_memory_mb,
         gpu_memory_capacity_mb,
         share_units,
+        excluded,
     )
     return gpus
 
@@ -1418,18 +1430,67 @@ def _normalize_preferred_gpus(gpus: Optional[Sequence[int]]) -> Optional[List[in
     return normalized
 
 
-def _normalize_gpu_order(gpus: Optional[Sequence[int]], config: Config) -> List[int]:
+def _normalize_excluded_gpus(
+    gpus: Optional[Sequence[int]], config: Config
+) -> List[int]:
     if gpus is None:
-        return list(range(config.gpu_count))
+        return []
+    normalized = sorted(set(int(gpu) for gpu in gpus))
+    for gpu in normalized:
+        _validate_gpu_index(config, gpu)
+    return normalized
+
+
+def _validate_gpu_scope(
+    config: Config,
+    count: int,
+    preferred: Optional[Sequence[int]],
+    excluded: Sequence[int],
+) -> None:
+    if count < 1:
+        raise BookingError("GPU count must be >= 1")
+    excluded_set = set(excluded)
+    if preferred is not None:
+        if len(preferred) != count:
+            raise BookingError("--gpu count must match requested GPU count")
+        for gpu in preferred:
+            _validate_gpu_index(config, gpu)
+            if gpu in config.disabled_gpus:
+                raise BookingError(f"GPU {gpu} is disabled by the administrator")
+            if gpu in excluded_set:
+                raise BookingError(f"GPU {gpu} cannot be both selected and excluded")
+        return
+    eligible = [gpu for gpu in config.enabled_gpus if gpu not in excluded_set]
+    if count > len(eligible):
+        raise BookingError(_eligible_gpu_count_message(config, excluded_set, count))
+
+
+def _eligible_gpu_count_message(
+    config: Config, excluded: Sequence[int] | set[int], count: int
+) -> str:
+    excluded_set = set(excluded)
+    eligible = [gpu for gpu in config.enabled_gpus if gpu not in excluded_set]
+    disabled_text = ",".join(map(str, config.disabled_gpus)) or "none"
+    excluded_text = ",".join(map(str, sorted(excluded_set))) or "none"
+    return (
+        f"requested {count} GPU(s), but only {len(eligible)} are eligible "
+        f"(administrator-disabled={disabled_text}; request-excluded={excluded_text})"
+    )
+
+
+def _normalize_gpu_order(gpus: Optional[Sequence[int]], config: Config) -> List[int]:
+    enabled = set(config.enabled_gpus)
+    if gpus is None:
+        return list(config.enabled_gpus)
     result = []
     seen = set()
     for value in gpus:
         gpu = int(value)
         _validate_gpu_index(config, gpu)
-        if gpu not in seen:
+        if gpu in enabled and gpu not in seen:
             result.append(gpu)
             seen.add(gpu)
-    result.extend(gpu for gpu in range(config.gpu_count) if gpu not in seen)
+    result.extend(gpu for gpu in config.enabled_gpus if gpu not in seen)
     return result
 
 
@@ -1541,6 +1602,7 @@ def _create_operation_signature(
     expected_memory_mb: Optional[int],
     job_metadata: Optional[dict],
     share_units: int,
+    excluded_gpus: Sequence[int],
 ) -> str:
     return _operation_signature(
         "create",
@@ -1553,6 +1615,7 @@ def _create_operation_signature(
             "allow_queue": request.allow_queue,
             "expected_memory_mb": expected_memory_mb,
             "share_units": share_units if request.mode == MODE_SHARED else None,
+            "excluded_gpus": list(excluded_gpus),
             "job_summary": job_metadata.get("summary") if job_metadata is not None else None,
         },
     )
@@ -1574,6 +1637,7 @@ def _edit_operation_signature(request: EditRequest) -> str:
             "update_expected_memory": request.update_expected_memory,
             "share_units": request.share_units,
             "update_share_units": request.update_share_units,
+            "excluded_gpus": sorted(set(request.excluded_gpus or [])),
         },
     )
 
@@ -1750,6 +1814,7 @@ def _availability_failure_message(
             request.expected_memory_mb,
             request.gpu_memory_capacity_mb,
             request.share_units or 1,
+            request.excluded_gpus,
         )
         reason = reason or "not enough GPUs available for this request"
 
@@ -1781,6 +1846,7 @@ def _nearest_available_hint(
         request.expected_memory_mb,
         request.gpu_memory_capacity_mb,
         request.share_units or 1,
+        request.excluded_gpus,
     )
     if slot is None:
         return ""

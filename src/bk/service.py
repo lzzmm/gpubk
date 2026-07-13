@@ -79,6 +79,7 @@ def submit_booking(
     start_at: datetime,
     mode: str = MODE_SHARED,
     preferred_gpus: Optional[Sequence[int]] = None,
+    excluded_gpus: Optional[Sequence[int]] = None,
     expected_memory_mb: Optional[int] = None,
     share_units: Optional[int] = None,
     allow_queue: bool = True,
@@ -130,6 +131,7 @@ def submit_booking(
             preferred_gpus=list(preferred_gpus)
             if preferred_gpus is not None
             else None,
+            excluded_gpus=list(excluded_gpus) if excluded_gpus is not None else None,
             op_id=operation_id,
             allow_queue=allow_queue,
             job_digest=job_identity.digest if job_identity else None,
@@ -167,6 +169,7 @@ def submit_booking(
         effective_start,
         mode,
         preferred_gpus,
+        excluded_gpus,
         expected_memory_mb,
         effective_share_units,
     )
@@ -194,6 +197,9 @@ def submit_booking(
                 preferred_gpus=list(preferred_gpus)
                 if preferred_gpus is not None
                 else None,
+                excluded_gpus=(
+                    list(excluded_gpus) if excluded_gpus is not None else None
+                ),
                 gpu_order=allocator.order,
                 gpu_scores=allocator.scores,
                 op_id=operation_id,
@@ -242,6 +248,7 @@ def submit_edit(
     start_at: Optional[datetime] = None,
     mode: Optional[str] = None,
     preferred_gpus: Optional[Sequence[int]] = None,
+    excluded_gpus: Optional[Sequence[int]] = None,
     count: Optional[int] = None,
     expected_memory_mb: Optional[int] = None,
     update_expected_memory: bool = False,
@@ -262,6 +269,7 @@ def submit_edit(
         duration_seconds=duration_seconds,
         mode=mode,
         preferred_gpus=list(preferred_gpus) if preferred_gpus is not None else None,
+        excluded_gpus=list(excluded_gpus) if excluded_gpus is not None else None,
         count=count,
         allow_queue=allow_queue,
         expected_memory_mb=expected_memory_mb,
@@ -322,7 +330,7 @@ def submit_edit(
     else:
         effective_share_units = share_units if update_share_units else None
     effective_preferred = preferred_gpus
-    if effective_preferred is None and count is None:
+    if effective_preferred is None and count is None and excluded_gpus is None:
         effective_preferred = [int(gpu) for gpu in reservation.get("gpus", [])]
     effective_count = (
         count
@@ -355,6 +363,7 @@ def submit_edit(
         effective_start,
         effective_mode,
         effective_preferred,
+        excluded_gpus,
         effective_memory,
         normalized_share_units,
     )
@@ -369,6 +378,7 @@ def submit_edit(
             duration_seconds=duration_seconds,
             mode=mode,
             preferred_gpus=list(preferred_gpus) if preferred_gpus is not None else None,
+            excluded_gpus=list(excluded_gpus) if excluded_gpus is not None else None,
             gpu_order=allocator.order,
             gpu_scores=allocator.scores,
             count=count,
@@ -495,6 +505,11 @@ def build_agent_context(
         "administrator": administrator_info(config).as_dict(),
         "policy": {
             "gpu_count": config.gpu_count,
+            "enabled_gpus": list(config.enabled_gpus),
+            "disabled_gpus": list(config.disabled_gpus),
+            "gpu_priority": {
+                str(gpu): priority for gpu, priority in config.gpu_priority
+            },
             "default_mode": MODE_SHARED,
             "modes": [MODE_SHARED, MODE_EXCLUSIVE],
             "granularity_minutes": config.slot_minutes,
@@ -579,6 +594,8 @@ def build_agent_context(
             "usage_api_schema": "gpubk.usage.v1",
             "external_allocator_is_advisory": True,
             "external_allocator_configured": bool(config.allocator_command),
+            "request_gpu_exclusions": True,
+            "administrator_gpu_eligibility_policy": True,
         },
     }
 
@@ -593,6 +610,7 @@ def recommend_booking(
     start_at: datetime,
     mode: str = MODE_SHARED,
     preferred_gpus: Optional[Sequence[int]] = None,
+    excluded_gpus: Optional[Sequence[int]] = None,
     expected_memory_mb: Optional[int] = None,
     share_units: Optional[int] = None,
     allow_queue: bool = True,
@@ -629,6 +647,7 @@ def recommend_booking(
         effective_start,
         mode,
         preferred_gpus,
+        excluded_gpus,
         expected_memory_mb,
         effective_share_units,
     )
@@ -648,6 +667,7 @@ def recommend_booking(
         expected_memory_mb,
         gpu_advice.memory_capacities_mb,
         effective_share_units,
+        excluded_gpus,
     )
     nearest = slot
     if slot is None and not allow_queue:
@@ -666,6 +686,7 @@ def recommend_booking(
             expected_memory_mb,
             gpu_advice.memory_capacities_mb,
             effective_share_units,
+            excluded_gpus,
         )
 
     response = {
@@ -680,6 +701,7 @@ def recommend_booking(
             "preferred_gpus": list(preferred_gpus)
             if preferred_gpus is not None
             else None,
+            "excluded_gpus": list(excluded_gpus) if excluded_gpus is not None else [],
             "expected_memory_mb_per_gpu": expected_memory_mb,
             "share_units_per_gpu": effective_share_units
             if mode == MODE_SHARED
@@ -773,6 +795,7 @@ def _allocation_decision(
     start_at: datetime,
     mode: str,
     preferred_gpus: Optional[Sequence[int]],
+    excluded_gpus: Optional[Sequence[int]],
     expected_memory_mb: Optional[int],
     share_units: int,
 ) -> AllocatorDecision:
@@ -789,6 +812,7 @@ def _allocation_decision(
         mode=mode,
         expected_memory_mb=expected_memory_mb,
         share_units=share_units,
+        excluded_gpus=excluded_gpus,
     )
 
 
@@ -848,6 +872,7 @@ def _recommendation_gpu_details(
         details.append(
             {
                 "gpu": gpu,
+                "administrator_priority": config.gpu_priority_map.get(gpu, 0),
                 "load_score": allocator.scores[gpu],
                 "reservation_pressure_score": pressure_scores[gpu],
                 "live_status": live.status,

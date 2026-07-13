@@ -738,6 +738,66 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.allocator_command, (sys.executable, "-m", "example_allocator"))
             self.assertEqual(config.allocator_weight, 7.5)
 
+    def test_gpu_eligibility_policy_loads_from_file_and_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "gpu_count": 4,
+                        "disabled_gpus": [3],
+                        "gpu_priority": {"2": 10},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            path.chmod(0o600)
+            with mock.patch.dict("os.environ", {"BK_DATA_DIR": tmp}, clear=True):
+                configured = load_config()
+            self.assertEqual(configured.disabled_gpus, (3,))
+            self.assertEqual(configured.enabled_gpus, (0, 1, 2))
+            self.assertEqual(configured.gpu_priority_map, {2: 10})
+
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "BK_DATA_DIR": tmp,
+                    "BK_DISABLED_GPUS": "1,3",
+                    "BK_GPU_PRIORITY": "0=20,2=5",
+                },
+                clear=True,
+            ):
+                overridden = load_config()
+            self.assertEqual(overridden.disabled_gpus, (1, 3))
+            self.assertEqual(overridden.gpu_priority_map, {0: 20, 2: 5})
+
+    def test_gpu_eligibility_policy_rejects_invalid_indices_and_priorities(self):
+        cases = (
+            ({"gpu_count": 2, "disabled_gpus": [2]}, "out of range"),
+            ({"gpu_count": 2, "disabled_gpus": [1, 1]}, "duplicate"),
+            ({"gpu_count": 2, "gpu_priority": {"1": -1}}, "between 0"),
+            ({"gpu_count": 2, "gpu_priority": {"2": 1}}, "out of range"),
+        )
+        for document, message in cases:
+            with self.subTest(document=document), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "config.json"
+                path.write_text(json.dumps(document), encoding="utf-8")
+                path.chmod(0o600)
+                with mock.patch.dict("os.environ", {"BK_DATA_DIR": tmp}, clear=True):
+                    with self.assertRaisesRegex(ValueError, message):
+                        load_config()
+
+    def test_disabled_gpus_reduce_effective_worker_parallelism(self):
+        config = Config(
+            Path("/tmp/gpubk-disabled-worker-capacity"),
+            gpu_count=4,
+            max_shared_users=2,
+            worker_max_parallel=64,
+            disabled_gpus=(1, 3),
+        )
+
+        self.assertEqual(config.effective_worker_max_parallel, 4)
+
     def test_unknown_config_key_is_rejected_with_typo_hint(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"

@@ -52,6 +52,7 @@ class SchedulerModeTests(unittest.TestCase):
         allow_queue=False,
         op_id=None,
         share_units=None,
+        excluded_gpus=None,
     ):
         return BookingRequest(
             actor=Actor(uid=uid, username=f"user{uid}"),
@@ -63,7 +64,112 @@ class SchedulerModeTests(unittest.TestCase):
             allow_queue=allow_queue,
             op_id=op_id,
             share_units=share_units,
+            excluded_gpus=excluded_gpus,
         )
+
+    def test_administrator_disabled_gpu_is_never_selected(self):
+        config = replace(self.config, gpu_count=2, disabled_gpus=(1,))
+
+        automatic = add_booking(
+            self.store,
+            config,
+            self.request(1001, MODE_SHARED),
+        )
+        self.assertEqual(automatic.reservation["gpus"], [0])
+
+        with self.assertRaisesRegex(BookingError, "disabled by the administrator"):
+            add_booking(
+                self.store,
+                config,
+                self.request(1002, MODE_SHARED, preferred_gpus=[1]),
+            )
+
+    def test_request_exclusions_are_enforced_by_the_scheduler(self):
+        config = replace(self.config, gpu_count=3)
+
+        result = add_booking(
+            self.store,
+            config,
+            self.request(
+                1001,
+                MODE_SHARED,
+                excluded_gpus=[0, 1],
+            ),
+        )
+
+        self.assertEqual(result.reservation["gpus"], [2])
+        with self.assertRaisesRegex(BookingError, "only 1 are eligible"):
+            add_booking(
+                self.store,
+                config,
+                self.request(
+                    1002,
+                    MODE_SHARED,
+                    count=2,
+                    excluded_gpus=[0, 1],
+                ),
+            )
+
+    def test_administrator_priority_precedes_load_only_within_the_same_time(self):
+        config = replace(self.config, gpu_count=2, gpu_priority=((0, 10),))
+        request = replace(
+            self.request(1001, MODE_EXCLUSIVE),
+            gpu_scores={0: -1000.0, 1: 1000.0},
+        )
+
+        preferred = add_booking(self.store, config, request)
+        self.assertEqual(preferred.reservation["gpus"], [1])
+
+        later_store = LedgerStore(Path(self.tmp.name) / "time-first")
+        add_booking(
+            later_store,
+            config,
+            self.request(1002, MODE_EXCLUSIVE, preferred_gpus=[1]),
+        )
+        immediate = add_booking(
+            later_store,
+            config,
+            replace(request, actor=Actor(1003, "user1003"), allow_queue=True),
+        )
+        self.assertEqual(immediate.reservation["gpus"], [0])
+        self.assertEqual(parse_iso(immediate.reservation["start_at"]), self.start)
+
+    def test_edit_exclusion_reallocates_without_changing_gpu_count(self):
+        config = replace(self.config, gpu_count=2)
+        created = add_booking(
+            self.store,
+            config,
+            self.request(1001, MODE_SHARED, preferred_gpus=[0]),
+        )
+
+        edited = edit_booking(
+            self.store,
+            config,
+            EditRequest(
+                actor=Actor(1001, "user1001"),
+                reservation_id=created.reservation["id"],
+                excluded_gpus=[0],
+            ),
+        )
+
+        self.assertEqual(edited.reservation["gpus"], [1])
+
+    def test_operation_id_binds_request_exclusions(self):
+        config = replace(self.config, gpu_count=2)
+        first = self.request(
+            1001,
+            MODE_SHARED,
+            op_id="exclude-retry",
+            excluded_gpus=[0],
+        )
+        add_booking(self.store, config, first)
+
+        with self.assertRaisesRegex(BookingError, "different write"):
+            add_booking(
+                self.store,
+                config,
+                replace(first, excluded_gpus=[1]),
+            )
 
     def test_shared_allows_configured_number_of_users(self):
         first = add_booking(self.store, self.config, self.request(1001, MODE_SHARED))

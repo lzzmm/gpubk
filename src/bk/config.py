@@ -8,7 +8,7 @@ import shlex
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from .fileio import open_existing_regular_at
 from .granularity import DEFAULT_SLOT_MINUTES, slot_seconds, validate_slot_minutes
@@ -43,6 +43,7 @@ MAX_WORKER_CLAIM_TIMEOUT_SECONDS = 7 * 24 * 60 * 60
 MAX_WORKER_RECOVERY_GRACE_SECONDS = 24 * 60 * 60
 MAX_ALLOCATOR_TIMEOUT_SECONDS = 5 * 60
 MAX_ALLOCATOR_WEIGHT = 1_000_000
+MAX_GPU_PRIORITY = 1_000_000
 MIN_MONITOR_INTERVAL_SECONDS = 0.2
 MAX_MONITOR_INTERVAL_SECONDS = 60 * 60
 MAX_MONITOR_ROLLUP_SECONDS = 24 * 60 * 60
@@ -82,6 +83,8 @@ CONFIG_ENV_MAP = {
     "tui_refresh_seconds": "BK_TUI_REFRESH_SECONDS",
     "file_mode": "BK_FILE_MODE",
     "dir_mode": "BK_DIR_MODE",
+    "disabled_gpus": "BK_DISABLED_GPUS",
+    "gpu_priority": "BK_GPU_PRIORITY",
 }
 CONFIG_FILE_KEYS = frozenset(
     {
@@ -148,6 +151,8 @@ class Config:
     broker_uid: Optional[int] = None
     broker_gid: Optional[int] = None
     broker_socket_mode: int = 0o600
+    disabled_gpus: Tuple[int, ...] = ()
+    gpu_priority: Tuple[Tuple[int, int], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -163,6 +168,16 @@ class Config:
             self,
             "tui_refresh_seconds",
             validate_tui_refresh_seconds(self.tui_refresh_seconds),
+        )
+        object.__setattr__(
+            self,
+            "disabled_gpus",
+            validate_gpu_list(self.disabled_gpus, self.gpu_count, "disabled_gpus"),
+        )
+        object.__setattr__(
+            self,
+            "gpu_priority",
+            validate_gpu_priority(self.gpu_priority, self.gpu_count),
         )
         object.__setattr__(
             self,
@@ -238,8 +253,17 @@ class Config:
 
     @property
     def effective_worker_max_parallel(self) -> int:
-        scheduling_capacity = self.gpu_count * self.max_shared_users
+        scheduling_capacity = len(self.enabled_gpus) * self.max_shared_users
         return max(1, min(self.worker_max_parallel, scheduling_capacity))
+
+    @property
+    def enabled_gpus(self) -> Tuple[int, ...]:
+        disabled = set(self.disabled_gpus)
+        return tuple(gpu for gpu in range(self.gpu_count) if gpu not in disabled)
+
+    @property
+    def gpu_priority_map(self) -> Dict[int, int]:
+        return dict(self.gpu_priority)
 
     @property
     def access_mode(self) -> str:
@@ -382,6 +406,98 @@ def validate_optional_gid(value: object, key: str) -> Optional[int]:
     if parsed < 0 or parsed > MAX_UID:
         raise ValueError(f"{key} must be between 0 and {MAX_UID}")
     return parsed
+
+
+def validate_gpu_list(value: object, gpu_count: int, key: str) -> Tuple[int, ...]:
+    if value is None or value == "":
+        return ()
+    parsed: object = value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return ()
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{key} must be comma-separated GPU IDs or a JSON array") from exc
+        else:
+            parsed = [part.strip() for part in text.split(",") if part.strip()]
+    if not isinstance(parsed, (list, tuple, set, frozenset)):
+        raise ValueError(f"{key} must be an array of GPU IDs")
+    result = []
+    seen = set()
+    for raw_gpu in parsed:
+        if isinstance(raw_gpu, bool):
+            raise ValueError(f"{key} must contain integer GPU IDs")
+        try:
+            gpu = int(raw_gpu)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} must contain integer GPU IDs") from exc
+        if gpu < 0 or gpu >= gpu_count:
+            raise ValueError(f"{key} GPU index out of range: {gpu}")
+        if gpu in seen:
+            raise ValueError(f"{key} contains duplicate GPU index: {gpu}")
+        seen.add(gpu)
+        result.append(gpu)
+    return tuple(sorted(result))
+
+
+def validate_gpu_priority(value: object, gpu_count: int) -> Tuple[Tuple[int, int], ...]:
+    if value is None or value == "" or value == ():
+        return ()
+    parsed: object = value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return ()
+        if text.startswith("{"):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    "gpu_priority must look like 6=10,7=20 or a JSON object"
+                ) from exc
+        else:
+            entries = []
+            for item in text.split(","):
+                item = item.strip()
+                separator = "=" if "=" in item else ":"
+                if not item or separator not in item:
+                    raise ValueError("gpu_priority must look like 6=10,7=20")
+                gpu, priority = item.split(separator, 1)
+                entries.append((gpu.strip(), priority.strip()))
+            parsed = entries
+    if isinstance(parsed, Mapping):
+        entries: Sequence[tuple[object, object]] = list(parsed.items())
+    elif isinstance(parsed, (list, tuple)):
+        entries = list(parsed)
+    else:
+        raise ValueError("gpu_priority must map GPU IDs to integer priority levels")
+
+    result = []
+    seen = set()
+    for entry in entries:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            raise ValueError("gpu_priority entries must be GPU/priority pairs")
+        raw_gpu, raw_priority = entry
+        if isinstance(raw_gpu, bool) or isinstance(raw_priority, bool):
+            raise ValueError("gpu_priority entries must contain integers")
+        try:
+            gpu = int(raw_gpu)
+            priority = int(raw_priority)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("gpu_priority entries must contain integers") from exc
+        if gpu < 0 or gpu >= gpu_count:
+            raise ValueError(f"gpu_priority GPU index out of range: {gpu}")
+        if priority < 0 or priority > MAX_GPU_PRIORITY:
+            raise ValueError(f"GPU priority must be between 0 and {MAX_GPU_PRIORITY}")
+        if gpu in seen:
+            raise ValueError(f"gpu_priority contains duplicate GPU index: {gpu}")
+        seen.add(gpu)
+        if priority:
+            result.append((gpu, priority))
+    return tuple(sorted(result))
 
 
 def _read_config_file(
@@ -763,6 +879,10 @@ def load_config() -> Config:
             0o600,
             directory=False,
         ),
+        disabled_gpus=validate_gpu_list(
+            raw.get("disabled_gpus"), gpu_count, "disabled_gpus"
+        ),
+        gpu_priority=validate_gpu_priority(raw.get("gpu_priority"), gpu_count),
     )
 
 

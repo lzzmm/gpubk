@@ -151,6 +151,7 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
             ("Date", "Date and weekday are repeated at every midnight"),
             ("Colors", "Each booking keeps one timeline and table color"),
             ("Shared", "GPU labels show used/max slots, such as 3/4"),
+            ("OFF", "Disabled by admin; status and history stay visible"),
             ("z", "Solid bars until overlap; capacity slices otherwise"),
             ("GPU focus", "Tab to expand share lanes and live processes"),
             ("Reservation", "Select a row to blink its exact interval"),
@@ -672,6 +673,7 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
             timeline_index,
             now,
             state.timeline_style,
+            gpu.index in config.disabled_gpus,
         )
         row += 1
 
@@ -767,6 +769,7 @@ def _header_lines(
         f" monitor={_collector_status_text(state.collector_status)} "
         f"| worker={_worker_status_text(state.worker_status)} "
         f"| share={config.max_shared_users} slots/GPU "
+        f"| GPUs={len(config.enabled_gpus)}/{config.gpu_count} enabled "
         f"| style={state.timeline_style} | refresh={config.tui_refresh_seconds:g}s"
     )
     if width >= 100 and len(wide_title) < width and len(wide_details) < width:
@@ -780,7 +783,8 @@ def _header_lines(
         suffix = (
             f" monitor={_collector_status_text(state.collector_status)} "
             f"| worker={_worker_status_text(state.worker_status)} "
-            f"| {config.max_shared_users} slots | {state.timeline_style}"
+            f"| {config.max_shared_users} slots | GPUs={len(config.enabled_gpus)}/{config.gpu_count} "
+            f"| {state.timeline_style}"
         )
         details = suffix.lstrip()
     limit = max(0, width - 1)
@@ -990,6 +994,7 @@ def _draw_gpu_row(
     reservation_index: Optional[ReservationIndex] = None,
     now: Optional[datetime] = None,
     timeline_style: str = "capacity",
+    disabled: bool = False,
 ) -> None:
     view_end = start + timedelta(minutes=slot_minutes * timeline_width)
     if now is not None:
@@ -1025,11 +1030,12 @@ def _draw_gpu_row(
         violations,
         focused,
         exclusive_now,
+        disabled,
     )
     cursor_active = preview is not None and gpu.index == preview.cursor_gpu
     if cursor_active:
         label_color = _preview_color(preview.mode)
-    elif violations:
+    elif disabled or violations:
         label_color = COLOR_ERROR
     else:
         label_color = COLOR_SELECTED if focused else COLOR_MUTED
@@ -1447,6 +1453,12 @@ def _footer_label(state: TuiState, preview: Optional[AddPreview], width: int) ->
     return footer[: max(0, width - 1)]
 
 
+def _nearest_enabled_gpu(config: Config, preferred: int) -> int:
+    if not config.enabled_gpus:
+        return 0
+    return min(config.enabled_gpus, key=lambda gpu: (abs(gpu - preferred), gpu))
+
+
 def _start_add_select(config: Config, state: TuiState) -> None:
     now = utc_now()
     previous_slot = max(1, state.booking_slot_minutes)
@@ -1465,7 +1477,7 @@ def _start_add_select(config: Config, state: TuiState) -> None:
     state.edit_reservation_id = None
     state.editor_view_start = view_start
     state.add_search_anchor = booking_start
-    state.add_cursor_gpu = min(max(state.add_cursor_gpu, 0), max(0, config.gpu_count - 1))
+    state.add_cursor_gpu = _nearest_enabled_gpu(config, state.add_cursor_gpu)
     state.add_start_steps = max(
         0,
         int(
@@ -1474,12 +1486,18 @@ def _start_add_select(config: Config, state: TuiState) -> None:
         ),
     )
     state.add_duration_steps = max(1, state.add_duration_steps)
-    state.add_selected_gpus = {state.add_cursor_gpu} if config.gpu_count else set()
+    state.add_selected_gpus = (
+        {state.add_cursor_gpu} if state.add_cursor_gpu in config.enabled_gpus else set()
+    )
     state.add_booking_mode = MODE_SHARED
     state.add_expected_memory_mb = None
     state.add_share_units = 1
-    state.message = "Add: 1-9/f finds earliest from NOW; arrows set a new search start"
-    state.error = False
+    if config.enabled_gpus:
+        state.message = "Add: 1-9/f finds earliest from NOW; arrows set a new search start"
+        state.error = False
+    else:
+        state.message = "all GPUs are disabled by the administrator"
+        state.error = True
 
 
 def _start_edit_select(config: Config, store: LedgerStore, state: TuiState) -> None:
@@ -1597,6 +1615,10 @@ def _handle_add_key(
     if key == ord(" "):
         if state.add_cursor_gpu in state.add_selected_gpus:
             state.add_selected_gpus.remove(state.add_cursor_gpu)
+        elif state.add_cursor_gpu in config.disabled_gpus:
+            state.message = f"GPU {state.add_cursor_gpu} disabled by the administrator"
+            state.error = True
+            return
         elif 0 <= state.add_cursor_gpu < config.gpu_count:
             state.add_selected_gpus.add(state.add_cursor_gpu)
         _clear_editor_feedback(state)
@@ -1820,9 +1842,18 @@ def _find_add_slot(
         state.error = True
         return
 
+    disabled = sorted(set(selected) & set(config.disabled_gpus))
+    if fixed_gpus and disabled:
+        state.message = (
+            f"GPU {','.join(map(str, disabled))} disabled by the administrator"
+        )
+        state.error = True
+        return
+
     count = requested_count if requested_count is not None else (len(selected) or 1)
-    if count < 1 or count > config.gpu_count:
-        state.message = f"GPU count must be between 1 and {config.gpu_count}"
+    maximum = config.gpu_count if fixed_gpus else len(config.enabled_gpus)
+    if count < 1 or count > maximum:
+        state.message = f"GPU count must be between 1 and {maximum} enabled GPU(s)"
         state.error = True
         return
     view_start = _editor_view_start(state)
@@ -1934,8 +1965,10 @@ def _reset_editor(config: Config, store: LedgerStore, state: TuiState) -> None:
     cursor_gpu = state.add_cursor_gpu
     state.add_duration_steps = _default_editor_duration_steps(config.slot_minutes)
     _start_add_select(config, state)
-    state.add_cursor_gpu = min(max(cursor_gpu, 0), max(0, config.gpu_count - 1))
-    state.add_selected_gpus = {state.add_cursor_gpu} if config.gpu_count else set()
+    state.add_cursor_gpu = _nearest_enabled_gpu(config, cursor_gpu)
+    state.add_selected_gpus = (
+        {state.add_cursor_gpu} if state.add_cursor_gpu in config.enabled_gpus else set()
+    )
     state.message = "add reset to 1 GPU / 30m / shared"
 
 
@@ -2378,6 +2411,20 @@ def _build_add_preview(ledger: dict, config: Config, state: TuiState, view_start
             mode,
             False,
             "select at least one GPU with space",
+            blink=state.add_mode,
+            share_units=state.add_share_units,
+            share_capacity=config.max_shared_users,
+        )
+    disabled = sorted(set(selected) & set(config.disabled_gpus))
+    if disabled:
+        return AddPreview(
+            start,
+            end,
+            selected,
+            cursor_gpu,
+            mode,
+            False,
+            f"GPU {','.join(map(str, disabled))} disabled by the administrator",
             blink=state.add_mode,
             share_units=state.add_share_units,
             share_capacity=config.max_shared_users,
@@ -2847,10 +2894,14 @@ def _gpu_label(
     shared_limit: int = 1,
     violations: int = 0,
     exclusive: bool = False,
+    disabled: bool = False,
 ) -> str:
     gpu_field = _truncate(f"G{gpu.index}", 4)
     capacity_field = _truncate(
-        f"X/{shared_limit}" if exclusive else f"{peak_shared}/{shared_limit}", 5
+        "OFF"
+        if disabled
+        else (f"X/{shared_limit}" if exclusive else f"{peak_shared}/{shared_limit}"),
+        5,
     )
     extras = [f"!{violations}"] if violations else []
     util = f"{gpu.utilization_percent}%" if gpu.utilization_percent is not None else "-"
@@ -2877,6 +2928,7 @@ def _gpu_row_label(
     violations: int = 0,
     focused: bool = False,
     exclusive: bool = False,
+    disabled: bool = False,
 ) -> str:
     marker = ">" if focused else " "
     content = _gpu_label(
@@ -2886,6 +2938,7 @@ def _gpu_row_label(
         shared_limit,
         violations,
         exclusive,
+        disabled,
     )
     return (marker + content)[:width].ljust(width)
 
@@ -3328,7 +3381,12 @@ def _print_fallback(config: Config, store: LedgerStore) -> None:
     now = utc_now()
     print("GPUBK TUI fallback")
     print(f"{administrator_display_lines(administrator_info(config))[0]}; details: bk info")
-    print(f"data={config.data_dir} shared_capacity={config.max_shared_users} slots/GPU")
+    print(
+        f"data={config.data_dir} shared_capacity={config.max_shared_users} slots/GPU "
+        f"enabled_GPUs={len(config.enabled_gpus)}/{config.gpu_count}"
+    )
+    if config.disabled_gpus:
+        print(f"administrator-disabled GPUs: {','.join(map(str, config.disabled_gpus))}")
     print("active reservations:")
     active = list_active(store.load(), now)
     id_width = _visible_id_width(active)
