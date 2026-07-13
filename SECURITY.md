@@ -95,14 +95,14 @@ Supported security boundaries:
   discovered `/etc/gpubk/config.json` or an explicit `BK_CONFIG_FILE`. GPUbk canonicalizes
   its parent, pins every directory component and the leaf by file descriptor, rejects
   replaceable non-sticky directories, and never follows a leaf symlink.
-- A monitor targeting a group-writable data directory requires a trusted root-owned system
-  or external configuration and matching numeric `monitor_uid`. This prevents accidental or
-  misconfigured telemetry writers that still use GPUbk; it does not stop a group member
-  from bypassing GPUbk and modifying group-writable files directly.
+- A monitor targeting a group- or other-writable data directory requires a trusted root-owned
+  system or external configuration and matching numeric `monitor_uid`. This prevents accidental
+  or misconfigured telemetry writers that still use GPUbk; it does not stop a trusted participant
+  from bypassing GPUbk and modifying shared-writable files directly.
 - `usage/collector.json` is an atomic, versioned liveness hint. Its PID, hostname, and
   freshness are operator diagnostics, not proof of identity, authorization, or lock ownership;
   its capability gaps include stable device identifiers, process telemetry, and numeric process
-  identity attribution. A group member who can modify the data directory can also replace this
+  identity attribution. A local account that can modify the data directory can also replace this
   advisory file.
 - Fatal collector exits never overwrite the last heartbeat with a graceful `stopped` state.
   Partial rollups are flushed best-effort, the original error remains the service exit cause,
@@ -115,9 +115,17 @@ Supported security boundaries:
 
 Administrator responsibilities:
 
-- Configure a dedicated Unix group and correct setgid directory permissions.
+- Choose the local trust domain explicitly. `bk admin init` defaults to open cooperative access
+  (`0666` files and `0777` directories) so every local account can participate without a new
+  Unix group. In that mode every local account can also bypass GPUbk and replace shared data;
+  use `--access group --group NAME` when only a subset of accounts should be trusted.
+- Do not add the sticky bit to the direct-file open mode. Cross-UID transactions must atomically
+  replace the common ledger, which a sticky directory would deny after another UID created it.
+  Mutually untrusted local accounts require a credential-checking broker or kernel enforcement,
+  not broader direct-file permissions.
+- For group access, configure the existing Unix group and correct setgid directory permissions.
 - On a shared deployment, keep the system or external configuration in a root-owned
-  directory such as `/etc/gpubk`, outside the group-writable ledger directory. Put one
+  directory such as `/etc/gpubk`, outside the shared-writable ledger directory. Put one
   absolute `data_dir` in that file so every invocation resolves the same ledger. File mode
   alone cannot prevent rename or deletion by a user who can write its parent directory.
 - Verify `flock` and atomic rename behavior on the actual NFS/FUSE mount.

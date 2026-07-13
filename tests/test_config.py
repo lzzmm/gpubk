@@ -10,6 +10,11 @@ from bk.config import Config, load_config
 
 
 class ConfigTests(unittest.TestCase):
+    def test_access_mode_is_derived_from_directory_permissions(self):
+        self.assertEqual(Config(Path("/tmp/private"), dir_mode=0o700).access_mode, "private")
+        self.assertEqual(Config(Path("/tmp/group"), dir_mode=0o2770).access_mode, "group")
+        self.assertEqual(Config(Path("/tmp/all"), dir_mode=0o777).access_mode, "all")
+
     def test_slot_field_preserves_existing_positional_constructor_order(self):
         config = Config(Path("/tmp/bk-config-order"), 8, 4)
 
@@ -32,6 +37,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.data_dir, Path(tmp) / "bk")
             self.assertEqual(config.file_mode, 0o600)
             self.assertEqual(config.dir_mode, 0o700)
+            self.assertEqual(config.access_mode, "private")
             self.assertEqual(config.slot_minutes, 5)
             self.assertEqual(config.slot_seconds, 300)
             self.assertIsNone(config.config_file)

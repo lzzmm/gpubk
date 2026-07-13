@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Add `bk admin init`, a guided, dry-runnable, idempotent shared-server initializer with atomic
+  root configuration writes. It defaults to group-free access for all local users, keeps an
+  existing Unix group as an optional trust boundary, and refuses silent group creation, user
+  membership changes, background-service activation, or policy replacement on non-empty data.
 - Make bundled Codex Skill installation resolve to an absolute per-user directory, reject
   force-replacing symbolic links or an active working tree, and restore the previous Skill when
   staged replacement fails.

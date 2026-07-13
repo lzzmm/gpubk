@@ -142,6 +142,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(payload["effective"]["monitor_interval_seconds"], 5.0)
             self.assertEqual(payload["effective"]["monitor_rollup_seconds"], 300)
             self.assertEqual(payload["effective"]["tui_refresh_seconds"], 2.5)
+            self.assertEqual(payload["effective"]["access_mode"], "private")
             self.assertEqual(payload["effective"]["worker_max_parallel"], 20)
             self.assertEqual(payload["effective"]["worker_effective_max_parallel"], 20)
             self.assertEqual(

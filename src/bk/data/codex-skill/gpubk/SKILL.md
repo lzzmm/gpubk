@@ -130,6 +130,8 @@ evidence of unattended command execution.
   `policy.monitoring.collector.stable_device_identifier_gap` and
   `policy.monitoring.collector.process_identity_gap`; a fresh degraded collector is not sufficient.
 - Do not delete journal or lock files manually.
+- Never apply `bk admin init` without an explicit administrator request. Use its `--dry-run`
+  form first; `access=all` means every local account is inside the cooperative trust boundary.
 - Do not enable a worker, monitor, or service on a shared server without the user's or administrator's approval.
 - Do not disable `worker_live_guard` merely to make a scheduled command start sooner.
 - Before an approved service deployment, run `bk doctor --probe --json --strict` as the configured

@@ -40,6 +40,10 @@ bk --version
 bk --help
 ```
 
+That is enough for a private installation: run `bk` immediately. A shared
+server needs one administrator initialization, described below; ordinary users
+still only run `bk`.
+
 Published wheels work with distribution-provided installers. Before installing
 from a source checkout or source archive, upgrade pip in that environment:
 
@@ -486,7 +490,42 @@ terminates the allocator process group before propagating. See the
 
 ## Shared Server Setup
 
-Create one setgid directory for the lab group:
+After making the `bk` command available to users, run the guided initializer:
+
+```bash
+sudo bk admin init
+```
+
+It detects the GPU count, previews every change, and asks for confirmation. The
+default is **open cooperative access**: every local account may use GPUbk, no
+new Unix group is created, the root-owned configuration is written to
+`/etc/gpubk/config.json`, and shared data defaults to `/var/lib/gpubk`.
+
+Useful non-interactive forms:
+
+```bash
+bk admin init --dry-run --gpu-count 8       # no root and no writes
+sudo bk admin init --yes                    # accept detected/default values
+sudo bk admin init --data-dir /data2/shared/gpubk
+sudo bk admin init --access group --group gpuusers
+```
+
+Group access is optional and uses an existing group; the initializer never
+creates groups or changes memberships. It also refuses to change policy for a
+non-empty data directory. Initialization makes booking ready immediately but
+does not silently enable a background monitor or systemd linger policy.
+
+Open access uses files `0666` and directories `0777`. The sticky bit cannot be
+used because writers must atomically replace the common ledger. Consequently,
+all local accounts are trusted participants and can bypass GPUbk to replace
+shared data. Choose group access when only part of the host should be trusted;
+use a broker or kernel-enforced design when mutually untrusted users are in
+scope.
+
+### Manual group setup
+
+The equivalent advanced setup begins by creating a setgid directory for an
+existing lab group:
 
 ```bash
 sudo install -d -m 2770 -o root -g gpuusers /data2/shared/bk
@@ -574,8 +613,8 @@ opens the configured parent chain and file by descriptor and rejects that layout
 For a single-user installation, the backward-compatible default remains
 `$BK_DATA_DIR/config.json` whenever `BK_DATA_DIR` is explicitly selected.
 
-A monitor writing to a group-writable data directory has stricter checks: it
-requires a trusted root-owned external or system configuration, a configured
+A monitor writing to a group- or other-writable data directory has stricter
+checks: it requires a trusted root-owned external or system configuration, a configured
 `monitor_uid`, and an exact match with the process UID. Exit status `77` means
 the process is not the configured writer. Single-user private directories do
 not require this role setting. Applied usage maintenance and migration use the

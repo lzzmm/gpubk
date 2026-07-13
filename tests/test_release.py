@@ -60,6 +60,18 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("## 安装", chinese)
         self.assertNotIn("The detailed guide below is currently in Chinese.", english)
 
+    def test_shared_server_setup_defaults_to_explicit_group_free_initialization(self):
+        english = (ROOT / "README.md").read_text(encoding="utf-8")
+        chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+        security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+
+        for text in (english, chinese):
+            self.assertIn("sudo bk admin init", text)
+            self.assertIn("--access group --group gpuusers", text)
+            self.assertIn("0777", text)
+        self.assertIn("defaults to open cooperative access", security)
+        self.assertIn("sticky bit", security)
+
     def test_telemetry_contract_is_packaged_and_linked(self):
         telemetry = (ROOT / "TELEMETRY.md").read_text(encoding="utf-8")
         manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")

@@ -503,6 +503,7 @@ def build_agent_context(
             "shared_memory_reserve_mb": config.shared_memory_reserve_mb,
             "queue_search_hours": config.queue_search_hours,
             "ledger_retention_days": config.ledger_retention_days,
+            "access_mode": config.access_mode,
             "storage_gid": config.storage_gid,
             "worker_live_guard": config.worker_live_guard,
             "worker_max_parallel": config.worker_max_parallel,

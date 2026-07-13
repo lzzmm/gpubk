@@ -190,6 +190,14 @@ class Config:
         return max(1, min(self.worker_max_parallel, scheduling_capacity))
 
     @property
+    def access_mode(self) -> str:
+        if self.dir_mode & stat.S_IWOTH:
+            return "all"
+        if self.dir_mode & stat.S_IWGRP:
+            return "group"
+        return "private"
+
+    @property
     def config_path(self) -> Path:
         return self.config_file or self.data_dir / "config.json"
 

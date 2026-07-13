@@ -39,6 +39,9 @@ bk --version
 bk --help
 ```
 
+个人安装到这里已经完成，可以直接运行 `bk`。多人服务器只需要管理员再执行一次下面的
+初始化；普通用户仍然只需使用 `bk`。
+
 通过 PyPI 发布的 wheel 可直接使用系统自带 installer。若从 Git 源码目录或 sdist
 安装，请先升级当前环境里的 pip：
 
@@ -411,7 +414,37 @@ allocator 进程组再继续抛出中断。完整格式见
 
 ## 多人服务器配置
 
-为实验室用户组创建 setgid 目录：
+确保所有用户都能运行 `bk` 后，管理员执行引导式初始化：
+
+```bash
+sudo bk admin init
+```
+
+命令会自动探测 GPU 数量、先展示全部变更并要求确认。默认使用**开放协作模式**：所有
+本机账号都能使用 GPUbk，不创建新 Unix 用户组；root 配置写入
+`/etc/gpubk/config.json`，共享数据默认放在 `/var/lib/gpubk`。
+
+常用的非交互形式：
+
+```bash
+bk admin init --dry-run --gpu-count 8       # 不需要 root，不写文件
+sudo bk admin init --yes                    # 接受探测结果与默认值
+sudo bk admin init --data-dir /data2/shared/gpubk
+sudo bk admin init --access group --group gpuusers
+```
+
+用户组模式是可选项，并且只使用已经存在的组；初始化命令不会擅自创建组或修改成员关系。
+它也拒绝对非空数据目录直接更换策略。初始化完成后预约立即可用，但不会偷偷启动 monitor
+或修改 systemd linger 策略。
+
+开放模式使用 `0666` 文件和 `0777` 目录。这里不能使用 sticky bit，因为不同用户必须
+原子替换同一个公共台账。因此开放模式会把所有本机账号视为可信参与者，他们也能绕过
+GPUbk 直接替换共享数据。若只信任部分账号，请选择用户组模式；若本机用户彼此不可信，
+应采用本地 broker 或内核强制隔离，而不是继续放宽文件权限。
+
+### 手工配置用户组模式
+
+等价的高级配置从为已有实验室用户组创建 setgid 目录开始：
 
 ```bash
 sudo install -d -m 2770 -o root -g gpuusers /data2/shared/bk
@@ -489,8 +522,9 @@ XDG 目录规范，只采用非空绝对路径；相对或空值分别回退到 
 这种部署。显式选择 `BK_DATA_DIR` 时，单用户安装继续兼容
 `$BK_DATA_DIR/config.json` 默认路径。
 
-向组可写目录写入遥测的 monitor 会执行更严格的检查：必须使用可信且 root-owned 的
-外部或系统配置，配置 `monitor_uid`，且进程 UID 必须完全一致。退出码 `77` 表示当前
+向 group 或 other 可写目录写入遥测的 monitor 会执行更严格的检查：必须使用可信且
+root-owned 的外部或系统配置，配置 `monitor_uid`，且进程 UID 必须完全一致。退出码
+`77` 表示当前
 进程不是指定写入者。实际执行遥测维护和迁移也要求同一角色，dry-run 仍可由普通用户
 查看。单用户私有目录不要求配置该角色。
 任一守护进程返回 `78` 都表示其生效策略与台账不一致。不要改限制后盲目重试；先检查

@@ -119,6 +119,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 return 0
             if head == "skill":
                 return _skill_command(argv[1:])
+            if head == "admin":
+                from .admin import run_admin_cli
+
+                return run_admin_cli(argv[1:])
             if head == "mcp":
                 from .mcp_server import main as mcp_main
 
@@ -1189,7 +1193,8 @@ def _config_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         f"shared={effective['max_shared_users']} queue={effective['queue_search_hours']}h"
     )
     print(
-        f"storage: data={effective['data_dir']} modes={effective['file_mode']}/"
+        f"storage: data={effective['data_dir']} access={effective['access_mode']} "
+        f"modes={effective['file_mode']}/"
         f"{effective['dir_mode']} gid="
         f"{effective['storage_gid'] if effective['storage_gid'] is not None else 'directory'} "
         f"backups={effective['backup_keep']}"
@@ -1229,6 +1234,7 @@ def _effective_config(config: Config) -> dict:
     return {
         "data_dir": str(config.data_dir),
         "config_file": str(config.config_path),
+        "access_mode": config.access_mode,
         "gpu_count": config.gpu_count,
         "slot_minutes": config.slot_minutes,
         "max_shared_users": config.max_shared_users,
@@ -2199,6 +2205,7 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         "healthy": healthy,
         "ready": ready,
         "data_dir": str(config.data_dir),
+        "access_mode": config.access_mode,
         "configured_gpu_count": config.gpu_count,
         "booking_slot_minutes": config.slot_minutes,
         "monitor_uid": config.monitor_uid,
@@ -2617,6 +2624,7 @@ AGENTS AND ADMIN
   bk agent context               stable machine-readable context
   bk agent recommend 2 1h       read-only legal placement
   bk mcp / bk skill install      MCP server or bundled Codex skill
+  bk admin init                  initialize a shared server
   bk config [--json]            inspect effective config and policy
   bk doctor --probe --strict     verify deployment prerequisites
   bk doctor --require-worker     verify this UID's scheduled-job worker
