@@ -42,6 +42,7 @@ from bk.tui import (
     _editor_slot_usage_text,
     _footer_label,
     _gpu_label,
+    _gpu_metrics_header,
     _gpu_row_label,
     _header_lines,
     _handle_add_key,
@@ -59,6 +60,8 @@ from bk.tui import (
     _reservation_palette,
     _reservation_color_map,
     _reservation_gpu_text,
+    _reservation_detail_lines,
+    _reservation_view_start,
     _refresh_collector_status,
     _refresh_worker_status,
     _resolve_tui_theme,
@@ -158,6 +161,58 @@ class TuiAddPreviewTests(unittest.TestCase):
             self.assertLessEqual(len(footer), width - 1)
             self.assertIn(control, footer)
             self.assertTrue(footer.rstrip().endswith(ending), footer)
+
+    def test_editor_footer_keeps_commit_cancel_and_primary_controls_at_eighty_columns(self):
+        preview = AddPreview(self.start, self.end, (0,), 0, MODE_SHARED, True, blink=True)
+
+        add_footer = _footer_label(TuiState(add_mode=True), preview, 80)
+        edit_footer = _footer_label(TuiState(edit_mode=True), preview, 80)
+
+        for footer in (add_footer, edit_footer):
+            self.assertLessEqual(len(footer), 79)
+            self.assertIn("Space GPU", footer)
+            self.assertIn("s/x", footer)
+            self.assertIn("f first", footer)
+            self.assertIn("Esc", footer)
+            self.assertTrue(footer.endswith("?"), footer)
+        self.assertIn("Enter book", add_footer)
+        self.assertIn("Enter save", edit_footer)
+
+    def test_reservation_view_follows_selection_without_renumbering(self):
+        self.assertEqual(_reservation_view_start(12, 4, -1), 0)
+        self.assertEqual(_reservation_view_start(12, 4, 3), 0)
+        self.assertEqual(_reservation_view_start(12, 4, 4), 1)
+        self.assertEqual(_reservation_view_start(12, 4, 9), 6)
+        self.assertEqual(_reservation_view_start(12, 4, 11), 8)
+        self.assertEqual(_reservation_view_start(3, 4, 2), 0)
+
+    def test_reservation_details_are_readable_but_keep_other_users_read_only(self):
+        reservation = {
+            "id": "abcdef12-3456-7890-abcd-ef1234567890",
+            "uid": 1001,
+            "username": "alice",
+            "mode": MODE_SHARED,
+            "gpus": [0, 2],
+            "start_at": "2030-01-01T09:00:00Z",
+            "end_at": "2030-01-01T10:30:00Z",
+            "status": "active",
+            "share_units": 3,
+            "expected_memory_mb": 12288,
+        }
+
+        lines = _reservation_detail_lines(
+            reservation,
+            Config(data_dir=Path("/tmp/gpubk-detail-test"), gpu_count=4, max_shared_users=4),
+            Actor(uid=1002, username="bob"),
+        )
+        text = "\n".join(lines)
+
+        self.assertIn(reservation["id"], text)
+        self.assertIn("alice (UID 1001) - read-only", text)
+        self.assertIn("GPUs: 0,2", text)
+        self.assertIn("request 3; server max 4", text)
+        self.assertIn("Expected VRAM/GPU: 12.0 GiB", text)
+        self.assertIn("Duration: 1h30m", text)
 
     def test_help_pages_explain_ambiguous_keys_and_offer_a_quick_tour(self):
         pages = {title: dict(entries) for title, entries in HELP_PAGES}
@@ -1523,10 +1578,44 @@ class TuiAddPreviewTests(unittest.TestCase):
         label = _gpu_label(GpuSnapshot(index=0, name="unknown"), 30, peak_shared=4, shared_limit=4)
         narrow = _gpu_label(GpuSnapshot(index=0, name="unknown"), 20, peak_shared=4, shared_limit=4)
 
-        self.assertIn("G0", label)
+        self.assertEqual(label.split()[0], "0")
         self.assertIn("4/4", label)
         self.assertIn("4/4", narrow)
         self.assertNotIn("unknown", label)
+
+    def test_compact_gpu_header_aligns_with_row_metrics(self):
+        gpu = GpuSnapshot(
+            index=7,
+            name="Sim Pro 6000",
+            memory_used_mb=4096,
+            memory_total_mb=98304,
+            utilization_percent=72,
+        )
+        width = _timeline_label_width(80)
+        header = _gpu_metrics_header(width)
+        row = _gpu_row_label(gpu, width, peak_shared=2, shared_limit=4)
+
+        self.assertEqual(width, 21)
+        self.assertEqual(len(header), width)
+        self.assertEqual(header.index("GPU") + len("GPU"), row.index("7") + len("7"))
+        self.assertEqual(header.index("Cap") + len("Cap"), row.index("2/4") + len("2/4"))
+        self.assertEqual(header.index("Util") + len("Util"), row.index("72%") + len("72%"))
+        self.assertEqual(header.index("Free") + len("Free"), row.index("92.0G") + len("92.0G"))
+
+    def test_gpu_label_compacts_three_digit_free_memory(self):
+        gpu = GpuSnapshot(
+            index=0,
+            name="large-memory",
+            memory_used_mb=1024,
+            memory_total_mb=145 * 1024,
+            utilization_percent=100,
+        )
+
+        label = _gpu_label(gpu, 20, peak_shared=4, shared_limit=4)
+
+        self.assertEqual(len(label), 20)
+        self.assertIn("144G", label)
+        self.assertIn("100%", label)
 
     def test_gpu_metric_columns_do_not_move_when_shared_capacity_changes(self):
         gpu = GpuSnapshot(
@@ -1601,7 +1690,7 @@ class TuiAddPreviewTests(unittest.TestCase):
         )
 
         label = _gpu_label(gpu, 30, peak_shared=0, shared_limit=2)
-        narrower = _gpu_label(gpu, 24, peak_shared=0, shared_limit=2)
+        narrower = _gpu_label(gpu, 20, peak_shared=0, shared_limit=2)
 
         self.assertIn("31.3G", label)
         self.assertIn("26C", label)
