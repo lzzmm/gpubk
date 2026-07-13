@@ -18,13 +18,17 @@ from bk.admin import (
     INSTALL_MANIFEST_MODE,
     _detected_gpu_count,
     _validate_plan,
+    apply_admin_gpu_policy,
     apply_admin_init,
     apply_admin_system_services_install,
     apply_admin_system_services_uninstall,
     apply_admin_uninstall,
     inspect_admin_init,
+    inspect_admin_gpu_policy,
+    inspect_admin_gpu_policy_recovery,
     inspect_admin_system_services,
     inspect_admin_uninstall,
+    recover_admin_gpu_policy,
     run_admin_cli,
 )
 from bk.cli import main as bk_main
@@ -33,6 +37,7 @@ from bk.config import (
     BROKER_DIR_MODE,
     BROKER_FILE_MODE,
     BROKER_GROUP_SOCKET_MODE,
+    load_config,
 )
 from bk.gpu import GpuSnapshot
 from bk.models import BookingError
@@ -243,6 +248,10 @@ class AdminInitTests(unittest.TestCase):
                 "--json",
                 "--gpu-count",
                 "8",
+                "--disabled-gpus",
+                "7",
+                "--gpu-priority",
+                "6=10,7=20",
                 "--service-user",
                 str(identity.uid),
                 "--broker-socket",
@@ -260,6 +269,8 @@ class AdminInitTests(unittest.TestCase):
             payload = json.loads(output.getvalue())
             self.assertEqual(payload["status"], "dry-run")
             self.assertEqual(payload["access"]["mode"], "all")
+            self.assertEqual(payload["disabled_gpus"], [7])
+            self.assertEqual(payload["gpu_priority"], {"6": 10, "7": 20})
             self.assertEqual(payload["access"]["file_mode"], "0644")
             self.assertEqual(payload["access"]["dir_mode"], "0755")
             self.assertEqual(payload["access"]["socket_mode"], "0666")
@@ -445,6 +456,107 @@ class AdminInitTests(unittest.TestCase):
 
         self.assertEqual(status, 1)
         self.assertEqual(json.loads(output.getvalue()), inspection)
+
+    def test_gpu_policy_json_apply_emits_one_final_document(self):
+        config_file = Path("/etc/gpubk/config.json")
+        policy = admin_module.AdminGpuPolicyPlan(
+            config_file=config_file,
+            data_dir=Path("/var/lib/gpubk"),
+            broker_socket=Path("/run/gpubk/broker.sock"),
+            service=AdminIdentity(1003, "admin", 1003),
+            current_disabled_gpus=(),
+            desired_disabled_gpus=(7,),
+            current_gpu_priority=(),
+            desired_gpu_priority=((6, 10),),
+            current_document={"gpu_count": 8},
+            desired_document={
+                "gpu_count": 8,
+                "disabled_gpus": [7],
+                "gpu_priority": {"6": 10},
+            },
+            blockers=(),
+        )
+        result = {
+            "schema_version": admin_module.ADMIN_SCHEMA_VERSION,
+            "kind": "admin-gpu-policy",
+            "status": "updated",
+            "config_file": str(config_file),
+            "disabled_gpus": [7],
+            "gpu_priority": {"6": 10},
+        }
+        output = StringIO()
+        with (
+            mock.patch("bk.admin.inspect_admin_gpu_policy", return_value=policy),
+            mock.patch(
+                "bk.admin.apply_admin_gpu_policy",
+                return_value=result,
+            ) as apply_policy,
+            redirect_stdout(output),
+        ):
+            status = run_admin_cli(
+                [
+                    "gpu-policy",
+                    "--config-file",
+                    str(config_file),
+                    "--disabled-gpus",
+                    "7",
+                    "--gpu-priority",
+                    "6=10",
+                    "--yes",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["status"], "updated")
+        self.assertEqual(payload["inspection"]["status"], "planned")
+        apply_policy.assert_called_once_with(policy)
+
+    def test_gpu_policy_json_recovery_emits_one_final_document(self):
+        config_file = Path("/etc/gpubk/config.json")
+        inspection = {
+            "schema_version": admin_module.ADMIN_SCHEMA_VERSION,
+            "kind": "admin-gpu-policy-recovery",
+            "status": "ready",
+            "config_file": str(config_file),
+            "journal": "/etc/gpubk/config-update.json",
+            "blockers": [],
+        }
+        result = {
+            "schema_version": admin_module.ADMIN_SCHEMA_VERSION,
+            "kind": "admin-gpu-policy-recovery",
+            "status": "recovered",
+            "config_file": str(config_file),
+        }
+        output = StringIO()
+        with (
+            mock.patch(
+                "bk.admin.inspect_admin_gpu_policy_recovery",
+                return_value=inspection,
+            ),
+            mock.patch(
+                "bk.admin.recover_admin_gpu_policy",
+                return_value=result,
+            ) as recover_policy,
+            redirect_stdout(output),
+        ):
+            status = run_admin_cli(
+                [
+                    "gpu-policy",
+                    "--config-file",
+                    str(config_file),
+                    "--recover",
+                    "--yes",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["status"], "recovered")
+        self.assertEqual(payload["inspection"], inspection)
+        recover_policy.assert_called_once_with(config_file)
 
     def test_noninteractive_apply_requires_yes_and_emits_a_plan(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -979,6 +1091,167 @@ class AdminInitTests(unittest.TestCase):
 
             self.assertEqual(inspection["status"], "blocked")
             self.assertTrue(any("disable --now" in item for item in inspection["blockers"]))
+
+    def test_gpu_policy_update_is_atomic_and_preserves_other_configuration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.prepare_parents(root)
+            plan = self.plan(
+                root,
+                disabled_gpus=(7,),
+                gpu_priority=((6, 10),),
+            )
+            apply_admin_init(plan, require_root=False)
+            before = json.loads(plan.config_file.read_text(encoding="utf-8"))
+
+            policy = inspect_admin_gpu_policy(
+                plan.config_file,
+                disabled_gpus="6,7",
+                gpu_priority="5=20,6=10",
+                expected_owner=os.geteuid(),
+            )
+            result = apply_admin_gpu_policy(policy, require_root=False)
+
+            after = json.loads(plan.config_file.read_text(encoding="utf-8"))
+            manifest = json.loads(
+                (plan.config_file.parent / "install.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(result["status"], "updated")
+            self.assertEqual(after["disabled_gpus"], [6, 7])
+            self.assertEqual(after["gpu_priority"], {"5": 20, "6": 10})
+            self.assertEqual(after["data_dir"], before["data_dir"])
+            self.assertEqual(
+                manifest["config_sha256"],
+                admin_module._sha256(plan.config_file.read_bytes()),
+            )
+            self.assertEqual(len(manifest["config_updates"]), 1)
+            self.assertFalse(
+                (plan.config_file.parent / "config-update.json").exists()
+            )
+
+    def test_gpu_policy_update_requires_stopped_broker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.prepare_parents(root)
+            plan = self.plan(root)
+            apply_admin_init(plan, require_root=False)
+            with mock.patch("bk.admin._transfer_socket_state", return_value="active"):
+                policy = inspect_admin_gpu_policy(
+                    plan.config_file,
+                    disabled_gpus="7",
+                    expected_owner=os.geteuid(),
+                )
+                self.assertTrue(any("broker is running" in item for item in policy.blockers))
+                with self.assertRaisesRegex(BookingError, "broker is running"):
+                    apply_admin_gpu_policy(policy, require_root=False)
+
+    def test_gpu_policy_write_failure_rolls_back_both_trusted_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.prepare_parents(root)
+            plan = self.plan(root)
+            apply_admin_init(plan, require_root=False)
+            manifest_path = plan.config_file.parent / "install.json"
+            config_before = plan.config_file.read_bytes()
+            manifest_before = manifest_path.read_bytes()
+            policy = inspect_admin_gpu_policy(
+                plan.config_file,
+                disabled_gpus="7",
+                expected_owner=os.geteuid(),
+            )
+
+            with mock.patch(
+                "bk.admin._write_manifest",
+                side_effect=OSError("injected manifest failure"),
+            ):
+                with self.assertRaisesRegex(OSError, "injected manifest failure"):
+                    apply_admin_gpu_policy(policy, require_root=False)
+
+            self.assertEqual(plan.config_file.read_bytes(), config_before)
+            self.assertEqual(manifest_path.read_bytes(), manifest_before)
+            self.assertFalse(
+                (plan.config_file.parent / "config-update.json").exists()
+            )
+
+    def test_incomplete_gpu_policy_rollback_blocks_startup_until_recovered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.prepare_parents(root)
+            plan = self.plan(root)
+            apply_admin_init(plan, require_root=False)
+            config_before = plan.config_file.read_bytes()
+            manifest_path = plan.config_file.parent / "install.json"
+            manifest_before = manifest_path.read_bytes()
+            policy = inspect_admin_gpu_policy(
+                plan.config_file,
+                disabled_gpus="7",
+                expected_owner=os.geteuid(),
+            )
+
+            with (
+                mock.patch(
+                    "bk.admin._write_manifest",
+                    side_effect=OSError("injected manifest failure"),
+                ),
+                mock.patch(
+                    "bk.admin._restore_config_update_snapshots",
+                    return_value=["injected rollback failure"],
+                ),
+            ):
+                with self.assertRaisesRegex(BookingError, "rollback was incomplete"):
+                    apply_admin_gpu_policy(policy, require_root=False)
+
+            journal = plan.config_file.parent / "config-update.json"
+            self.assertTrue(journal.is_file())
+            with mock.patch.dict(
+                os.environ,
+                {"BK_CONFIG_FILE": str(plan.config_file)},
+                clear=True,
+            ):
+                with self.assertRaisesRegex(ValueError, "must be recovered"):
+                    load_config()
+
+            inspection = inspect_admin_gpu_policy_recovery(
+                plan.config_file,
+                expected_owner=os.geteuid(),
+            )
+            self.assertEqual(inspection["status"], "ready")
+            result = recover_admin_gpu_policy(
+                plan.config_file,
+                require_root=False,
+            )
+
+            self.assertEqual(result["status"], "recovered")
+            self.assertEqual(plan.config_file.read_bytes(), config_before)
+            self.assertEqual(manifest_path.read_bytes(), manifest_before)
+            self.assertFalse(journal.exists())
+
+    def test_gpu_policy_recovery_accepts_admin_owned_crash_socket(self):
+        journal = {
+            "service_uid": 1003,
+            "service_gid": 1003,
+            "data_dir": "/var/lib/gpubk",
+            "broker_socket": "/run/gpubk/broker.sock",
+        }
+        blockers = mock.Mock(return_value=[])
+        with (
+            mock.patch(
+                "bk.admin._read_config_update_journal",
+                return_value=journal,
+            ),
+            mock.patch("bk.admin._validate_transfer_directory"),
+            mock.patch("bk.admin._admin_service_blockers", blockers),
+        ):
+            inspection = inspect_admin_gpu_policy_recovery(
+                Path("/etc/gpubk/config.json"),
+                expected_owner=0,
+            )
+
+        self.assertEqual(inspection["status"], "ready")
+        self.assertEqual(
+            blockers.call_args.kwargs["socket_owner_uids"],
+            {0, 1003},
+        )
 
 
 class AdminTransferTests(unittest.TestCase):

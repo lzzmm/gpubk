@@ -58,6 +58,22 @@ owners and history; only the trusted service identity and managed filesystem
 ownership change. If system units are tracked, their numeric `User=` and `Group=`
 values change in the same recoverable transaction.
 
+To change GPU eligibility or preference, use the managed transaction instead of
+editing `/etc/gpubk/config.json`:
+
+```bash
+sudo systemctl stop gpubk-broker.service gpubk-monitor.service
+sudo bk admin gpu-policy --disabled-gpus 7 --gpu-priority 6=10 --dry-run
+sudo bk admin gpu-policy --disabled-gpus 7 --gpu-priority 6=10 --yes
+sudo systemctl start gpubk-broker.service gpubk-monitor.service
+```
+
+An interrupted update leaves `config-update.json` beside the trusted config and
+blocks normal startup. Do not remove it manually. With both services stopped,
+run `sudo bk admin gpu-policy --recover --dry-run` and then repeat with `--yes`.
+Recovery restores the checksummed configuration and install manifest as one
+reviewed pair.
+
 ## Before upgrading a shared server
 
 1. Read the target release notes and run `bk doctor --json` with the installed

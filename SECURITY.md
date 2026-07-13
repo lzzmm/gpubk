@@ -122,6 +122,10 @@ Supported security boundaries:
   socket plus both writer locks, rejects links, hard links, special files, unknown top-level paths,
   owner or mode drift, and records root-only checksummed snapshots before changing ownership. A
   failed operation rolls back; an interrupted operation blocks uninstall until explicit recovery.
+- `bk admin gpu-policy` changes GPU eligibility and preference only while the broker and monitor
+  are stopped. It updates the root-owned config and install manifest with atomic replacement under
+  both writer locks. A root-only snapshot journal supports rollback after interruption; ordinary
+  startup fails closed until explicit recovery restores a verified prior pair.
 - `bk admin services` tracks root-owned system unit snapshots in the install manifest. Unit
   installation and removal are resumable, reject symlinks, hard links, owner/mode drift, and
   checksum drift, and restore reviewed pre-existing files. The generated broker and monitor run

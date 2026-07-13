@@ -96,6 +96,7 @@ bk book 1 30m                    # equivalent explicit command form
 bk 2 1h30m --mem 12g            # 12 GiB expected VRAM per GPU
 bk 1 1h --share 2               # request two integer shared slots per GPU
 bk s 1 2h --gpu 3               # explicit shared mode on GPU 3
+bk 1 1h --exclude 2,3           # automatic placement, except GPUs 2 and 3
 bk x 2 4h                        # exclusive mode
 bk 1 1h --at +30m                # human-friendly relative time
 bk 1 1h --at "tomorrow 09:00"   # local wall-clock time
@@ -567,6 +568,7 @@ sudo bk admin init --yes                         # owner: the user who invoked s
 sudo bk admin init --yes --service-user "$USER" # same choice, made explicitly
 sudo bk admin init --yes --service-user gpubk --data-dir /data2/shared/gpubk
 sudo bk admin init --yes --service-user gpubk --access group --group gpuusers
+sudo bk admin init --yes --disabled-gpus 7 --gpu-priority 6=10
 ```
 
 Group access is optional and only restricts who can connect to the socket. The
@@ -575,6 +577,24 @@ initializer never creates accounts, groups, or memberships. Ledger files use
 users can inspect scheduling state, but only the broker can mutate it. The
 broker authenticates each local connection from kernel peer credentials, not a
 client-supplied username or UID.
+
+An administrator can take unreliable GPUs out of new scheduling or lower their
+preference without editing trusted JSON. Larger priority levels are less
+preferred, but only break ties at the same earliest start time. Monitoring and
+history remain available for disabled GPUs. Stop both writers, preview, apply,
+then restart them:
+
+```bash
+sudo systemctl stop gpubk-broker.service gpubk-monitor.service
+sudo bk admin gpu-policy --disabled-gpus 7 --gpu-priority 6=10 --dry-run
+sudo bk admin gpu-policy --disabled-gpus 7 --gpu-priority 6=10 --yes
+sudo systemctl start gpubk-broker.service gpubk-monitor.service
+```
+
+Use `--enable-all` or `--clear-priority` to clear either policy. If power is lost
+during the update, leave `/etc/gpubk/config-update.json` in place and run
+`sudo bk admin gpu-policy --recover --dry-run`, followed by the same command with
+`--yes`. Normal startup fails closed until the prior trusted files are restored.
 
 For a reversible foreground trial before enabling system services, start the
 broker in a second terminal as the selected owner, without `sudo`:
@@ -680,6 +700,8 @@ socket policy in addition to scheduling settings:
   "gpu_count": 8,
   "slot_minutes": 5,
   "max_shared_users": 4,
+  "disabled_gpus": [7],
+  "gpu_priority": {"6": 10},
   "queue_search_hours": 168,
   "timeline_hours": 2,
   "lock_timeout_seconds": 10,

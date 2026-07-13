@@ -24,6 +24,7 @@ BROKER_GROUP_SOCKET_MODE = 0o660
 MAX_CONFIG_FILE_BYTES = 1024 * 1024
 CONFIG_VERSION = 1
 SYSTEM_CONFIG_FILE = Path("/etc/gpubk/config.json")
+CONFIG_UPDATE_JOURNAL_NAME = "config-update.json"
 MAX_GPU_COUNT = 1024
 MAX_SHARED_UNITS = 10_000
 MAX_QUEUE_SEARCH_HOURS = 10 * 365 * 24
@@ -689,6 +690,12 @@ def load_config() -> Config:
     else:
         config_file = data_dir / "config.json"
     external_config = explicit_config_file or system_config_file
+    update_journal = config_file.parent / CONFIG_UPDATE_JOURNAL_NAME
+    if external_config and os.path.lexists(update_journal):
+        raise ValueError(
+            "an interrupted administrator configuration update must be recovered; "
+            f"run: sudo bk admin gpu-policy --recover --config-file {config_file}"
+        )
     raw, config_owner_uid = _read_config_file(
         config_file,
         required=external_config,

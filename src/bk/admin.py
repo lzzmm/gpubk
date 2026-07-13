@@ -38,11 +38,14 @@ from .config import (
     BROKER_DIR_MODE,
     BROKER_FILE_MODE,
     BROKER_GROUP_SOCKET_MODE,
+    CONFIG_UPDATE_JOURNAL_NAME,
     CONFIG_VERSION,
     MAX_GPU_COUNT,
     MAX_SHARED_UNITS,
     SYSTEM_CONFIG_FILE,
     Config,
+    validate_gpu_list,
+    validate_gpu_priority,
 )
 from .fileio import fsync_directory, open_existing_regular
 from .gpu import detect_gpu_count, snapshot
@@ -54,6 +57,7 @@ from .systemd import DEFAULT_SYSTEM_UNIT_DIR, system_unit_names
 ADMIN_SCHEMA_VERSION = "gpubk.admin.v1"
 INSTALL_SCHEMA_VERSION = "gpubk.install.v1"
 TRANSFER_SCHEMA_VERSION = "gpubk.transfer.v1"
+CONFIG_UPDATE_SCHEMA_VERSION = "gpubk.config-update.v1"
 DEFAULT_SYSTEM_DATA_DIR = Path("/var/lib/gpubk")
 DEFAULT_BROKER_SOCKET = Path("/run/gpubk/broker.sock")
 CONFIG_DIRECTORY_MODE = 0o755
@@ -102,6 +106,8 @@ class AdminInitPlan:
     broker_socket_mode: int
     file_mode: int
     dir_mode: int
+    disabled_gpus: tuple[int, ...] = ()
+    gpu_priority: tuple[tuple[int, int], ...] = ()
 
     def config_document(self) -> dict:
         document = {
@@ -122,6 +128,12 @@ class AdminInitPlan:
         }
         if self.broker_gid is not None:
             document["broker_gid"] = self.broker_gid
+        if self.disabled_gpus:
+            document["disabled_gpus"] = list(self.disabled_gpus)
+        if self.gpu_priority:
+            document["gpu_priority"] = {
+                str(gpu): priority for gpu, priority in self.gpu_priority
+            }
         return document
 
     def public_document(self, *, status: str) -> dict:
@@ -143,6 +155,10 @@ class AdminInitPlan:
             "gpu_count": self.gpu_count,
             "slot_minutes": self.slot_minutes,
             "max_shared_users": self.max_shared_users,
+            "disabled_gpus": list(self.disabled_gpus),
+            "gpu_priority": {
+                str(gpu): priority for gpu, priority in self.gpu_priority
+            },
             "require_shared_memory": self.require_shared_memory,
             "service": {
                 "uid": self.service.uid,
@@ -216,6 +232,47 @@ class AdminTransferPlan:
         }
 
 
+@dataclass(frozen=True)
+class AdminGpuPolicyPlan:
+    config_file: Path
+    data_dir: Path
+    broker_socket: Path
+    service: AdminIdentity
+    current_disabled_gpus: tuple[int, ...]
+    desired_disabled_gpus: tuple[int, ...]
+    current_gpu_priority: tuple[tuple[int, int], ...]
+    desired_gpu_priority: tuple[tuple[int, int], ...]
+    current_document: dict
+    desired_document: dict
+    blockers: tuple[str, ...]
+
+    @property
+    def changed(self) -> bool:
+        return self.current_document != self.desired_document
+
+    def public_document(self, *, status: str) -> dict:
+        return {
+            "schema_version": ADMIN_SCHEMA_VERSION,
+            "kind": "admin-gpu-policy",
+            "status": status,
+            "config_file": str(self.config_file),
+            "current": {
+                "disabled_gpus": list(self.current_disabled_gpus),
+                "gpu_priority": {
+                    str(gpu): priority for gpu, priority in self.current_gpu_priority
+                },
+            },
+            "desired": {
+                "disabled_gpus": list(self.desired_disabled_gpus),
+                "gpu_priority": {
+                    str(gpu): priority for gpu, priority in self.desired_gpu_priority
+                },
+            },
+            "changed": self.changed,
+            "blockers": list(self.blockers),
+        }
+
+
 def run_admin_cli(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="bk admin",
@@ -245,6 +302,14 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         "--broker-socket", type=Path, default=DEFAULT_BROKER_SOCKET
     )
     init_parser.add_argument("--gpu-count", type=int)
+    init_parser.add_argument(
+        "--disabled-gpus",
+        help="comma-separated GPU IDs unavailable for new reservations",
+    )
+    init_parser.add_argument(
+        "--gpu-priority",
+        help="lower preference tiers as GPU=LEVEL pairs, e.g. 6=10,7=20",
+    )
     init_parser.add_argument("--slot-minutes", type=int)
     init_parser.add_argument("--max-shared-users", type=int)
     memory = init_parser.add_mutually_exclusive_group()
@@ -291,6 +356,41 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         "--dry-run", action="store_true", help="show the plan only"
     )
     transfer_parser.add_argument("--json", action="store_true")
+    policy_parser = commands.add_parser(
+        "gpu-policy",
+        help="inspect or safely update GPU eligibility and preference tiers",
+    )
+    policy_parser.add_argument(
+        "--config-file", type=Path, default=SYSTEM_CONFIG_FILE
+    )
+    disabled = policy_parser.add_mutually_exclusive_group()
+    disabled.add_argument(
+        "--disabled-gpus",
+        help="replace the full comma-separated disabled GPU list",
+    )
+    disabled.add_argument(
+        "--enable-all",
+        action="store_true",
+        help="clear the administrator-disabled GPU list",
+    )
+    priority = policy_parser.add_mutually_exclusive_group()
+    priority.add_argument(
+        "--gpu-priority",
+        help="replace preference tiers, e.g. 6=10,7=20; larger runs later",
+    )
+    priority.add_argument(
+        "--clear-priority",
+        action="store_true",
+        help="restore equal administrator preference for every GPU",
+    )
+    policy_parser.add_argument(
+        "--recover",
+        action="store_true",
+        help="roll back an interrupted managed configuration update",
+    )
+    policy_parser.add_argument("--yes", action="store_true")
+    policy_parser.add_argument("--dry-run", action="store_true")
+    policy_parser.add_argument("--json", action="store_true")
     uninstall_parser = commands.add_parser(
         "uninstall",
         help="safely remove administrator-managed server state",
@@ -362,6 +462,8 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         return _run_admin_uninstall(args)
     if args.action == "transfer":
         return _run_admin_transfer(args)
+    if args.action == "gpu-policy":
+        return _run_admin_gpu_policy(args)
 
     interactive = sys.stdin.isatty() and not args.yes and not args.json
     detected_gpu_count = _detected_gpu_count(args.gpu_count)
@@ -424,6 +526,133 @@ def run_admin_cli(argv: Sequence[str]) -> int:
             f"'bk broker' as {plan.service.username}"
         )
     return 0
+
+
+def _run_admin_gpu_policy(args: argparse.Namespace) -> int:
+    config_file = _absolute_path(args.config_file)
+    mutation_requested = any(
+        (
+            args.disabled_gpus is not None,
+            args.enable_all,
+            args.gpu_priority is not None,
+            args.clear_priority,
+        )
+    )
+    if args.recover:
+        if mutation_requested:
+            raise BookingError("--recover cannot be combined with policy changes")
+        inspection = inspect_admin_gpu_policy_recovery(config_file)
+        if not args.json:
+            _print_gpu_policy_recovery(inspection)
+        if args.dry_run:
+            if args.json:
+                print(json.dumps(inspection, ensure_ascii=False, sort_keys=True))
+            return 0
+        if inspection["blockers"]:
+            if args.json:
+                print(json.dumps(inspection, ensure_ascii=False, sort_keys=True))
+            else:
+                print(f"bk: {'; '.join(inspection['blockers'])}", file=sys.stderr)
+            return 2
+        if not args.yes:
+            if args.json:
+                print(json.dumps(inspection, ensure_ascii=False, sort_keys=True))
+            print("bk: pass --yes to recover this configuration update", file=sys.stderr)
+            return 1
+        result = recover_admin_gpu_policy(config_file)
+        if args.json:
+            print(
+                json.dumps(
+                    {**result, "inspection": inspection},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print("recovered: restored the prior trusted configuration and manifest")
+            _print_gpu_policy_restart_hint()
+        return 0
+
+    disabled_value: object = () if args.enable_all else args.disabled_gpus
+    priority_value: object = () if args.clear_priority else args.gpu_priority
+    plan = inspect_admin_gpu_policy(
+        config_file,
+        disabled_gpus=disabled_value,
+        gpu_priority=priority_value,
+    )
+    status = "blocked" if plan.blockers else ("planned" if plan.changed else "unchanged")
+    public_plan = plan.public_document(status="dry-run" if args.dry_run else status)
+    if not args.json:
+        _print_gpu_policy_plan(plan)
+    if not plan.changed or args.dry_run:
+        if args.json:
+            print(json.dumps(public_plan, ensure_ascii=False, sort_keys=True))
+        return 0
+    if plan.blockers:
+        if args.json:
+            print(json.dumps(public_plan, ensure_ascii=False, sort_keys=True))
+        else:
+            print(f"bk: {'; '.join(plan.blockers)}", file=sys.stderr)
+        return 2
+    if not args.yes:
+        if args.json:
+            print(json.dumps(public_plan, ensure_ascii=False, sort_keys=True))
+        print("bk: pass --yes to apply this GPU policy", file=sys.stderr)
+        return 1
+    result = apply_admin_gpu_policy(plan)
+    if args.json:
+        print(
+            json.dumps(
+                {**result, "inspection": public_plan},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+    else:
+        print(f"updated GPU policy: {plan.config_file}")
+        _print_gpu_policy_restart_hint()
+    return 0
+
+
+def _print_gpu_policy_plan(plan: AdminGpuPolicyPlan) -> None:
+    current_disabled = ",".join(map(str, plan.current_disabled_gpus)) or "none"
+    desired_disabled = ",".join(map(str, plan.desired_disabled_gpus)) or "none"
+    current_priority = ",".join(
+        f"{gpu}={priority}" for gpu, priority in plan.current_gpu_priority
+    ) or "equal"
+    desired_priority = ",".join(
+        f"{gpu}={priority}" for gpu, priority in plan.desired_gpu_priority
+    ) or "equal"
+    print("GPUBK GPU policy")
+    print(f"  config:            {plan.config_file}")
+    print(f"  disabled current:  {current_disabled}")
+    print(f"  disabled desired:  {desired_disabled}")
+    print(f"  priority current:  {current_priority}")
+    print(f"  priority desired:  {desired_priority}")
+    print(f"  change:            {'yes' if plan.changed else 'no'}")
+    for blocker in plan.blockers:
+        print(f"  blocked:           {blocker}")
+    if plan.changed and plan.blockers:
+        print(
+            "  stop first:        sudo systemctl stop "
+            "gpubk-broker.service gpubk-monitor.service"
+        )
+
+
+def _print_gpu_policy_recovery(inspection: dict) -> None:
+    print("GPUBK interrupted configuration update")
+    print(f"  config:  {inspection['config_file']}")
+    print(f"  status:  {inspection['status']}")
+    for blocker in inspection["blockers"]:
+        print(f"  blocked: {blocker}")
+
+
+def _print_gpu_policy_restart_hint() -> None:
+    print("next: restart the broker and monitor")
+    print(
+        "  systemd: sudo systemctl start "
+        "gpubk-broker.service gpubk-monitor.service"
+    )
 
 
 def _run_admin_services(args: argparse.Namespace) -> int:
@@ -708,6 +937,7 @@ def _load_admin_services_manifest(
     *,
     expected_owner: int,
 ) -> tuple[dict, dict]:
+    _reject_pending_config_update(config_file)
     if os.path.lexists(_transfer_journal_path(config_file)):
         raise BookingError(
             "an interrupted service-account transfer requires recovery before changing services"
@@ -946,6 +1176,320 @@ def _print_transfer_inspection(inspection: dict) -> None:
         print(f"  blocked:    {blocker}")
 
 
+def inspect_admin_gpu_policy(
+    config_file: Path,
+    *,
+    disabled_gpus: object = None,
+    gpu_priority: object = None,
+    expected_owner: int = 0,
+) -> AdminGpuPolicyPlan:
+    config_file = _absolute_path(config_file)
+    manifest, document = _load_admin_services_manifest(
+        config_file,
+        expected_owner=expected_owner,
+    )
+    gpu_count = document.get("gpu_count")
+    if isinstance(gpu_count, bool) or not isinstance(gpu_count, int):
+        raise BookingError("trusted configuration gpu_count is invalid")
+    try:
+        current_disabled = validate_gpu_list(
+            document.get("disabled_gpus"),
+            gpu_count,
+            "disabled_gpus",
+        )
+        current_priority = validate_gpu_priority(
+            document.get("gpu_priority"),
+            gpu_count,
+        )
+        desired_disabled = (
+            current_disabled
+            if disabled_gpus is None
+            else validate_gpu_list(disabled_gpus, gpu_count, "disabled_gpus")
+        )
+        desired_priority = (
+            current_priority
+            if gpu_priority is None
+            else validate_gpu_priority(gpu_priority, gpu_count)
+        )
+    except ValueError as exc:
+        raise BookingError(str(exc)) from exc
+
+    desired_document = dict(document)
+    if desired_disabled:
+        desired_document["disabled_gpus"] = list(desired_disabled)
+    else:
+        desired_document.pop("disabled_gpus", None)
+    if desired_priority:
+        desired_document["gpu_priority"] = {
+            str(gpu): priority for gpu, priority in desired_priority
+        }
+    else:
+        desired_document.pop("gpu_priority", None)
+
+    data_dir = _manifest_absolute_path(manifest, "data_dir")
+    broker_socket = _manifest_absolute_path(manifest, "broker_socket")
+    service_uid = _manifest_nonnegative_int(manifest, "service_uid")
+    service_gid = _manifest_nonnegative_int(manifest, "service_gid")
+    service = AdminIdentity(
+        service_uid,
+        _username_for_uid(service_uid),
+        service_gid,
+    )
+    owner_pair = {(service_uid, service_gid)}
+    _validate_transfer_directory(
+        data_dir,
+        owner_pair,
+        BROKER_DIR_MODE,
+        "data",
+    )
+    _validate_transfer_directory(
+        broker_socket.parent,
+        owner_pair,
+        BROKER_SOCKET_DIRECTORY_MODE,
+        "broker socket",
+    )
+    blockers = _admin_service_blockers(
+        data_dir,
+        broker_socket,
+        owner_pair=owner_pair,
+        socket_owner_uids={expected_owner, service_uid},
+    )
+    return AdminGpuPolicyPlan(
+        config_file=config_file,
+        data_dir=data_dir,
+        broker_socket=broker_socket,
+        service=service,
+        current_disabled_gpus=current_disabled,
+        desired_disabled_gpus=desired_disabled,
+        current_gpu_priority=current_priority,
+        desired_gpu_priority=desired_priority,
+        current_document=document,
+        desired_document=desired_document,
+        blockers=tuple(blockers),
+    )
+
+
+def apply_admin_gpu_policy(
+    plan: AdminGpuPolicyPlan,
+    *,
+    require_root: bool = True,
+) -> dict:
+    if require_root and os.geteuid() != 0:
+        raise BookingError(
+            "GPU policy updates must run as root; use sudo bk admin gpu-policy"
+        )
+    expected_owner = 0 if require_root else os.geteuid()
+    fresh = inspect_admin_gpu_policy(
+        plan.config_file,
+        disabled_gpus=plan.desired_disabled_gpus,
+        gpu_priority=plan.desired_gpu_priority,
+        expected_owner=expected_owner,
+    )
+    if fresh.current_document != plan.current_document:
+        raise BookingError("trusted configuration changed after review; inspect it again")
+    if fresh.desired_document != plan.desired_document:
+        raise BookingError("GPU policy plan changed after review; inspect it again")
+    if fresh.blockers:
+        raise BookingError("; ".join(fresh.blockers))
+    if not fresh.changed:
+        return {
+            "schema_version": ADMIN_SCHEMA_VERSION,
+            "kind": "admin-gpu-policy",
+            "status": "unchanged",
+            "config_file": str(plan.config_file),
+        }
+
+    owner_pair = (fresh.service.uid, fresh.service.primary_gid)
+    manifest_path = _manifest_path(fresh.config_file)
+    journal_path = _config_update_journal_path(fresh.config_file)
+    with _admin_service_guard(
+        fresh.data_dir,
+        fresh.broker_socket,
+        allowed_owner_pairs={owner_pair},
+        lock_owner=owner_pair,
+        socket_owner_uids={fresh.service.uid},
+        operation="GPU policy update",
+    ):
+        manifest = _read_manifest(manifest_path, expected_owner=expected_owner)
+        config_payload = _read_owned_regular_payload(
+            fresh.config_file,
+            expected_owner,
+            CONFIG_FILE_MODE,
+        )
+        if config_payload != _config_payload(fresh.current_document):
+            raise BookingError("trusted configuration changed while acquiring maintenance locks")
+        if manifest.get("config_sha256") != _sha256(config_payload):
+            raise BookingError("trusted configuration no longer matches the install manifest")
+
+        desired_payload = _config_payload(fresh.desired_document)
+        journal = _build_config_update_journal(
+            fresh,
+            config_payload=config_payload,
+            manifest_payload=_read_owned_regular_payload(
+                manifest_path,
+                expected_owner,
+                INSTALL_MANIFEST_MODE,
+            ),
+            expected_owner=expected_owner,
+        )
+        history = manifest.get("config_updates", [])
+        if not isinstance(history, list):
+            raise BookingError("install manifest configuration history is invalid")
+        updated_manifest = {
+            **manifest,
+            "config_sha256": _sha256(desired_payload),
+            "previous_config_sha256": None,
+            "config_updates": [
+                *history[-31:],
+                {
+                    "at": datetime.now(timezone.utc).isoformat(),
+                    "fields": ["disabled_gpus", "gpu_priority"],
+                    "from_sha256": _sha256(config_payload),
+                    "to_sha256": _sha256(desired_payload),
+                },
+            ],
+        }
+        _write_config_update_journal(journal_path, journal)
+        try:
+            _write_new_file(
+                fresh.config_file,
+                desired_payload,
+                CONFIG_FILE_MODE,
+                replace=True,
+            )
+            _write_manifest(manifest_path, updated_manifest, replace=True)
+            written_config = _read_owned_regular_payload(
+                fresh.config_file,
+                expected_owner,
+                CONFIG_FILE_MODE,
+            )
+            written_manifest = _read_manifest(
+                manifest_path,
+                expected_owner=expected_owner,
+            )
+            if written_config != desired_payload:
+                raise BookingError("GPU policy configuration verification failed")
+            if written_manifest.get("config_sha256") != _sha256(written_config):
+                raise BookingError("GPU policy manifest verification failed")
+        except BaseException as exc:
+            rollback_errors = _restore_config_update_snapshots(
+                fresh.config_file,
+                journal,
+            )
+            if rollback_errors:
+                raise BookingError(
+                    "GPU policy update failed and automatic rollback was incomplete "
+                    f"({'; '.join(rollback_errors)}); run gpu-policy --recover"
+                ) from exc
+            journal_path.unlink()
+            fsync_directory(journal_path.parent)
+            raise
+        journal_path.unlink()
+        fsync_directory(journal_path.parent)
+
+    return {
+        "schema_version": ADMIN_SCHEMA_VERSION,
+        "kind": "admin-gpu-policy",
+        "status": "updated",
+        "config_file": str(fresh.config_file),
+        "disabled_gpus": list(fresh.desired_disabled_gpus),
+        "gpu_priority": {
+            str(gpu): priority for gpu, priority in fresh.desired_gpu_priority
+        },
+    }
+
+
+def inspect_admin_gpu_policy_recovery(
+    config_file: Path,
+    *,
+    expected_owner: int = 0,
+) -> dict:
+    config_file = _absolute_path(config_file)
+    journal = _read_config_update_journal(
+        _config_update_journal_path(config_file),
+        config_file=config_file,
+        expected_owner=expected_owner,
+    )
+    service_uid = int(journal["service_uid"])
+    service_gid = int(journal["service_gid"])
+    data_dir = _absolute_path(Path(journal["data_dir"]))
+    broker_socket = _absolute_path(Path(journal["broker_socket"]))
+    owner_pair = {(service_uid, service_gid)}
+    _validate_transfer_directory(
+        data_dir,
+        owner_pair,
+        BROKER_DIR_MODE,
+        "data",
+    )
+    _validate_transfer_directory(
+        broker_socket.parent,
+        owner_pair,
+        BROKER_SOCKET_DIRECTORY_MODE,
+        "broker socket",
+    )
+    blockers = _admin_service_blockers(
+        data_dir,
+        broker_socket,
+        owner_pair=owner_pair,
+        socket_owner_uids={expected_owner, service_uid},
+    )
+    return {
+        "schema_version": ADMIN_SCHEMA_VERSION,
+        "kind": "admin-gpu-policy-recovery",
+        "status": "blocked" if blockers else "ready",
+        "config_file": str(config_file),
+        "journal": str(_config_update_journal_path(config_file)),
+        "blockers": blockers,
+    }
+
+
+def recover_admin_gpu_policy(
+    config_file: Path,
+    *,
+    require_root: bool = True,
+) -> dict:
+    if require_root and os.geteuid() != 0:
+        raise BookingError(
+            "configuration recovery must run as root; use sudo bk admin gpu-policy --recover"
+        )
+    expected_owner = 0 if require_root else os.geteuid()
+    inspection = inspect_admin_gpu_policy_recovery(
+        config_file,
+        expected_owner=expected_owner,
+    )
+    if inspection["blockers"]:
+        raise BookingError("; ".join(inspection["blockers"]))
+    config_file = _absolute_path(config_file)
+    journal_path = _config_update_journal_path(config_file)
+    journal = _read_config_update_journal(
+        journal_path,
+        config_file=config_file,
+        expected_owner=expected_owner,
+    )
+    owner_pair = (int(journal["service_uid"]), int(journal["service_gid"]))
+    with _admin_service_guard(
+        _absolute_path(Path(journal["data_dir"])),
+        _absolute_path(Path(journal["broker_socket"])),
+        allowed_owner_pairs={owner_pair},
+        lock_owner=owner_pair,
+        socket_owner_uids={expected_owner, owner_pair[0]},
+        operation="configuration recovery",
+    ):
+        errors = _restore_config_update_snapshots(config_file, journal)
+        if errors:
+            raise BookingError(
+                "configuration recovery is incomplete: " + "; ".join(errors)
+            )
+        journal_path.unlink()
+        fsync_directory(journal_path.parent)
+    return {
+        "schema_version": ADMIN_SCHEMA_VERSION,
+        "kind": "admin-gpu-policy-recovery",
+        "status": "recovered",
+        "config_file": str(config_file),
+    }
+
+
 def inspect_admin_uninstall(
     config_file: Path,
     *,
@@ -953,6 +1497,7 @@ def inspect_admin_uninstall(
     expected_owner: int = 0,
 ) -> dict:
     config_file = _absolute_path(config_file)
+    _reject_pending_config_update(config_file)
     journal_path = _transfer_journal_path(config_file)
     if os.path.lexists(journal_path):
         raise BookingError(
@@ -1310,6 +1855,7 @@ def _load_admin_transfer_plan(
     *,
     expected_owner: int,
 ) -> AdminTransferPlan:
+    _reject_pending_config_update(config_file)
     manifest_path = _manifest_path(config_file)
     manifest = _read_manifest(manifest_path, expected_owner=expected_owner)
     if manifest.get("admin_uid") != expected_owner:
@@ -1794,6 +2340,133 @@ def _transfer_journal_path(config_file: Path) -> Path:
     return config_file.parent / TRANSFER_JOURNAL_NAME
 
 
+def _config_update_journal_path(config_file: Path) -> Path:
+    return config_file.parent / CONFIG_UPDATE_JOURNAL_NAME
+
+
+def _reject_pending_config_update(config_file: Path) -> None:
+    journal_path = _config_update_journal_path(config_file)
+    if os.path.lexists(journal_path):
+        raise BookingError(
+            "an interrupted administrator configuration update must be recovered; "
+            f"run: sudo bk admin gpu-policy --recover --config-file {config_file}"
+        )
+
+
+def _build_config_update_journal(
+    plan: AdminGpuPolicyPlan,
+    *,
+    config_payload: bytes,
+    manifest_payload: bytes,
+    expected_owner: int,
+) -> dict:
+    return {
+        "schema_version": CONFIG_UPDATE_SCHEMA_VERSION,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "config_file": str(plan.config_file),
+        "data_dir": str(plan.data_dir),
+        "broker_socket": str(plan.broker_socket),
+        "service_uid": plan.service.uid,
+        "service_gid": plan.service.primary_gid,
+        "config_before": _transfer_file_snapshot(
+            plan.config_file,
+            config_payload,
+            expected_owner=expected_owner,
+            expected_mode=CONFIG_FILE_MODE,
+        ),
+        "manifest_before": _transfer_file_snapshot(
+            _manifest_path(plan.config_file),
+            manifest_payload,
+            expected_owner=expected_owner,
+            expected_mode=INSTALL_MANIFEST_MODE,
+        ),
+    }
+
+
+def _write_config_update_journal(path: Path, journal: dict) -> None:
+    payload = (
+        json.dumps(journal, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode()
+    _write_new_file(path, payload, INSTALL_MANIFEST_MODE, replace=False)
+
+
+def _read_config_update_journal(
+    path: Path,
+    *,
+    config_file: Path,
+    expected_owner: int,
+) -> dict:
+    if not os.path.lexists(path):
+        raise BookingError(f"configuration update journal is missing: {path}")
+    payload = _read_owned_regular_payload(
+        path,
+        expected_owner,
+        INSTALL_MANIFEST_MODE,
+    )
+    if len(payload) > 4 * 1024 * 1024:
+        raise BookingError("configuration update journal is unexpectedly large")
+    try:
+        journal = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise BookingError(f"configuration update journal is invalid JSON: {path}") from exc
+    if (
+        not isinstance(journal, dict)
+        or journal.get("schema_version") != CONFIG_UPDATE_SCHEMA_VERSION
+    ):
+        raise BookingError(f"unsupported configuration update journal: {path}")
+    if journal.get("config_file") != str(config_file):
+        raise BookingError("configuration update journal belongs to another config file")
+    for key in ("data_dir", "broker_socket"):
+        value = journal.get(key)
+        if not isinstance(value, str) or _absolute_path(Path(value)) != Path(value):
+            raise BookingError(f"configuration update journal field {key} is invalid")
+    for key in ("service_uid", "service_gid"):
+        value = journal.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise BookingError(f"configuration update journal field {key} is invalid")
+
+    config_snapshot = _validated_transfer_snapshot(journal.get("config_before"))
+    manifest_snapshot = _validated_transfer_snapshot(journal.get("manifest_before"))
+    try:
+        config_payload = base64.b64decode(
+            config_snapshot["content_b64"],
+            validate=True,
+        )
+        manifest_payload = base64.b64decode(
+            manifest_snapshot["content_b64"],
+            validate=True,
+        )
+        config_document = json.loads(config_payload)
+        manifest = json.loads(manifest_payload)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise BookingError("configuration update journal contains invalid prior JSON") from exc
+    if not isinstance(config_document, dict) or not isinstance(manifest, dict):
+        raise BookingError("configuration update journal prior files must be JSON objects")
+    if manifest.get("schema_version") != INSTALL_SCHEMA_VERSION:
+        raise BookingError("configuration update journal contains an invalid manifest")
+    if manifest.get("admin_uid") != expected_owner:
+        raise BookingError("configuration update journal administrator UID is invalid")
+    if manifest.get("config_file") != str(config_file):
+        raise BookingError("configuration update journal manifest path is inconsistent")
+    if manifest.get("config_sha256") != _sha256(config_payload):
+        raise BookingError("configuration update journal prior files are inconsistent")
+    if manifest.get("data_dir") != journal["data_dir"]:
+        raise BookingError("configuration update journal data directory is inconsistent")
+    if manifest.get("broker_socket") != journal["broker_socket"]:
+        raise BookingError("configuration update journal broker socket is inconsistent")
+    if manifest.get("service_uid") != journal["service_uid"]:
+        raise BookingError("configuration update journal service UID is inconsistent")
+    if manifest.get("service_gid") != journal["service_gid"]:
+        raise BookingError("configuration update journal service GID is inconsistent")
+    if config_snapshot["uid"] != expected_owner or manifest_snapshot["uid"] != expected_owner:
+        raise BookingError("configuration update journal prior file owner is inconsistent")
+    if config_snapshot["mode"] != CONFIG_FILE_MODE:
+        raise BookingError("configuration update journal prior config mode is invalid")
+    if manifest_snapshot["mode"] != INSTALL_MANIFEST_MODE:
+        raise BookingError("configuration update journal prior manifest mode is invalid")
+    return journal
+
+
 def _journal_string(document: dict, key: str) -> str:
     value = document.get(key)
     if not isinstance(value, str) or not value or "\x00" in value:
@@ -2021,6 +2694,23 @@ def _probe_admin_lock(
         os.close(fd)
 
 
+def _admin_service_blockers(
+    data_dir: Path,
+    broker_socket: Path,
+    *,
+    owner_pair: set[tuple[int, int]],
+    socket_owner_uids: set[int],
+) -> list[str]:
+    blockers = []
+    if _transfer_socket_state(broker_socket, socket_owner_uids) == "active":
+        blockers.append("broker is running; stop it before administrator maintenance")
+    if _probe_admin_lock(data_dir / "usage.lock", owner_pair) == "active":
+        blockers.append("monitor is running; stop it before administrator maintenance")
+    if _probe_admin_lock(data_dir / "ledger.lock", owner_pair) == "active":
+        blockers.append("a ledger transaction is active; retry after it finishes")
+    return blockers
+
+
 @contextmanager
 def _admin_file_lock(
     path: Path,
@@ -2075,37 +2765,58 @@ def _admin_transfer_guard(
     lock_owner: tuple[int, int],
     socket_owner_uids: set[int],
 ) -> Iterator[None]:
+    with _admin_service_guard(
+        plan.data_dir,
+        plan.broker_socket,
+        allowed_owner_pairs=allowed_owner_pairs,
+        lock_owner=lock_owner,
+        socket_owner_uids=socket_owner_uids,
+        operation="transfer",
+    ):
+        yield
+
+
+@contextmanager
+def _admin_service_guard(
+    data_dir: Path,
+    broker_socket: Path,
+    *,
+    allowed_owner_pairs: set[tuple[int, int]],
+    lock_owner: tuple[int, int],
+    socket_owner_uids: set[int],
+    operation: str,
+) -> Iterator[None]:
     _validate_transfer_directory(
-        plan.broker_socket.parent,
+        broker_socket.parent,
         allowed_owner_pairs,
         BROKER_SOCKET_DIRECTORY_MODE,
         "broker socket",
     )
-    socket_state = _transfer_socket_state(plan.broker_socket, socket_owner_uids)
+    socket_state = _transfer_socket_state(broker_socket, socket_owner_uids)
     if socket_state == "active":
-        raise BookingError("broker became active; stop it and retry the transfer")
+        raise BookingError(f"broker became active; stop it and retry the {operation}")
     if socket_state == "stale":
-        plan.broker_socket.unlink()
-        fsync_directory(plan.broker_socket.parent)
+        broker_socket.unlink()
+        fsync_directory(broker_socket.parent)
 
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     guard_identity: Optional[tuple[int, int]] = None
     try:
         try:
-            listener.bind(str(plan.broker_socket))
+            listener.bind(str(broker_socket))
             listener.listen(1)
         except OSError as exc:
             raise BookingError(
                 "could not establish the broker maintenance guard; stop the broker and retry"
             ) from exc
-        metadata = plan.broker_socket.lstat()
+        metadata = broker_socket.lstat()
         if not stat.S_ISSOCK(metadata.st_mode):
             raise BookingError("broker maintenance guard is not a Unix socket")
         guard_identity = (metadata.st_dev, metadata.st_ino)
         with ExitStack() as stack:
             stack.enter_context(
                 _admin_file_lock(
-                    plan.data_dir / "usage.lock",
+                    data_dir / "usage.lock",
                     allowed_owner_pairs=allowed_owner_pairs,
                     lock_owner=lock_owner,
                     label="monitor",
@@ -2113,7 +2824,7 @@ def _admin_transfer_guard(
             )
             stack.enter_context(
                 _admin_file_lock(
-                    plan.data_dir / "ledger.lock",
+                    data_dir / "ledger.lock",
                     allowed_owner_pairs=allowed_owner_pairs,
                     lock_owner=lock_owner,
                     label="ledger",
@@ -2124,16 +2835,20 @@ def _admin_transfer_guard(
         listener.close()
         if guard_identity is not None:
             try:
-                metadata = plan.broker_socket.lstat()
+                metadata = broker_socket.lstat()
             except FileNotFoundError as exc:
-                raise BookingError("broker maintenance guard disappeared during transfer") from exc
+                raise BookingError(
+                    f"broker maintenance guard disappeared during {operation}"
+                ) from exc
             if (
                 not stat.S_ISSOCK(metadata.st_mode)
                 or (metadata.st_dev, metadata.st_ino) != guard_identity
             ):
-                raise BookingError("broker maintenance guard was replaced during transfer")
-            plan.broker_socket.unlink()
-            fsync_directory(plan.broker_socket.parent)
+                raise BookingError(
+                    f"broker maintenance guard was replaced during {operation}"
+                )
+            broker_socket.unlink()
+            fsync_directory(broker_socket.parent)
 
 
 def _retarget_transfer_path(
@@ -2214,6 +2929,19 @@ def _restore_transfer_snapshot(path: Path, snapshot: object) -> None:
     finally:
         os.close(fd)
     fsync_directory(path.parent)
+
+
+def _restore_config_update_snapshots(config_file: Path, journal: dict) -> list[str]:
+    errors = []
+    for path, file_snapshot, label in (
+        (config_file, journal.get("config_before"), "configuration"),
+        (_manifest_path(config_file), journal.get("manifest_before"), "manifest"),
+    ):
+        try:
+            _restore_transfer_snapshot(path, file_snapshot)
+        except BaseException as exc:
+            errors.append(f"{label}: {exc}")
+    return errors
 
 
 def _rollback_admin_transfer(
@@ -2765,6 +3493,7 @@ def inspect_admin_init(
     expected_owner: int = 0,
 ) -> AdminInspection:
     _validate_plan(plan)
+    _reject_pending_config_update(plan.config_file)
     if os.path.lexists(_transfer_journal_path(plan.config_file)):
         raise BookingError(
             "reserved transfer journal already exists beside the configuration; "
@@ -2955,6 +3684,15 @@ def _build_plan(
         maximum=MAX_GPU_COUNT,
         enabled=interactive and args.gpu_count is None,
     )
+    try:
+        disabled_gpus = validate_gpu_list(
+            args.disabled_gpus,
+            gpu_count,
+            "disabled_gpus",
+        )
+        gpu_priority = validate_gpu_priority(args.gpu_priority, gpu_count)
+    except ValueError as exc:
+        raise BookingError(str(exc)) from exc
     slot_minutes = _ask_slot_minutes(
         args.slot_minutes if args.slot_minutes is not None else DEFAULT_SLOT_MINUTES,
         enabled=interactive and args.slot_minutes is None,
@@ -2991,11 +3729,17 @@ def _build_plan(
         broker_socket_mode=broker_socket_mode,
         file_mode=BROKER_FILE_MODE,
         dir_mode=BROKER_DIR_MODE,
+        disabled_gpus=disabled_gpus,
+        gpu_priority=gpu_priority,
     )
 
 
 def _validate_plan(plan: AdminInitPlan) -> None:
-    if plan.config_file.name in {INSTALL_MANIFEST_NAME, TRANSFER_JOURNAL_NAME}:
+    if plan.config_file.name in {
+        INSTALL_MANIFEST_NAME,
+        TRANSFER_JOURNAL_NAME,
+        CONFIG_UPDATE_JOURNAL_NAME,
+    }:
         raise BookingError(
             "trusted configuration filename conflicts with administrator metadata"
         )
@@ -3067,6 +3811,8 @@ def _validate_plan(plan: AdminInitPlan) -> None:
         broker_uid=plan.service.uid,
         broker_gid=plan.broker_gid,
         broker_socket_mode=plan.broker_socket_mode,
+        disabled_gpus=plan.disabled_gpus,
+        gpu_priority=plan.gpu_priority,
     )
 
 
@@ -3125,6 +3871,13 @@ def _resolve_identity(value: str) -> AdminIdentity:
         username=str(record.pw_name),
         primary_gid=int(record.pw_gid),
     )
+
+
+def _username_for_uid(uid: int) -> str:
+    try:
+        return str(pwd.getpwuid(uid).pw_name)
+    except KeyError:
+        return str(uid)
 
 
 def _ask_identity(
@@ -3356,6 +4109,13 @@ def _print_plan(plan: AdminInitPlan, inspection: AdminInspection) -> None:
     print(f"  config:     {plan.config_file}")
     print(f"  time slice: {plan.slot_minutes} minutes")
     print(f"  sharing:    max {plan.max_shared_users} slots per GPU")
+    if plan.disabled_gpus:
+        print(f"  disabled:   {','.join(map(str, plan.disabled_gpus))}")
+    if plan.gpu_priority:
+        print(
+            "  priority:   "
+            + ",".join(f"{gpu}={priority}" for gpu, priority in plan.gpu_priority)
+        )
     print(f"  service:    {plan.service.username} (UID {plan.service.uid})")
     print(f"  socket:     {plan.broker_socket} mode={plan.broker_socket_mode:04o}")
     print(

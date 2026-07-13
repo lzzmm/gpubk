@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Add administrator-controlled disabled GPU and preference-tier scheduling, per-request GPU
+  exclusion, and a stopped-service `bk admin gpu-policy` transaction with atomic rollback and
+  explicit crash recovery for the trusted configuration and install manifest.
 - Standardize the public brand as GPUBK and add `bk info`, TUI `i`, JSON, and Agent context
   access to the responsible Linux administrator account and its sanitized GECOS contact fields.
 - Render systemd path directives without surrounding quotes so system services load correctly on
