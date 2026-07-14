@@ -433,8 +433,15 @@ def submit_cancellation(
     store: LedgerStore,
     actor: Actor,
     reservation_id: str,
+    *,
+    operation_id: Optional[str] = None,
 ) -> CancellationSubmission:
-    reservation = cancel_booking(store, reservation_id, actor)
+    reservation = cancel_booking(
+        store,
+        reservation_id,
+        actor,
+        operation_id,
+    )
     transaction_warning = store.last_warning
     try:
         cleanup = cleanup_job_specs(config, store, actor)
@@ -500,6 +507,48 @@ def _cleanup_unreferenced_job_spec(
 def _append_store_warning(store: LedgerStore, *messages: Optional[str]) -> None:
     values = [message for message in (store.last_warning, *messages) if message]
     store.last_warning = "; ".join(dict.fromkeys(values)) or None
+
+
+def agent_capabilities(config: Config) -> dict:
+    return {
+        "read_only_recommendation": True,
+        "idempotent_booking": True,
+        "idempotent_edit": True,
+        "idempotent_cancel": True,
+        "operation_status": True,
+        "preflight_idempotent_replay": True,
+        "weighted_shared_capacity": True,
+        "configurable_booking_granularity": True,
+        "idempotent_edit_history_limit": MAX_EDIT_OPERATIONS_PER_RESERVATION,
+        "structured_cancel": True,
+        "service_broker": config.storage_transport == "broker",
+        "kernel_peer_credentials": config.storage_transport == "broker",
+        "service_owned_ledger": config.storage_transport == "broker",
+        "scheduled_jobs": True,
+        "scheduled_job_path_snapshot": True,
+        "scheduled_job_live_guard": config.worker_live_guard,
+        "single_worker_lease": True,
+        "worker_liveness": True,
+        "worker_instance_binding": True,
+        "daemon_policy_guard": True,
+        "scheduled_job_crash_recovery": True,
+        "private_job_specs": True,
+        "private_job_spec_cleanup": True,
+        "private_job_spec_orphan_grace_seconds": JOB_SPEC_ORPHAN_GRACE_SECONDS,
+        "bounded_private_job_logs": True,
+        "private_job_log_cleanup": True,
+        "bounded_personal_audit_log": True,
+        "audit_api_schema": AUDIT_SCHEMA_VERSION,
+        "versioned_usage_history": True,
+        "configurable_monitor_cadence": True,
+        "collector_liveness": True,
+        "usage_api_schema": "gpubk.usage.v1",
+        "external_allocator_is_advisory": True,
+        "external_allocator_configured": bool(config.allocator_command),
+        "request_gpu_exclusions": True,
+        "administrator_gpu_eligibility_policy": True,
+        "federated_node_identity": True,
+    }
 
 
 def build_agent_context(
@@ -591,43 +640,7 @@ def build_agent_context(
         "reservations": [
             _public_reservation(item, actor, config.max_shared_users) for item in active
         ],
-        "capabilities": {
-            "read_only_recommendation": True,
-            "idempotent_booking": True,
-            "idempotent_edit": True,
-            "preflight_idempotent_replay": True,
-            "weighted_shared_capacity": True,
-            "configurable_booking_granularity": True,
-            "idempotent_edit_history_limit": MAX_EDIT_OPERATIONS_PER_RESERVATION,
-            "structured_cancel": True,
-            "service_broker": config.storage_transport == "broker",
-            "kernel_peer_credentials": config.storage_transport == "broker",
-            "service_owned_ledger": config.storage_transport == "broker",
-            "scheduled_jobs": True,
-            "scheduled_job_path_snapshot": True,
-            "scheduled_job_live_guard": config.worker_live_guard,
-            "single_worker_lease": True,
-            "worker_liveness": True,
-            "worker_instance_binding": True,
-            "daemon_policy_guard": True,
-            "scheduled_job_crash_recovery": True,
-            "private_job_specs": True,
-            "private_job_spec_cleanup": True,
-            "private_job_spec_orphan_grace_seconds": JOB_SPEC_ORPHAN_GRACE_SECONDS,
-            "bounded_private_job_logs": True,
-            "private_job_log_cleanup": True,
-            "bounded_personal_audit_log": True,
-            "audit_api_schema": AUDIT_SCHEMA_VERSION,
-            "versioned_usage_history": True,
-            "configurable_monitor_cadence": True,
-            "collector_liveness": True,
-            "usage_api_schema": "gpubk.usage.v1",
-            "external_allocator_is_advisory": True,
-            "external_allocator_configured": bool(config.allocator_command),
-            "request_gpu_exclusions": True,
-            "administrator_gpu_eligibility_policy": True,
-            "federated_node_identity": True,
-        },
+        "capabilities": agent_capabilities(config),
     }
 
 

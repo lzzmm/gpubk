@@ -8,6 +8,22 @@ host. The selected host remains the only authority for its GPUs.
 This keeps single-host behavior unchanged and avoids treating NFS locks as a
 distributed consensus protocol.
 
+## Deployment shape
+
+Single-host GPUBK uses a local Unix socket between each user's CLI and the
+service-owned broker. Cluster mode adds only a client-side catalog and outbound
+SSH calls; it does not add a central scheduler or a listening network service.
+Every GPU host can therefore continue operating locally when the cluster client,
+another node, or NFS is unavailable.
+
+The supported first deployment is:
+
+1. Install and validate ordinary GPUBK independently on every GPU host.
+2. Configure key-based, host-key-verified SSH for the users who need federation.
+3. Create one root-owned catalog on each machine where users run cluster commands.
+4. Map node-local numeric UIDs to a global principal only when aggregate reporting
+   is desired.
+
 ## User model
 
 - With no cluster catalog, GPUBK stays in single-host mode. Node selectors, node
@@ -46,9 +62,10 @@ separate administrator-owned identity map:
 global principal -> (node_id, numeric UID), ...
 ```
 
-Numeric UIDs are node-local and usernames are display labels only. The client also
-checks that each response's stable node ID and remote actor match the configured
-endpoint. Unknown mappings remain separate instead of being guessed or merged.
+Numeric UIDs are node-local and usernames are display labels only. The client checks
+that each response's stable node ID matches the configured endpoint. SSH determines
+the actual remote actor; the client records that actor and applies explicit mappings
+for reporting. Unknown mappings remain separate instead of being guessed or merged.
 
 ## Storage and NFS
 
@@ -70,13 +87,16 @@ making NFS availability part of the booking commit path.
 - Read-only comparison may become stale. The destination broker always revalidates
   under its local transaction lock before committing.
 - Explicit `@NODE` requests never fail over to another host.
-- Automatic cluster booking may retry another previously recommended node only if
-  no commit occurred. A stable operation ID prevents duplicate commits after an
-  ambiguous response.
-- A timeout after submission is reported as `unknown`; the client queries the same
-  operation ID before any retry.
+- Automatic cluster booking chooses one write-compatible node after read-only
+  comparison. Once a write is attempted, it never switches to another node.
+- Every federated write has a stable operation ID. After a transport or protocol
+  failure, the client queries that ID on the same node. It may replay the same write
+  once on that node only when the query confirms that no operation is visible.
+- If both the write and operation query are unavailable, the result is reported as
+  unresolved with its operation ID; the client does not guess or submit elsewhere.
 - Clock skew is reported. Exact starts are rejected when node clocks differ beyond
-  policy; implicit earliest-slot requests remain node-authoritative.
+  policy. Implicit earliest-slot requests compare node-reported waiting durations,
+  so a fixed clock offset does not by itself change the selected node.
 - Cluster configuration or identity-map errors fail closed for cluster commands and
   never break ordinary local booking.
 
@@ -99,9 +119,9 @@ The optional catalog has its own `gpubk.cluster.v1` schema. Existing configurati
 ledger, reservation, and usage records remain valid. New public objects add node
 fields through versioned extensions. Unknown extensions continue to round-trip.
 
-Rolling upgrades require every node to advertise protocol capabilities. Read-only
-views tolerate one older node; cluster writes are enabled only when the selected
-node advertises the required idempotency and node-identity capabilities.
+Rolling upgrades are fail-closed for writes. Read-only views tolerate an older node;
+booking, edit, and cancel are enabled only when the selected node advertises the
+required idempotency, operation-status, and node-identity capabilities.
 
 ## Delivery checklist
 
@@ -114,6 +134,8 @@ node advertises the required idempotency and node-identity capabilities.
 - [x] Add cluster-mode CLI help; keep all cluster UI hidden in single-host mode.
 - [x] Add TUI node switcher and aggregate personal summary only when configured.
 - [x] Add administrator catalog/identity inspection and safe update commands.
+- [x] Gate writes by advertised capabilities and recover ambiguous writes by
+      querying the same operation ID on the same node.
 - [ ] Add optional per-node history export/import through the public usage API.
 - [ ] Test unreachable nodes, stale reads, races, duplicate replies, mismatched IDs,
       hostile config values, mixed versions, and simulated clock skew.

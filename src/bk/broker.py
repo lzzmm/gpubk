@@ -88,11 +88,19 @@ class BrokerLedgerStore(LedgerStore):
         payload = _edit_request_payload(request)
         return _booking_result(self._broker.call("booking.edit", payload))
 
-    def broker_cancel_booking(self, reservation_id: str, actor: Actor) -> dict:
+    def broker_cancel_booking(
+        self,
+        reservation_id: str,
+        actor: Actor,
+        operation_id: Optional[str] = None,
+    ) -> dict:
         del actor
+        payload = {"reservation_id": str(reservation_id)}
+        if operation_id is not None:
+            payload["op_id"] = operation_id
         result = self._broker.call(
             "booking.cancel",
-            {"reservation_id": str(reservation_id)},
+            payload,
         )
         if not isinstance(result, dict):
             raise BookingError("broker returned an invalid cancellation result")
@@ -448,13 +456,23 @@ class BrokerServer:
                 edit_booking(self.store, self.config, request_item)
             )
         if operation == "booking.cancel":
-            _require_keys(payload, {"reservation_id"}, label="cancellation payload")
+            _require_keys(
+                payload,
+                {"reservation_id", "op_id"},
+                label="cancellation payload",
+            )
             reservation_id = payload.get("reservation_id")
             if not isinstance(reservation_id, str) or not reservation_id:
                 raise BookingError("reservation_id is required")
+            operation_id = _optional_string(payload.get("op_id"), "op_id")
             from .scheduler import cancel_booking
 
-            return cancel_booking(self.store, reservation_id, actor)
+            return cancel_booking(
+                self.store,
+                reservation_id,
+                actor,
+                operation_id,
+            )
         raise BookingError(f"unsupported broker operation: {operation}")
 
     def _commit_own_job_transaction(self, payload: dict, actor: Actor) -> dict:

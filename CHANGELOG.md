@@ -24,6 +24,11 @@ All notable changes are documented here. The project follows Semantic Versioning
   status and recommendation, single-node remote booking, node-qualified edits/cancels,
   usage aggregation, and administrator `(node_id, UID)` principal mappings. It remains
   hidden without a catalog and never turns NFS into a shared live ledger.
+- Bound cluster subprocess output while it is produced, cancel pending TUI refreshes on exit,
+  gate remote writes by advertised capabilities, and recover ambiguous writes by querying and
+  replaying the same operation ID only on the originally selected node.
+- Make cluster cancellation idempotent, keep its operation record in the existing version-1
+  ledger, and compare implicit cross-node starts by relative wait when clocks are skewed.
 - Repair the GPU-focused TUI reservation and process tables: align every column, put the row
   number and booking ID first, show expected VRAM and scheduled job summaries, and distinguish
   reservation IDs from live process commands.

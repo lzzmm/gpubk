@@ -15,6 +15,7 @@ from bk.scheduler import (
     edit_booking,
     find_applied_create,
     find_applied_edit,
+    find_applied_operation,
     find_available_gpus,
     find_earliest_slot,
 )
@@ -384,6 +385,48 @@ class SchedulerModeTests(unittest.TestCase):
         self.assertEqual(first.reservation["end_at"], replayed.reservation["end_at"])
         self.assertEqual(len(first.reservation["edit_operations"]), 1)
         self.assertEqual(len(self.store.log_path.read_text(encoding="utf-8").splitlines()), 2)
+
+    def test_cancel_operation_id_is_idempotent_and_queryable(self):
+        actor = Actor(uid=1001, username="user1001")
+        created = add_booking(
+            self.store,
+            self.config,
+            self.request(actor.uid, MODE_SHARED),
+        )
+
+        first = cancel_booking(
+            self.store,
+            created.reservation["id"],
+            actor,
+            "agent-cancel-1",
+        )
+        retried = cancel_booking(
+            self.store,
+            created.reservation["id"],
+            actor,
+            "agent-cancel-1",
+        )
+        applied = find_applied_operation(
+            self.store.load(),
+            actor,
+            "agent-cancel-1",
+        )
+
+        self.assertEqual(first["status"], "cancelled")
+        self.assertEqual(retried["id"], first["id"])
+        self.assertEqual(applied[0], "cancel")
+        self.assertEqual(applied[1]["id"], first["id"])
+        self.assertEqual(
+            len(self.store.log_path.read_text(encoding="utf-8").splitlines()),
+            2,
+        )
+        with self.assertRaisesRegex(BookingError, "different write"):
+            cancel_booking(
+                self.store,
+                "another-reservation",
+                actor,
+                "agent-cancel-1",
+            )
 
     def test_idempotent_edit_history_is_bounded(self):
         actor = Actor(uid=1001, username="user1001")

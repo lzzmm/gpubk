@@ -115,6 +115,9 @@ def _validate_reservation(
     history = reservation.get("edit_operations")
     if history is not None:
         _validate_edit_operations(history, path, uid, seen_operations)
+    cancellation = reservation.get("cancel_operation")
+    if cancellation is not None:
+        _validate_cancel_operation(cancellation, path, uid, seen_operations)
 
 
 def _validate_edit_operations(
@@ -137,6 +140,20 @@ def _validate_edit_operations(
         operation_id = _bounded_text(item.get("op_id"), f"{item_path}.op_id", 128)
         _bounded_text(item.get("signature"), f"{item_path}.signature", 128)
         _register_operation_id(uid, operation_id, f"{item_path}.op_id", seen_operations)
+
+
+def _validate_cancel_operation(
+    value: object,
+    reservation_path: str,
+    uid: int,
+    seen_operations: set[tuple[int, str]],
+) -> None:
+    path = f"{reservation_path}.cancel_operation"
+    if not isinstance(value, dict) or set(value) != {"op_id", "signature"}:
+        raise ValueError(f"{path} must contain op_id and signature")
+    operation_id = _bounded_text(value.get("op_id"), f"{path}.op_id", 128)
+    _bounded_text(value.get("signature"), f"{path}.signature", 128)
+    _register_operation_id(uid, operation_id, f"{path}.op_id", seen_operations)
 
 
 def _register_operation_id(

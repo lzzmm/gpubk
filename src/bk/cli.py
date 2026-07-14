@@ -42,6 +42,7 @@ from .node_identity import stable_node_identity
 from .policy import DAEMON_POLICY_EXIT_CODE, DaemonPolicyError, validate_ledger_policy
 from .schedule_index import ReservationIndex
 from .scheduler import (
+    find_applied_operation,
     find_earliest_slot,
     find_policy_violations,
     list_active,
@@ -57,6 +58,7 @@ from .sharing import (
 from .service import (
     AGENT_SCHEMA_VERSION,
     BookingSubmission,
+    agent_capabilities,
     booking_result_payload,
     build_agent_context,
     public_reservation,
@@ -233,6 +235,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     {
                         "schema_version": AGENT_SCHEMA_VERSION,
                         "kind": "error",
+                        "node": stable_node_identity(),
                         "error": {"type": exc.__class__.__name__, "message": str(exc)},
                     },
                     ensure_ascii=False,
@@ -249,6 +252,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     {
                         "schema_version": AGENT_SCHEMA_VERSION,
                         "kind": "error",
+                        "node": stable_node_identity(),
                         "error": {"type": exc.__class__.__name__, "message": str(exc)},
                     },
                     ensure_ascii=False,
@@ -1307,7 +1311,15 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     edit_parser.add_argument("--compact", action="store_true")
     cancel_parser = subparsers.add_parser("cancel", aliases=["del"], help="cancel this UID's reservation")
     cancel_parser.add_argument("reservation_id", help="reservation number or unique ID prefix")
+    cancel_parser.add_argument("--op-id", help="stable retry-safe operation ID")
     cancel_parser.add_argument("--compact", action="store_true")
+    operation_parser = subparsers.add_parser(
+        "operation",
+        aliases=["op"],
+        help="look up one UID-scoped idempotent operation",
+    )
+    operation_parser.add_argument("operation_id")
+    operation_parser.add_argument("--compact", action="store_true")
     args = parser.parse_args(argv)
     actor = _current_actor()
     try:
@@ -1395,9 +1407,15 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             )
             compact = args.compact
             exit_code = 0
-        else:
+        elif args.action in {"cancel", "del"}:
             reservation_id = _resolve_own_reservation_id(store, args.reservation_id, actor)
-            cancellation = submit_cancellation(config, store, actor, reservation_id)
+            cancellation = submit_cancellation(
+                config,
+                store,
+                actor,
+                reservation_id,
+                operation_id=args.op_id,
+            )
             reservation = cancellation.reservation
             payload = {
                 "schema_version": AGENT_SCHEMA_VERSION,
@@ -1411,14 +1429,42 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             }
             compact = args.compact
             exit_code = 0
+        else:
+            applied = find_applied_operation(
+                store.load(),
+                actor,
+                args.operation_id,
+            )
+            action, reservation = applied if applied is not None else (None, None)
+            payload = {
+                "schema_version": AGENT_SCHEMA_VERSION,
+                "kind": "operation_status",
+                "node": stable_node_identity(),
+                "found": reservation is not None,
+                "action": action,
+                "reservation": (
+                    public_reservation(
+                        reservation,
+                        actor,
+                        config.max_shared_users,
+                    )
+                    if reservation is not None
+                    else None
+                ),
+            }
+            compact = args.compact
+            exit_code = 0
     except (BookingError, ValueError, OSError) as exc:
         payload = {
             "schema_version": AGENT_SCHEMA_VERSION,
             "kind": "error",
+            "node": stable_node_identity(),
             "error": {"type": exc.__class__.__name__, "message": str(exc)},
         }
         compact = getattr(args, "compact", False)
         exit_code = 2
+    payload.setdefault("node", stable_node_identity())
+    payload.setdefault("capabilities", agent_capabilities(config))
     print(
         json.dumps(
             payload,
@@ -3555,6 +3601,7 @@ JOBS AND USAGE
 AUTOMATION
   bk agent context               stable machine-readable context
   bk agent recommend 2 1h       read-only legal placement
+  bk agent operation OP_ID      query one retry-safe write
   bk mcp / bk skill install      MCP server or bundled Codex skill
   bk service uninstall KIND      remove a managed user unit
   bk config [--json]            inspect effective config and policy

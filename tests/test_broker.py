@@ -182,8 +182,16 @@ class BrokerTests(unittest.TestCase):
                     store,
                     created.reservation["id"],
                     Actor(0, "root-spoof"),
+                    "broker-cancel-1",
+                )
+                replayed = cancel_booking(
+                    store,
+                    created.reservation["id"],
+                    Actor(0, "root-spoof"),
+                    "broker-cancel-1",
                 )
                 self.assertEqual(cancelled["status"], "cancelled")
+                self.assertEqual(replayed["id"], cancelled["id"])
 
             metadata = config.data_dir.lstat()
             self.assertEqual(stat.S_IMODE(metadata.st_mode), BROKER_DIR_MODE)

@@ -288,14 +288,37 @@ def find_applied_create(
     return BookingResult(existing, False, "operation already applied")
 
 
-def cancel_booking(store: LedgerStore, reservation_id: str, actor: Actor) -> dict:
+def cancel_booking(
+    store: LedgerStore,
+    reservation_id: str,
+    actor: Actor,
+    operation_id: Optional[str] = None,
+) -> dict:
     broker_cancel = getattr(store, "broker_cancel_booking", None)
     if callable(broker_cancel):
-        return broker_cancel(reservation_id, actor)
+        return broker_cancel(reservation_id, actor, operation_id)
+    op_id = _normalize_operation_id(operation_id)
+    operation_signature = _operation_signature(
+        "cancel",
+        {"reservation_id": reservation_id},
+    )
 
     def mutate(ledger: dict):
         now = utc_now()
-        _expire_old_reservations(ledger, now)
+        changed = _expire_old_reservations(ledger, now)
+        if op_id:
+            applied = _find_applied_operation(ledger, actor.uid, op_id)
+            if applied is not None:
+                action, existing, existing_signature = applied
+                if (
+                    action != "cancel"
+                    or existing.get("id") != reservation_id
+                    or existing_signature != operation_signature
+                ):
+                    raise BookingError(
+                        "operation ID was already used for a different write"
+                    )
+                return ledger, existing, [], changed
         for reservation in ledger["reservations"]:
             if reservation.get("id") != reservation_id:
                 continue
@@ -305,6 +328,11 @@ def cancel_booking(store: LedgerStore, reservation_id: str, actor: Actor) -> dic
                 raise BookingError("permission denied: reservation belongs to another UID")
             reservation["status"] = STATUS_CANCELLED
             reservation["updated_at"] = to_iso(now)
+            if op_id:
+                reservation["cancel_operation"] = {
+                    "op_id": op_id,
+                    "signature": operation_signature,
+                }
             job = reservation.get("job")
             if isinstance(job, dict):
                 if job.get("status") == JOB_PENDING:
@@ -312,7 +340,14 @@ def cancel_booking(store: LedgerStore, reservation_id: str, actor: Actor) -> dic
                     job["finished_at"] = to_iso(now)
                 elif job.get("status") in {JOB_CLAIMED, JOB_RUNNING}:
                     job["cancel_requested_at"] = to_iso(now)
-            log = _log_item(actor, "cancel", reservation, "ok", "cancelled")
+            log = _log_item(
+                actor,
+                "cancel",
+                reservation,
+                "ok",
+                "cancelled",
+                operation_id=op_id,
+            )
             return ledger, reservation, [log], True
         raise BookingError("reservation not found")
 
@@ -543,6 +578,22 @@ def find_applied_edit(
     ):
         raise BookingError("operation ID was already used for a different write")
     return BookingResult(existing, False, "operation already applied")
+
+
+def find_applied_operation(
+    ledger: dict,
+    actor: Actor,
+    operation_id: str,
+) -> Optional[tuple[str, dict]]:
+    """Look up one UID-scoped idempotent write without exposing its signature."""
+    op_id = _normalize_operation_id(operation_id)
+    if op_id is None:
+        return None
+    applied = _find_applied_operation(ledger, actor.uid, op_id)
+    if applied is None:
+        return None
+    action, reservation, _signature = applied
+    return action, reservation
 
 
 def list_active(ledger: dict, now: Optional[datetime] = None) -> List[dict]:
@@ -1663,6 +1714,12 @@ def _find_applied_operation(
         if reservation.get("op_id") == operation_id:
             signature = reservation.get("operation_signature")
             return "create", reservation, str(signature) if signature is not None else None
+        cancellation = reservation.get("cancel_operation")
+        if isinstance(cancellation, dict) and cancellation.get("op_id") == operation_id:
+            signature = cancellation.get("signature")
+            if not isinstance(signature, str):
+                raise BookingError("invalid cancellation operation history")
+            return "cancel", reservation, signature
         history = reservation.get("edit_operations", [])
         if not isinstance(history, list):
             raise BookingError("invalid edit operation history")

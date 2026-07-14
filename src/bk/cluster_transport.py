@@ -39,6 +39,7 @@ class NodeReply:
     error: Optional[str]
     timed_out: bool = False
     cancelled: bool = False
+    error_code: Optional[str] = None
 
 
 class _NodeOutputTooLarge(ValueError):
@@ -69,40 +70,74 @@ def invoke_node(
             None,
             f"timed out after {node.timeout_seconds:g}s",
             timed_out=True,
+            error_code="timeout",
         )
     except _NodeRequestCancelled:
-        return NodeReply(node, None, "request cancelled", cancelled=True)
+        return NodeReply(
+            node,
+            None,
+            "request cancelled",
+            cancelled=True,
+            error_code="cancelled",
+        )
     except _NodeOutputTooLarge:
-        return NodeReply(node, None, "response exceeds 8 MiB")
+        return NodeReply(
+            node,
+            None,
+            "response exceeds 8 MiB",
+            error_code="protocol",
+        )
     except OSError as exc:
-        return NodeReply(node, None, f"transport failed: {exc}")
+        return NodeReply(
+            node,
+            None,
+            f"transport failed: {exc}",
+            error_code="transport",
+        )
 
     try:
         payload = json.loads(stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         detail = stderr.decode("utf-8", "replace").strip().splitlines()
         if returncode not in {0, 3} and detail:
-            return NodeReply(node, None, detail[-1])
-        return NodeReply(node, None, "returned invalid JSON")
+            return NodeReply(node, None, detail[-1], error_code="transport")
+        return NodeReply(
+            node,
+            None,
+            "returned invalid JSON",
+            error_code="protocol",
+        )
     if not isinstance(payload, dict):
-        return NodeReply(node, None, "returned a non-object JSON response")
+        return NodeReply(
+            node,
+            None,
+            "returned a non-object JSON response",
+            error_code="protocol",
+        )
     identity = payload.get("node")
     if not isinstance(identity, dict) or identity.get("id") != node.node_id:
         return NodeReply(
             node,
             None,
             "stable node identity does not match the catalog",
+            error_code="identity",
         )
     if payload.get("kind") == "error":
         error = payload.get("error")
         message = error.get("message") if isinstance(error, dict) else None
-        return NodeReply(node, None, str(message or "remote command failed"))
+        return NodeReply(
+            node,
+            None,
+            str(message or "remote command failed"),
+            error_code="remote",
+        )
     if returncode not in {0, 3}:
         detail = stderr.decode("utf-8", "replace").strip().splitlines()
         return NodeReply(
             node,
             None,
             detail[-1] if detail else f"exit {returncode}",
+            error_code="transport",
         )
     return NodeReply(node, payload, None)
 

@@ -496,7 +496,9 @@ Existing history needs no rewrite.
 Cluster controls remain hidden when no catalog exists. With a catalog, `bk c` shows
 all nodes and active reservations, `bk c recommend 2 1h` compares legal starts,
 `bk c book 2 1h` books the best single node, `bk c tui` opens the node browser,
-and `bk @NODE 2 1h` targets one node.
+and `bk @NODE 2 1h` targets one node for booking. Older nodes remain visible during
+rolling upgrades but are read-only until they advertise the required safe-write
+capabilities.
 See [CLUSTER.md](https://github.com/lzzmm/gpubk/blob/main/CLUSTER.md) for transport,
 failure, NFS export, and rollout boundaries.
 
@@ -667,6 +669,8 @@ The root-owned catalog contains endpoints, stable node IDs, priorities, and opti
 identity mappings, but no SSH keys. Each user is authenticated independently by SSH
 and acts as that remote numeric UID. Node priority only breaks ties after earliest
 start. The remote broker revalidates every write; one reservation never spans hosts.
+Local CLI-to-broker IPC remains a Unix socket, while cross-host calls use outbound
+SSH. Never point independent live ledgers at one NFS directory.
 
 Useful non-interactive forms:
 

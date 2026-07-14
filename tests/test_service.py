@@ -99,6 +99,8 @@ class AgentServiceTests(unittest.TestCase):
             context["gpu_advice"]["gpus"][1]["capabilities"]["stable_device_identifier"]
         )
         self.assertTrue(context["capabilities"]["idempotent_edit"])
+        self.assertTrue(context["capabilities"]["idempotent_cancel"])
+        self.assertTrue(context["capabilities"]["operation_status"])
         self.assertTrue(context["capabilities"]["preflight_idempotent_replay"])
         self.assertEqual(context["capabilities"]["idempotent_edit_history_limit"], 256)
         self.assertTrue(context["capabilities"]["structured_cancel"])

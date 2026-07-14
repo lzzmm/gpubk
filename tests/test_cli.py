@@ -2956,6 +2956,9 @@ class CliTests(unittest.TestCase):
             recommendation_payload = json.loads(recommendation.stdout)
             self.assertTrue(recommendation_payload["available"])
             self.assertEqual(recommendation_payload["recommendation"]["gpus"], [0])
+            self.assertTrue(
+                recommendation_payload["capabilities"]["idempotent_booking"]
+            )
             self.assertFalse(data_dir.exists())
 
     def test_agent_edit_and_cancel_are_structured_and_retry_safe(self):
@@ -2997,7 +3000,21 @@ class CliTests(unittest.TestCase):
                 ],
                 data_dir,
             )
-            cancelled = self.run_bk(["agent", "cancel", short_id, "--compact"], data_dir)
+            cancelled = self.run_bk(
+                [
+                    "agent",
+                    "cancel",
+                    short_id,
+                    "--op-id",
+                    "cli-agent-cancel-1",
+                    "--compact",
+                ],
+                data_dir,
+            )
+            cancellation_status = self.run_bk(
+                ["agent", "operation", "cli-agent-cancel-1", "--compact"],
+                data_dir,
+            )
             retry_after_cancel = self.run_bk(edit_args, data_dir)
 
             self.assertEqual(created.returncode, 0, created.stderr)
@@ -3006,12 +3023,18 @@ class CliTests(unittest.TestCase):
             self.assertEqual(missing_operation_id.returncode, 2, missing_operation_id.stderr)
             self.assertEqual(mismatched.returncode, 2, mismatched.stderr)
             self.assertEqual(cancelled.returncode, 0, cancelled.stderr)
+            self.assertEqual(
+                cancellation_status.returncode,
+                0,
+                cancellation_status.stderr,
+            )
             self.assertEqual(retry_after_cancel.returncode, 0, retry_after_cancel.stderr)
             edited_payload = json.loads(edited.stdout)
             retried_payload = json.loads(retried.stdout)
             missing_operation_payload = json.loads(missing_operation_id.stdout)
             mismatch_payload = json.loads(mismatched.stdout)
             cancelled_payload = json.loads(cancelled.stdout)
+            cancellation_status_payload = json.loads(cancellation_status.stdout)
             retry_after_cancel_payload = json.loads(retry_after_cancel.stdout)
             self.assertEqual(edited_payload["status"], "updated")
             self.assertEqual(retried_payload["status"], "exists")
@@ -3021,6 +3044,11 @@ class CliTests(unittest.TestCase):
             self.assertIn("different write", mismatch_payload["error"]["message"])
             self.assertEqual(cancelled_payload["kind"], "cancellation_result")
             self.assertEqual(cancelled_payload["reservation"]["status"], "cancelled")
+            self.assertTrue(cancellation_status_payload["found"])
+            self.assertEqual(cancellation_status_payload["action"], "cancel")
+            self.assertTrue(
+                cancellation_status_payload["capabilities"]["operation_status"]
+            )
             self.assertEqual(retry_after_cancel_payload["status"], "exists")
             self.assertEqual(
                 retry_after_cancel_payload["allocator"]["source"],

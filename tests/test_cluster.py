@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from datetime import timedelta
 from io import StringIO
 from pathlib import Path
 from unittest import mock
@@ -14,6 +15,7 @@ from bk.cluster import (
     NodeReply,
     _aggregate_cluster_usage,
     _invoke,
+    _invoke_idempotent_write,
     _node_command,
     load_cluster_config,
     run_cluster_cli,
@@ -163,6 +165,131 @@ class ClusterTests(unittest.TestCase):
         self.assertEqual(status, 0)
         rows = [line for line in output.getvalue().splitlines() if line.startswith(("preferred", "slow-priority"))]
         self.assertTrue(rows[0].startswith("preferred"))
+
+    def test_implicit_recommendation_tolerates_skew_but_exact_start_rejects_it(self):
+        node = ClusterNode("skewed", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        generated = utc_now() + timedelta(minutes=5)
+        reply = NodeReply(
+            node,
+            {
+                "node": {"id": node.node_id},
+                "generated_at": to_iso(generated),
+                "available": True,
+                "recommendation": {
+                    "gpus": [0],
+                    "start_at": to_iso(generated + timedelta(minutes=30)),
+                    "end_at": to_iso(generated + timedelta(hours=1)),
+                },
+            },
+            None,
+        )
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._parallel", return_value=[reply]),
+            redirect_stdout(StringIO()),
+        ):
+            self.assertEqual(run_cluster_cli(["recommend", "1", "30m"]), 0)
+            with self.assertRaisesRegex(BookingError, "clock skew"):
+                run_cluster_cli(
+                    [
+                        "recommend",
+                        "1",
+                        "30m",
+                        "--start",
+                        "2030-01-01T00:00:00Z",
+                    ]
+                )
+
+    def test_cluster_booking_skips_read_only_legacy_node(self):
+        legacy = ClusterNode("legacy", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        current = ClusterNode("current", "b" * 20, "ssh", "b", "/usr/bin/bk", 1, 8)
+        config = ClusterConfig(Path("/cluster.json"), (legacy, current))
+        base = {
+            "generated_at": to_iso(utc_now()),
+            "available": True,
+            "recommendation": {
+                "gpus": [0],
+                "start_at": "2030-01-01T00:00:00Z",
+                "end_at": "2030-01-01T00:30:00Z",
+            },
+        }
+        replies = [
+            NodeReply(legacy, {**base, "node": {"id": legacy.node_id}}, None),
+            NodeReply(
+                current,
+                {
+                    **base,
+                    "node": {"id": current.node_id},
+                    "capabilities": {
+                        "federated_node_identity": True,
+                        "idempotent_booking": True,
+                        "operation_status": True,
+                        "preflight_idempotent_replay": True,
+                    },
+                },
+                None,
+            ),
+        ]
+        result = NodeReply(
+            current,
+            {
+                "status": "created",
+                "reservation": {
+                    "short_id": "123456",
+                    "gpus": [0],
+                    "start_at": "2030-01-01T00:00:00Z",
+                    "end_at": "2030-01-01T00:30:00Z",
+                },
+            },
+            None,
+        )
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._parallel", return_value=replies),
+            mock.patch(
+                "bk.cluster._invoke_idempotent_write",
+                return_value=result,
+            ) as write,
+            redirect_stdout(output),
+        ):
+            status = run_cluster_cli(["book", "1", "30m"])
+        self.assertEqual(status, 0)
+        self.assertIs(write.call_args.args[0], current)
+        self.assertIn("created on current", output.getvalue())
+
+    def test_idempotent_write_probes_operation_after_timeout(self):
+        node = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        timed_out = NodeReply(
+            node,
+            None,
+            "timed out",
+            timed_out=True,
+            error_code="timeout",
+        )
+        recovered = NodeReply(
+            node,
+            {
+                "kind": "operation_status",
+                "found": True,
+                "action": "create",
+                "reservation": {"id": "reservation-id"},
+            },
+            None,
+        )
+        with mock.patch(
+            "bk.cluster._invoke",
+            side_effect=[timed_out, recovered],
+        ) as invoke:
+            reply = _invoke_idempotent_write(
+                node,
+                ["1", "30m", "--op-id", "operation-1", "--json"],
+                "operation-1",
+            )
+        self.assertEqual(invoke.call_count, 2)
+        self.assertEqual(reply.payload["status"], "exists")
+        self.assertEqual(reply.payload["reservation"]["id"], "reservation-id")
 
     def test_usage_merges_only_explicitly_mapped_node_uids(self):
         first = ClusterNode("a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)

@@ -6,7 +6,13 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Event
 from typing import Sequence
 
-from .cluster import ClusterConfig, NodeReply, query_cluster_contexts
+from .cluster import (
+    MAX_CLOCK_SKEW_SECONDS,
+    ClusterConfig,
+    NodeReply,
+    _clock_skew_seconds,
+    query_cluster_contexts,
+)
 
 
 def run_cluster_tui(config: ClusterConfig) -> int:
@@ -46,6 +52,9 @@ def render_cluster_lines(
             policy = payload.get("policy", {})
             collector = policy.get("monitoring", {}).get("collector")
             state = collector.get("state", "ok") if isinstance(collector, dict) else "unknown"
+            skew = _clock_skew_seconds(payload)
+            if skew is None or skew > MAX_CLOCK_SKEW_SECONDS:
+                state = "clock-skew"
             gpus = str(policy.get("gpu_count", len(advice)))
             idle = str(sum(1 for item in advice if item.get("live", {}).get("status") == "idle"))
             mine = str(sum(1 for item in payload.get("reservations", []) if item.get("mine")))
