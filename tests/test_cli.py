@@ -2153,6 +2153,47 @@ class CliTests(unittest.TestCase):
             self.assertIn("bk run 1 30m -- python train.py", result.stdout)
             self.assertFalse((data_dir / "ledger.json").exists())
 
+    def test_gpu_shortcut_is_read_only_and_suggests_one_gpu(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            result = self.run_bk(["g"], data_dir)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("GPU 0 | suggested", result.stdout)
+            self.assertIn("book: bk 1 30m --gpu 0", result.stdout)
+            self.assertFalse((data_dir / "ledger.json").exists())
+
+    def test_gpu_shortcut_prefers_active_booking_and_shows_live_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            simulation = data_dir / "gpu.json"
+            simulation.write_text(
+                json.dumps(
+                    {
+                        "gpus": [
+                            {
+                                "index": 0,
+                                "name": "sim",
+                                "memory_used_mb": 4096,
+                                "memory_total_mb": 32768,
+                                "utilization_percent": 42,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            env = {"BK_GPU_SIM_FILE": str(simulation)}
+            created = self.run_bk(["1", "30m", "--gpu", "0"], data_dir, env)
+            result = self.run_bk(["gpu"], data_dir, env)
+
+            self.assertEqual(created.returncode, 0, created.stderr)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("GPU 0 | yours now", result.stdout)
+            self.assertIn("42% util", result.stdout)
+            self.assertIn("28.0GiB free", result.stdout)
+            self.assertIn("run: bk run -- COMMAND", result.stdout)
+
     def test_immediate_run_stops_at_the_booking_deadline(self):
         deadline = datetime.now(timezone.utc) + timedelta(seconds=0.1)
 

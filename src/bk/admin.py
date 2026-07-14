@@ -242,6 +242,9 @@ class AdminGpuPolicyPlan:
     desired_disabled_gpus: tuple[int, ...]
     current_gpu_priority: tuple[tuple[int, int], ...]
     desired_gpu_priority: tuple[tuple[int, int], ...]
+    current_require_shared_memory: bool
+    desired_require_shared_memory: bool
+    require_shared_memory_update: Optional[bool]
     current_document: dict
     desired_document: dict
     blockers: tuple[str, ...]
@@ -261,12 +264,14 @@ class AdminGpuPolicyPlan:
                 "gpu_priority": {
                     str(gpu): priority for gpu, priority in self.current_gpu_priority
                 },
+                "require_shared_memory": self.current_require_shared_memory,
             },
             "desired": {
                 "disabled_gpus": list(self.desired_disabled_gpus),
                 "gpu_priority": {
                     str(gpu): priority for gpu, priority in self.desired_gpu_priority
                 },
+                "require_shared_memory": self.desired_require_shared_memory,
             },
             "changed": self.changed,
             "blockers": list(self.blockers),
@@ -384,6 +389,20 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         action="store_true",
         help="restore equal administrator preference for every GPU",
     )
+    shared_memory = policy_parser.add_mutually_exclusive_group()
+    shared_memory.add_argument(
+        "--require-shared-memory",
+        dest="require_shared_memory",
+        action="store_true",
+        help="require every shared reservation to resolve a per-GPU VRAM budget",
+    )
+    shared_memory.add_argument(
+        "--allow-implicit-shared-memory",
+        dest="require_shared_memory",
+        action="store_false",
+        help="allow shared reservations to omit VRAM and retain automatic estimation",
+    )
+    policy_parser.set_defaults(require_shared_memory=None)
     policy_parser.add_argument(
         "--recover",
         action="store_true",
@@ -625,6 +644,7 @@ def _run_admin_gpu_policy(args: argparse.Namespace) -> int:
             args.enable_all,
             args.gpu_priority is not None,
             args.clear_priority,
+            args.require_shared_memory is not None,
         )
     )
     if args.recover:
@@ -668,6 +688,7 @@ def _run_admin_gpu_policy(args: argparse.Namespace) -> int:
         config_file,
         disabled_gpus=disabled_value,
         gpu_priority=priority_value,
+        require_shared_memory=args.require_shared_memory,
     )
     status = "blocked" if plan.blockers else ("planned" if plan.changed else "unchanged")
     public_plan = plan.public_document(status="dry-run" if args.dry_run else status)
@@ -718,6 +739,11 @@ def _print_gpu_policy_plan(plan: AdminGpuPolicyPlan) -> None:
     print(f"  disabled desired:  {desired_disabled}")
     print(f"  priority current:  {current_priority}")
     print(f"  priority desired:  {desired_priority}")
+    print(
+        "  shared VRAM:       "
+        f"{'required' if plan.current_require_shared_memory else 'automatic'} -> "
+        f"{'required' if plan.desired_require_shared_memory else 'automatic'}"
+    )
     print(f"  change:            {'yes' if plan.changed else 'no'}")
     for blocker in plan.blockers:
         print(f"  blocked:           {blocker}")
@@ -1270,6 +1296,7 @@ def inspect_admin_gpu_policy(
     *,
     disabled_gpus: object = None,
     gpu_priority: object = None,
+    require_shared_memory: Optional[bool] = None,
     expected_owner: int = 0,
 ) -> AdminGpuPolicyPlan:
     config_file = _absolute_path(config_file)
@@ -1280,6 +1307,16 @@ def inspect_admin_gpu_policy(
     gpu_count = document.get("gpu_count")
     if isinstance(gpu_count, bool) or not isinstance(gpu_count, int):
         raise BookingError("trusted configuration gpu_count is invalid")
+    current_require_shared_memory = document.get("require_shared_memory", False)
+    if not isinstance(current_require_shared_memory, bool):
+        raise BookingError("trusted configuration require_shared_memory is invalid")
+    if require_shared_memory is not None and not isinstance(require_shared_memory, bool):
+        raise BookingError("shared memory policy must be a boolean")
+    desired_require_shared_memory = (
+        current_require_shared_memory
+        if require_shared_memory is None
+        else require_shared_memory
+    )
     try:
         current_disabled = validate_gpu_list(
             document.get("disabled_gpus"),
@@ -1314,6 +1351,8 @@ def inspect_admin_gpu_policy(
         }
     else:
         desired_document.pop("gpu_priority", None)
+    if require_shared_memory is not None:
+        desired_document["require_shared_memory"] = desired_require_shared_memory
 
     data_dir = _manifest_absolute_path(manifest, "data_dir")
     broker_socket = _manifest_absolute_path(manifest, "broker_socket")
@@ -1352,6 +1391,9 @@ def inspect_admin_gpu_policy(
         desired_disabled_gpus=desired_disabled,
         current_gpu_priority=current_priority,
         desired_gpu_priority=desired_priority,
+        current_require_shared_memory=current_require_shared_memory,
+        desired_require_shared_memory=desired_require_shared_memory,
+        require_shared_memory_update=require_shared_memory,
         current_document=document,
         desired_document=desired_document,
         blockers=tuple(blockers),
@@ -1372,6 +1414,7 @@ def apply_admin_gpu_policy(
         plan.config_file,
         disabled_gpus=plan.desired_disabled_gpus,
         gpu_priority=plan.desired_gpu_priority,
+        require_shared_memory=plan.require_shared_memory_update,
         expected_owner=expected_owner,
     )
     if fresh.current_document != plan.current_document:
@@ -1432,7 +1475,15 @@ def apply_admin_gpu_policy(
                 *history[-31:],
                 {
                     "at": datetime.now(timezone.utc).isoformat(),
-                    "fields": ["disabled_gpus", "gpu_priority"],
+                    "fields": [
+                        "disabled_gpus",
+                        "gpu_priority",
+                        *(
+                            ["require_shared_memory"]
+                            if fresh.require_shared_memory_update is not None
+                            else []
+                        ),
+                    ],
                     "from_sha256": _sha256(config_payload),
                     "to_sha256": _sha256(desired_payload),
                 },
@@ -1485,6 +1536,7 @@ def apply_admin_gpu_policy(
         "gpu_priority": {
             str(gpu): priority for gpu, priority in fresh.desired_gpu_priority
         },
+        "require_shared_memory": fresh.desired_require_shared_memory,
     }
 
 

@@ -1187,7 +1187,7 @@ def _draw_gpu_focus_panel(
     violations = sum(1 for item in usage if item.violation)
     title = (
         f"GPU {gpu.index} details | util={util} mem={memory} "
-        f"| bookings={len(related)} processes={len(usage)} | Enter expands"
+        f"| reservations={len(related)} processes={len(usage)} | Enter expands"
     )
     if violations:
         title += f" | violations={violations}"
@@ -1206,12 +1206,18 @@ def _draw_gpu_focus_panel(
     row += 1
     remaining = max(0, height - row - 3)
     booking_rows = min(4, len(related), remaining)
-    for reservation in related[:booking_rows]:
+    for number, reservation in enumerate(related[:booking_rows], start=1):
         _addstr(
             stdscr,
             row,
             0,
-            _gpu_booking_line(reservation, width, shared_limit, id_width),
+            _gpu_booking_line(
+                reservation,
+                width,
+                shared_limit,
+                id_width,
+                number=number,
+            ),
             width,
             _reservation_color(reservation),
         )
@@ -1238,10 +1244,17 @@ def _draw_gpu_focus_panel(
 
 
 def _gpu_booking_header(width: int, id_width: int) -> str:
-    return (
-        f"Bookings   {'ID':<{id_width}} {'User':<12} {'Mode':<4} "
-        f"{'Req':<5} {'Start':<11} {'End':<11} Dur"
-    )[: max(0, width - 1)]
+    if width < 100:
+        header = (
+            f"{'#':>3} {'ID':<{id_width}} {'User':<10} {'M':<1} {'Req':<5} "
+            f"{'VRAM':<7} {'Job':<10} {'Start':<11} {'End':<11} {'Dur':<5}"
+        )
+    else:
+        header = (
+            f"{'#':>3} {'ID':<{id_width}} {'User':<12} {'Mode':<4} {'Req':<5} "
+            f"{'VRAM/GPU':<9} {'Job':<16} {'Start':<11} {'End':<11} {'Dur':<7}"
+        )
+    return header[: max(0, width - 1)]
 
 
 def _gpu_booking_line(
@@ -1249,27 +1262,58 @@ def _gpu_booking_line(
     width: int,
     shared_limit: int,
     id_width: int,
+    *,
+    number: int = 1,
 ) -> str:
     start = parse_iso(reservation["start_at"]).astimezone()
     end = parse_iso(reservation["end_at"]).astimezone()
     request = _capacity_text(reservation, (), shared_limit)
-    return (
-        f"           {str(reservation.get('id', ''))[:id_width]:<{id_width}} "
-        f"{_truncate(str(reservation.get('username', '?')), 12):<12} "
-        f"{str(reservation.get('mode', '?'))[:4]:<4} {request:<5} "
-        f"{start:%m-%d %H:%M} {end:%m-%d %H:%M} {_duration_text(end - start)}"
-    )[: max(0, width - 1)]
+    memory = _reservation_memory_text(reservation)
+    job = _reservation_job_text(reservation)
+    duration = _duration_text(end - start)
+    if width < 100:
+        line = (
+            f"{number:>3} {str(reservation.get('id', ''))[:id_width]:<{id_width}} "
+            f"{_truncate(str(reservation.get('username', '?')), 10):<10} "
+            f"{_mode_mark(reservation):<1} {request:<5} "
+            f"{_truncate(memory, 7):<7} {_truncate(job, 10):<10} "
+            f"{start:%m-%d %H:%M} {end:%m-%d %H:%M} {_truncate(duration, 5):<5}"
+        )
+    else:
+        line = (
+            f"{number:>3} {str(reservation.get('id', ''))[:id_width]:<{id_width}} "
+            f"{_truncate(str(reservation.get('username', '?')), 12):<12} "
+            f"{str(reservation.get('mode', '?'))[:4]:<4} {request:<5} "
+            f"{_truncate(memory, 9):<9} {_truncate(job, 16):<16} "
+            f"{start:%m-%d %H:%M} {end:%m-%d %H:%M} {_truncate(duration, 7):<7}"
+        )
+    return line[: max(0, width - 1)]
+
+
+def _reservation_memory_text(reservation: dict) -> str:
+    if reservation.get("mode") == MODE_EXCLUSIVE:
+        return "-"
+    value = reservation.get("expected_memory_mb")
+    return _memory_compact(int(value)) if isinstance(value, int) and value > 0 else "auto"
+
+
+def _reservation_job_text(reservation: dict) -> str:
+    job = reservation.get("job")
+    if not isinstance(job, dict):
+        return "-"
+    summary = str(job.get("summary", "")).strip()
+    return summary or str(job.get("status", "job"))
 
 
 def _process_table_header(width: int, id_width: int = MIN_SHORT_ID_WIDTH) -> str:
     if width < 100:
         return (
             f"{'PID':>7} {'User':<10} {'T':<3} {'SM':>3} {'Mem':>6} "
-            f"{'State':<11} {'Booking':<{id_width}} Command"
+            f"{'State':<11} {'Res ID':<{id_width}} Process"
         )
     return (
         f"{'PID':>7} {'User':<16} {'Type':<4} {'SM':>4} {'Memory':>8} "
-        f"{'State':<11} {'Booking':<{id_width}} Command"
+        f"{'State':<11} {'Res ID':<{id_width}} Process"
     )
 
 
@@ -2415,11 +2459,17 @@ def _show_gpu_details(
         else "n/a"
     )
     lines = [f"Utilization {util}   VRAM {memory}   Source {gpu.source}", "", "RESERVATIONS"]
-    lines.append(_gpu_booking_header(160, id_width).replace("Bookings   ", ""))
+    lines.append(_gpu_booking_header(160, id_width))
     if related:
         lines.extend(
-            _gpu_booking_line(item, 160, config.max_shared_users, id_width).lstrip()
-            for item in related
+            _gpu_booking_line(
+                item,
+                160,
+                config.max_shared_users,
+                id_width,
+                number=number,
+            )
+            for number, item in enumerate(related, start=1)
         )
     else:
         lines.append("No active reservations")

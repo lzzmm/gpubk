@@ -42,6 +42,8 @@ from bk.tui import (
     _editor_slot_usage_text,
     _footer_label,
     _gpu_label,
+    _gpu_booking_header,
+    _gpu_booking_line,
     _gpu_metrics_header,
     _gpu_row_label,
     _gpu_view_anchor,
@@ -59,6 +61,7 @@ from bk.tui import (
     _pan_timeline,
     _preview_cell_for_gpu,
     _process_table_line,
+    _process_table_header,
     _reservation_palette,
     _reservation_color_map,
     _reservation_gpu_text,
@@ -1808,6 +1811,46 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertIn("bookin", wide)
         self.assertIn("python train.py", wide)
         self.assertIn("unreserved", compact)
+
+    def test_gpu_detail_tables_have_explicit_aligned_columns(self):
+        item = reservation(
+            "e95273-full-id",
+            1001,
+            MODE_SHARED,
+            [0],
+            self.start,
+            self.end,
+        )
+        item.update(
+            username="chenyuhan",
+            share_units=1,
+            expected_memory_mb=12 * 1024,
+            job={"status": "pending", "summary": "python train.py"},
+        )
+
+        header = _gpu_booking_header(120, 6)
+        line = _gpu_booking_line(item, 120, 4, 6, number=1)
+
+        self.assertTrue(header.lstrip().startswith("# ID"), header)
+        self.assertEqual(header.index("ID"), line.index("e95273"))
+        self.assertEqual(header.index("User"), line.index("chenyuhan"))
+        self.assertEqual(header.index("Mode"), line.index("shar"))
+        self.assertEqual(header.index("Req"), line.index("1/4"))
+        self.assertEqual(header.index("VRAM/GPU"), line.index("12.0G"))
+        self.assertEqual(header.index("Job"), line.index("python train.py"))
+        self.assertIn("30m", line)
+
+        compact_header = _gpu_booking_header(80, 6)
+        compact_line = _gpu_booking_line(item, 80, 4, 6, number=1)
+        self.assertLessEqual(len(compact_header), 79)
+        self.assertLessEqual(len(compact_line), 79)
+        self.assertIn("12.0G", compact_line)
+        self.assertIn("python tr+", compact_line)
+
+        process_header = _process_table_header(120, 6)
+        self.assertIn("Res ID", process_header)
+        self.assertIn("Process", process_header)
+        self.assertNotIn("Booking", process_header)
 
     def test_share_detail_chooses_gpu_with_most_related_reservations(self):
         selected = reservation("selected", os.getuid(), MODE_SHARED, [0, 1], self.start, self.end)

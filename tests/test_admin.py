@@ -470,6 +470,9 @@ class AdminInitTests(unittest.TestCase):
             desired_disabled_gpus=(7,),
             current_gpu_priority=(),
             desired_gpu_priority=((6, 10),),
+            current_require_shared_memory=True,
+            desired_require_shared_memory=False,
+            require_shared_memory_update=False,
             current_document={"gpu_count": 8},
             desired_document={
                 "gpu_count": 8,
@@ -504,6 +507,7 @@ class AdminInitTests(unittest.TestCase):
                     "7",
                     "--gpu-priority",
                     "6=10",
+                    "--allow-implicit-shared-memory",
                     "--yes",
                     "--json",
                 ]
@@ -513,6 +517,9 @@ class AdminInitTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["status"], "updated")
         self.assertEqual(payload["inspection"]["status"], "planned")
+        self.assertFalse(
+            payload["inspection"]["desired"]["require_shared_memory"]
+        )
         apply_policy.assert_called_once_with(policy)
 
     def test_gpu_policy_json_recovery_emits_one_final_document(self):
@@ -1119,6 +1126,7 @@ class AdminInitTests(unittest.TestCase):
                 plan.config_file,
                 disabled_gpus="6,7",
                 gpu_priority="5=20,6=10",
+                require_shared_memory=False,
                 expected_owner=os.geteuid(),
             )
             result = apply_admin_gpu_policy(policy, require_root=False)
@@ -1130,12 +1138,18 @@ class AdminInitTests(unittest.TestCase):
             self.assertEqual(result["status"], "updated")
             self.assertEqual(after["disabled_gpus"], [6, 7])
             self.assertEqual(after["gpu_priority"], {"5": 20, "6": 10})
+            self.assertFalse(after["require_shared_memory"])
+            self.assertFalse(result["require_shared_memory"])
             self.assertEqual(after["data_dir"], before["data_dir"])
             self.assertEqual(
                 manifest["config_sha256"],
                 admin_module._sha256(plan.config_file.read_bytes()),
             )
             self.assertEqual(len(manifest["config_updates"]), 1)
+            self.assertIn(
+                "require_shared_memory",
+                manifest["config_updates"][0]["fields"],
+            )
             self.assertFalse(
                 (plan.config_file.parent / "config-update.json").exists()
             )

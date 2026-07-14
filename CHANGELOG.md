@@ -2,6 +2,20 @@
 
 All notable changes are documented here. The project follows Semantic Versioning once a public release is published.
 
+## 0.2.1 - 2026-07-15
+
+- Repair the GPU-focused TUI reservation and process tables: align every column, put the row
+  number and booking ID first, show expected VRAM and scheduled job summaries, and distinguish
+  reservation IDs from live process commands.
+- Let administrators atomically switch an existing deployment between required and implicit
+  shared-memory estimates with `bk admin gpu-policy`, including the existing lock, journal,
+  manifest-integrity, rollback, and recovery protections.
+- Add `bk g` / `bk gpu`, a read-only one-glance command that shows the current user's active
+  GPUs with live utilization and free VRAM, or recommends one legal short-task GPU.
+- Clarify that usage totals are sampled history only, explain the daily and weekly charts, and
+  make shared-server install, upgrade, policy, service, and uninstall examples explicit about
+  administrator privileges.
+
 ## 0.2.0 - 2026-07-15
 
 - Add `bk run`: it can launch a command on the current UID's active reservation with stable

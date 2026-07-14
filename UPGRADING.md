@@ -26,7 +26,7 @@ sudo systemctl start gpubk-broker.service gpubk-monitor.service
 ```
 
 Keep the same extras used during installation (`gpu`, `mcp`, or `all`). Do not
-rerun `bk admin init` for a code-only upgrade. If verification fails, stop the
+rerun `sudo bk admin init` for a code-only upgrade. If verification fails, stop the
 new processes and reinstall the recorded version, for example:
 
 ```bash
@@ -39,7 +39,7 @@ place; do not use a force-link command over an unknown existing path.
 
 Then restart and verify again. The root-owned install manifest, configuration,
 reservations, audit log, and usage history remain in place throughout. Running
-`bk admin services install --yes` after the package update refreshes tracked
+`sudo bk admin services install --yes` after the package update refreshes tracked
 system units only when their current checksums still match the manifest. Per-user
 worker units remain separate and can be refreshed with
 `bk service install worker --force` when release notes require it.
@@ -96,11 +96,11 @@ directory modes; preserve and migrate the existing data instead.
 
 New 0.2 shared-server deployments use a local Unix-socket broker: one existing,
 non-root service account owns and writes the ledger, while ordinary users receive
-read-only file access and submit mutations through the broker. `bk admin init`
+read-only file access and submit mutations through the broker. `sudo bk admin init`
 records every path it creates so a test deployment can be reviewed and removed
-with `bk admin uninstall --dry-run` followed by an explicit uninstall.
+with `sudo bk admin uninstall --dry-run` followed by an explicit uninstall.
 
-Do not point `bk admin init` at a non-empty legacy shared directory. It deliberately
+Do not point `sudo bk admin init` at a non-empty legacy shared directory. It deliberately
 refuses to change ownership or replace policy around live data. For a legacy direct
 deployment, schedule maintenance, preserve an ownership-retaining backup, stop all
 GPUBK writers, and migrate the reviewed ledger into a separately initialized broker

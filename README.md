@@ -78,6 +78,7 @@ A normal first session is:
 ```bash
 bk info              # administrator account and contact
 bk login             # current and next reservation, without GPU probing
+bk g                 # GPU you can use now, or one read-only suggestion
 bk slots 1 30m       # preview choices, no write
 bk 1 30m             # book the earliest suitable shared GPU
 bk st                # check live state
@@ -410,11 +411,24 @@ Install the `gpu` extra, then run a single sample or a low-overhead monitor:
 ```bash
 bk m --once
 bk m
+bk g                              # current booked GPU, otherwise one suggestion
 bk u                              # this UID, last 24 hours
 bk u users --since 30d           # visible per-user summaries
 bk u samples --since 2d --resolution 5m --json
 bk u events --user me --since 7d
 ```
+
+`bk g` is the shortest read-only answer to "which GPU can I use?" If one of
+your reservations is active, it prints those GPU IDs, remaining time, live
+utilization, and free VRAM. Otherwise it recommends one legal 30-minute shared
+placement using both the ledger and current telemetry. It never creates a
+reservation; use the printed `bk 1 30m --gpu N` command to book it.
+
+`bk u` reports sampled history only. Future reservations are excluded.
+`Reserved` is past reservation time covered by monitor samples, while `Idle` is
+the sampled part of that time with no GPU process attributed to the user. The
+default personal view also draws the last 7 days by day and the last 8 weeks by
+week; pass `--no-chart` for the table alone.
 
 On a real GPU host, activate a CUDA PyTorch environment and run
 `bk usage demo`. It checks the monitor, asks before booking one currently idle
@@ -555,8 +569,8 @@ sudo python3 -m venv /opt/gpubk
 sudo /opt/gpubk/bin/python -m pip install --upgrade pip
 sudo /opt/gpubk/bin/python -m pip install 'gpubk[gpu]'
 sudo ln -s /opt/gpubk/bin/bk /usr/local/bin/bk
-sudo bk admin init --yes
-sudo bk admin services install --yes
+sudo /opt/gpubk/bin/bk admin init --yes
+sudo /opt/gpubk/bin/bk admin services install --yes
 sudo systemctl daemon-reload
 sudo systemctl enable --now gpubk-broker.service gpubk-monitor.service
 bk doctor --probe --require-monitor --strict
@@ -593,7 +607,7 @@ shows that Linux account, numeric UID, and its `adduser`/GECOS Full Name, Room,
 Work Phone, Home Phone, and Other fields; `bk info --json` exposes the same
 versioned document to tools and Agents. In the TUI, press `i`. The administrator
 can update these local account fields with `sudo chfn USER`; changes and
-`bk admin transfer` take effect immediately without rewriting GPUBK data. Only
+`sudo bk admin transfer` take effect immediately without rewriting GPUBK data. Only
 put contact information there that may be shown to every local GPUBK user.
 
 Useful non-interactive forms:
@@ -626,6 +640,16 @@ sudo bk admin gpu-policy --disabled-gpus 7 --gpu-priority 6=10 --dry-run
 sudo bk admin gpu-policy --disabled-gpus 7 --gpu-priority 6=10 --yes
 sudo systemctl start gpubk-broker.service gpubk-monitor.service
 ```
+
+The same atomic policy command can allow users to omit a shared VRAM estimate:
+
+```bash
+sudo bk admin gpu-policy --allow-implicit-shared-memory --dry-run
+sudo bk admin gpu-policy --allow-implicit-shared-memory --yes
+```
+
+An omitted value remains `auto`, not zero: zero would falsely claim that a job
+uses no VRAM. Use `--require-shared-memory` to restore the strict policy.
 
 Use `--enable-all` or `--clear-priority` to clear either policy. If power is lost
 during the update, leave `/etc/gpubk/config-update.json` in place and run
@@ -734,7 +758,7 @@ terminal, and through a one-second `timeout`. It reads the committed ledger
 without taking a write lock or probing NVML. With no active or next-24-hour
 reservation it prints nothing; failures are suppressed so SSH login cannot be
 blocked. `sudo bk admin login-hook uninstall --yes` removes only the marked
-GPUBK file. A full tracked `bk admin uninstall` also removes that managed hook.
+GPUBK file. A full tracked `sudo bk admin uninstall` also removes that managed hook.
 
 Stop and disable the tracked services before uninstalling. GPUBK verifies each
 unit against its root-only manifest, restores any reviewed pre-existing unit,
@@ -762,14 +786,14 @@ install manifest are restored. Each user who installed a worker unit can remove
 it in the same way with `systemctl --user disable --now bk-worker.service` and
 `bk service uninstall worker`.
 
-`bk admin services status` reports the tracked interpreter, UID/GID, unit file
+`sudo bk admin services status` reports the tracked interpreter, UID/GID, unit file
 state, and remaining enable links. GPUBK writes unit files but leaves
 `systemctl enable`, `start`, `stop`, and `disable` visible in the deployment
 steps so an administrator can see exactly when a persistent process changes.
 
 ### Configuration and production notes
 
-`bk admin init` writes the root-owned configuration outside the service-owned
+`sudo bk admin init` writes the root-owned configuration outside the service-owned
 ledger directory. A generated configuration contains the broker identity and
 socket policy in addition to scheduling settings:
 
@@ -928,7 +952,7 @@ Ordinary `doctor` reports the privacy-safe worker state without requiring the
 optional service or creating its private directory.
 
 `bk reset` is disabled for broker-backed storage. Use the manifest-checked
-`bk admin uninstall` path to retire a test deployment. `bk reset` remains
+`sudo bk admin uninstall` path to retire a test deployment. `bk reset` remains
 available for private and disposable simulation directories.
 
 As the service account, the probe creates randomly named temporary files,

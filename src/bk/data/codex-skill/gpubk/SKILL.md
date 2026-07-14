@@ -138,10 +138,10 @@ evidence of unattended command execution.
   `policy.monitoring.collector.stable_device_identifier_gap` and
   `policy.monitoring.collector.process_identity_gap`; a fresh degraded collector is not sufficient.
 - Do not delete journal or lock files manually.
-- Never apply `bk admin init` without an explicit administrator request. Use its `--dry-run`
+- Never apply `sudo bk admin init` without an explicit administrator request. Use its `--dry-run`
   form first. `access=all` exposes the broker socket to local accounts; it does not grant direct
   ledger write permission.
-- Never apply `bk admin transfer` without an explicit administrator request. Require a dry-run,
+- Never apply `sudo bk admin transfer` without an explicit administrator request. Require a dry-run,
   a stopped broker and monitor, and preserve its recovery journal after any interrupted handoff;
   never rewrite reservation UIDs or copy the live ledger as a substitute.
 - Do not enable a worker, monitor, or service on a shared server without the user's or administrator's approval.

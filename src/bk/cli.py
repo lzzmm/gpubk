@@ -163,6 +163,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _worker_command(argv[1:], config, store)
         if head in {"run", "r"}:
             return _run_command(argv[1:], config, store)
+        if head in {"gpu", "g"}:
+            return _gpu_command(argv[1:], config, store)
         if head in {"jobs", "j"}:
             return _jobs_command(argv[1:], config, store)
         if head in {"job-log", "jl"}:
@@ -362,6 +364,9 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
         return True
     if head in {"run", "r"}:
         _run_command(args[1:], config, store)
+        return True
+    if head in {"gpu", "g"}:
+        _gpu_command(args[1:], config, store)
         return True
     if head in {"jobs", "j"}:
         _jobs_command(args[1:], config, store)
@@ -932,6 +937,80 @@ def _run_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         environment["BK_EXPECTED_GPU_MEMORY_MB"] = str(next(iter(memory_budgets)))
     deadline = min(parse_iso(item["end_at"]) for item in selected)
     return _run_with_booking_deadline(command_argv, environment, deadline)
+
+
+def _gpu_command(argv: List[str], config: Config, store: LedgerStore) -> int:
+    parser = argparse.ArgumentParser(
+        prog="bk gpu",
+        description="Show only the GPU(s) you can use now, or one read-only suggestion.",
+    )
+    parser.parse_args(argv)
+
+    actor = _current_actor()
+    now = utc_now()
+    current = [
+        item
+        for item in _own_active_reservations(store, actor)
+        if parse_iso(item["start_at"]) <= now < parse_iso(item["end_at"])
+    ]
+    advice = build_gpu_advice(config)
+    snapshots = {item.index: item for item in advice.snapshots}
+
+    if current:
+        gpus = sorted({int(gpu) for item in current for gpu in item.get("gpus", [])})
+        deadline = min(parse_iso(item["end_at"]) for item in current)
+        remaining = max(0, int((deadline - now).total_seconds()))
+        ids = ",".join(_short_id(item) for item in current)
+        print(
+            f"GPU {','.join(map(str, gpus))} | yours now | "
+            f"{_duration_compact(remaining)} left | reservation {ids}"
+        )
+        for gpu in gpus:
+            print(f"  GPU {gpu}: {_gpu_live_summary(gpu, advice, snapshots)}")
+        print("run: bk run -- COMMAND")
+        return 0
+
+    response = recommend_booking(
+        config,
+        store,
+        actor,
+        count=1,
+        duration_seconds=max(30 * 60, config.slot_seconds),
+        start_at=now,
+        mode=MODE_SHARED,
+        allow_queue=True,
+        share_units=1,
+    )
+    recommendation = response["recommendation"]
+    if recommendation is None:
+        print(f"GPU - | no legal 30m slot in the next {config.queue_search_hours}h")
+        return 3
+    gpu = int(recommendation["gpus"][0])
+    start = parse_iso(recommendation["start_at"])
+    when = "now" if start <= now else format_local(start)
+    print(f"GPU {gpu} | suggested {when} | {_gpu_live_summary(gpu, advice, snapshots)}")
+    if start <= now:
+        print(f"book: bk 1 30m --gpu {gpu}")
+    else:
+        print(f"book: bk 1 30m --gpu {gpu} --at \"{start.astimezone():%m-%d %H:%M}\"")
+    return 0
+
+
+def _gpu_live_summary(gpu: int, advice: GpuAdvice, snapshots: dict) -> str:
+    live = advice.live_states[gpu]
+    item = snapshots.get(gpu)
+    if item is None or item.memory_total_mb <= 0:
+        free_text = "free unknown"
+    else:
+        free_text = _format_memory_mb(
+            max(0, item.memory_total_mb - item.memory_used_mb)
+        ) + " free"
+    utilization = (
+        f"{item.utilization_percent}% util"
+        if item is not None and item.utilization_percent is not None
+        else "util unknown"
+    )
+    return f"{live.status}, {utilization}, {free_text}"
 
 
 def _run_with_booking_deadline(
@@ -3329,11 +3408,11 @@ def _print_help(config: Optional[Config] = None, file=None) -> None:
     if _is_administrator(config):
         admin_help = """
 ADMINISTRATION (current administrator only)
-  bk admin init                  initialize a shared server
-  bk admin services install      install tracked boot services
-  bk admin login-hook install    optional login booking notice
-  bk admin transfer USER         hand operation to another local account
-  bk admin uninstall --dry-run   preview a tracked server removal
+  sudo bk admin init                 initialize a shared server
+  sudo bk admin services install     install tracked boot services
+  sudo bk admin login-hook install   optional login booking notice
+  sudo bk admin transfer USER        hand off administration
+  sudo bk admin uninstall --dry-run  preview tracked removal
   bk broker                      service-account ledger writer
   bk reset --yes                 private/test only; never shared
 """
@@ -3357,6 +3436,7 @@ BOOK
 VIEW
   bk info                         administrator account and contact
   bk login                        active and next booking
+  bk g                            GPU you can use now, or one suggestion
   bk st                           compact live status
   bk tl [window] [--step auto]   fine-grained aligned timeline
   bk slots 2 1h                  read-only earliest alternatives
@@ -3414,6 +3494,7 @@ def _print_shell_help() -> None:
   tutorial                  replay the safe walkthrough; add --tui for visual tour
   st | status               compact GPU status; add --timeline or -v
   login                     active/next booking; quiet hook when empty
+  g | gpu                   GPU you can use now, or one suggestion
   tl | timeline [2h]        aligned timeline; --from/--window/--step/--gpu
   slots 2 1h               show read-only earliest booking alternatives
   1 4h [--gpu 0]            shared booking, default mode
