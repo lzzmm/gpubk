@@ -495,7 +495,8 @@ Existing history needs no rewrite.
 
 Cluster controls remain hidden when no catalog exists. With a catalog, `bk c` shows
 all nodes and active reservations, `bk c recommend 2 1h` compares legal starts,
-`bk c book 2 1h` books the best single node, and `bk @NODE 2 1h` targets one node.
+`bk c book 2 1h` books the best single node, `bk c tui` opens the node browser,
+and `bk @NODE 2 1h` targets one node.
 See [CLUSTER.md](https://github.com/lzzmm/gpubk/blob/main/CLUSTER.md) for transport,
 failure, NFS export, and rollout boundaries.
 

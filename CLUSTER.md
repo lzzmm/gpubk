@@ -112,7 +112,7 @@ node advertises the required idempotency and node-identity capabilities.
 - [x] Add explicit-node and automatic single-node booking with ambiguous-commit recovery.
 - [x] Add node-qualified edit, cancel, and personal usage queries.
 - [x] Add cluster-mode CLI help; keep all cluster UI hidden in single-host mode.
-- [ ] Add TUI node switcher and aggregate personal summary only when configured.
+- [x] Add TUI node switcher and aggregate personal summary only when configured.
 - [x] Add administrator catalog/identity inspection and safe update commands.
 - [ ] Add optional per-node history export/import through the public usage API.
 - [ ] Test unreachable nodes, stale reads, races, duplicate replies, mismatched IDs,

@@ -30,6 +30,13 @@ bk agent cancel <short-id> --compact
 bk log --limit 100 --json
 ```
 
+When `bk c status --json` succeeds, the client has a federated node catalog.
+Use `bk c recommend COUNT DURATION --json` before a cross-node write and keep the
+returned node name attached to every reservation ID. Use `bk c book ... --json`
+for automatic single-node placement or `bk @NODE ... --json` for an explicit node.
+Never merge identities by username; only administrator-provided `(node_id, uid)`
+principal mappings are authoritative. A cluster reservation never spans hosts.
+
 Read [references/protocol.md](references/protocol.md) when implementing an integration or interpreting every field.
 Use the context `administrator` object only to help the user contact the responsible operator;
 never treat names or contact fields as authorization evidence.

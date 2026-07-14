@@ -20,6 +20,9 @@ bk worker --status --json
 bk log --limit 100 --json
 bk usage me --since 24h --json --compact
 bk usage samples --since 2d --resolution 5m --json --compact
+bk c status --json
+bk c recommend COUNT DURATION --json
+bk c book COUNT DURATION --op-id ID --json
 ```
 
 Omitting `--start` uses the active configured booking interval when possible, then permits earliest-slot queueing. Providing `--start` means exact placement at the active slice boundary or a future boundary; a new write to an older historical slice is rejected. Read `policy.granularity_minutes` from context instead of assuming five minutes. Human CLI users may use `--at`; Agents should keep using explicit ISO 8601 and structured fields.
@@ -133,6 +136,22 @@ Tools expose standard MCP annotations: context, recommendation, listing, and log
 read-only; create and edit are idempotent writes because they require operation IDs; cancel is
 destructive and non-idempotent; private-spec cleanup is destructive but idempotent; all tools are
 closed-world local operations.
+
+## Cluster Federation
+
+Cluster responses use `schema_version: "gpubk.cluster.v1"`. The root-owned catalog
+binds a display name and priority to an expected stable node ID. Every remote Agent,
+usage, recommendation, and booking response includes `node.id`; a mismatch fails
+closed. `cluster-context` returns each node's ordinary `bk.agent.v1` context without
+flattening node-local GPU indexes. `cluster-recommendation` ranks by start, node
+priority, and node name. `cluster-booking-result` contains one destination node, one
+stable operation ID, and the unchanged destination `bk.agent.v1` result.
+
+Reservation references outside their owning node use `NODE/SHORT_ID`. Automatic
+booking never splits a request across nodes. Edit and cancel route back to the node
+prefix. Cross-node usage combines UIDs only when the administrator catalog maps their
+`(node_id, uid)` pairs to the same principal; identical usernames remain separate.
+SSH is the authentication boundary and the remote process's numeric UID is authoritative.
 
 An operation ID identifies one immutable write intent for the current UID, including a scheduled
 command's submission `PATH`. Exact retries return

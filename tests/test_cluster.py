@@ -13,6 +13,7 @@ from bk.cluster import (
     ClusterConfig,
     ClusterNode,
     NodeReply,
+    _aggregate_cluster_usage,
     _invoke,
     _node_command,
     load_cluster_config,
@@ -158,6 +159,92 @@ class ClusterTests(unittest.TestCase):
         self.assertEqual(status, 0)
         rows = [line for line in output.getvalue().splitlines() if line.startswith(("preferred", "slow-priority"))]
         self.assertTrue(rows[0].startswith("preferred"))
+
+    def test_usage_merges_only_explicitly_mapped_node_uids(self):
+        first = ClusterNode("a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        second = ClusterNode("b", "b" * 20, "ssh", "b", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(
+            Path("/cluster.json"),
+            (first, second),
+            (
+                {
+                    "id": "person",
+                    "members": [
+                        {"node_id": first.node_id, "uid": 10},
+                        {"node_id": second.node_id, "uid": 20},
+                    ],
+                },
+            ),
+        )
+        replies = [
+            NodeReply(
+                first,
+                {
+                    "users": [
+                        {
+                            "uid": 10,
+                            "username": "same",
+                            "active_gpu_seconds": 60,
+                            "reserved_gpu_seconds": 120,
+                            "sampled_gpu_seconds": 120,
+                            "avg_sm_percent": 50,
+                        },
+                        {"uid": 30, "username": "duplicate-name", "active_gpu_seconds": 5},
+                    ]
+                },
+                None,
+            ),
+            NodeReply(
+                second,
+                {
+                    "users": [
+                        {
+                            "uid": 20,
+                            "username": "other",
+                            "active_gpu_seconds": 180,
+                            "reserved_gpu_seconds": 240,
+                            "sampled_gpu_seconds": 240,
+                            "avg_sm_percent": 25,
+                        },
+                        {"uid": 30, "username": "duplicate-name", "active_gpu_seconds": 7},
+                    ]
+                },
+                None,
+            ),
+        ]
+        groups = _aggregate_cluster_usage(config, replies)
+        mapped = next(item for item in groups if item["id"] == "person")
+        self.assertEqual(mapped["active_gpu_seconds"], 240)
+        self.assertEqual(mapped["nodes"], ["a", "b"])
+        self.assertEqual(mapped["avg_sm_percent"], 33.333)
+        unmapped = [item for item in groups if not item["mapped"]]
+        self.assertEqual(len(unmapped), 2)
+
+    def test_status_json_is_versioned_and_node_qualified(self):
+        node = ClusterNode("gpu-a", "a" * 20, "ssh", "gpu-a", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        reply = NodeReply(
+            node,
+            {
+                "node": {"id": node.node_id},
+                "generated_at": to_iso(utc_now()),
+                "actor": {"uid": 10, "username": "user"},
+                "policy": {"gpu_count": 1},
+                "reservations": [],
+            },
+            None,
+        )
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._parallel", return_value=[reply]),
+            redirect_stdout(output),
+        ):
+            status = run_cluster_cli(["status", "--json"])
+        payload = json.loads(output.getvalue())
+        self.assertEqual(status, 0)
+        self.assertEqual(payload["schema_version"], CLUSTER_SCHEMA_VERSION)
+        self.assertEqual(payload["nodes"][0]["node_id"], node.node_id)
 
 
 if __name__ == "__main__":

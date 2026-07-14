@@ -3501,6 +3501,7 @@ CLUSTER (shown only when a catalog is configured)
   bk c                           all configured GPU nodes
   bk c recommend 2 1h           compare earliest single-node slots
   bk c book 2 1h                book the best node
+  bk c tui                       full-screen node browser
   bk @NODE 2 1h                 book one explicit node
   bk c usage --since 7d         personal history from every node
 """

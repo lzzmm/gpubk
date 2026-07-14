@@ -172,16 +172,23 @@ def run_cluster_cli(argv: Sequence[str]) -> int:
     config = load_cluster_config()
     args = list(argv)
     action = args.pop(0) if args else "status"
-    if action in {"status", "st", "list", "ls"}:
-        if args:
-            raise BookingError(f"cluster {action} takes no arguments")
-        return _cluster_status(config)
+    if action in {"status", "st", "list", "ls", "context", "ctx"}:
+        parser = argparse.ArgumentParser(prog=f"bk cluster {action}")
+        parser.add_argument("--json", action="store_true")
+        parsed = parser.parse_args(args)
+        return _cluster_status(config, json_output=parsed.json)
     if action in {"recommend", "rec"}:
         return _cluster_recommend(config, args, book=False)
     if action in {"book", "b"}:
         return _cluster_recommend(config, args, book=True)
     if action in {"usage", "u"}:
         return _cluster_usage(config, args)
+    if action in {"tui", "t"}:
+        if args:
+            raise BookingError("cluster tui takes no arguments")
+        from .cluster_tui import run_cluster_tui
+
+        return run_cluster_tui(config)
     if action in {"edit", "e"}:
         return _cluster_edit(config, args)
     if action in {"cancel", "del", "d"}:
@@ -198,19 +205,52 @@ def run_node_cli(node_name: str, argv: Sequence[str]) -> int:
     if not argv:
         raise BookingError(f"bk @{node_name} requires a GPUBK command")
     command = list(argv)
-    if _is_booking_command(command) and "--json" not in command:
+    booking = _is_booking_command(command)
+    requested_json = "--json" in command
+    if booking and not requested_json:
         command.append("--json")
     reply = _invoke(node, command)
     if reply.error:
         raise BookingError(f"node {node.name}: {reply.error}")
     payload = reply.payload or {}
-    if payload:
+    if booking and not requested_json:
+        reservation = payload.get("reservation", {})
+        short_id = reservation.get("short_id") or str(reservation.get("id", ""))[:8]
+        print(
+            f"{payload.get('status', 'created')} on {node.name}: {short_id} "
+            f"GPU={','.join(map(str, reservation.get('gpus', [])))} "
+            f"{reservation.get('start_at', '?')} -> {reservation.get('end_at', '?')}"
+        )
+    elif payload:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
 
-def _cluster_status(config: ClusterConfig) -> int:
+def _cluster_status(config: ClusterConfig, *, json_output: bool = False) -> int:
     replies = _parallel(config.nodes, ["agent", "context", "--compact"])
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "schema_version": CLUSTER_SCHEMA_VERSION,
+                    "kind": "cluster-context",
+                    "nodes": [
+                        {
+                            "name": reply.node.name,
+                            "node_id": reply.node.node_id,
+                            "priority": reply.node.priority,
+                            "available": reply.error is None,
+                            "error": reply.error,
+                            "context": reply.payload,
+                        }
+                        for reply in replies
+                    ],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 3 if all(reply.error for reply in replies) else 0
     print(f"GPUBK cluster | {len(config.nodes)} node(s)")
     print(f"{'Node':<16} {'State':<12} {'GPUs':>5} {'Idle':>5} {'Mine':>5} {'Actor':<18}")
     failed = 0
@@ -306,6 +346,29 @@ def _cluster_recommend(config: ClusterConfig, argv: list[str], *, book: bool) ->
         raise BookingError("no cluster node can satisfy this request" + (f" ({reasons})" if reasons else ""))
     _start, _priority, _name, selected = candidates[0]
     if not book:
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "schema_version": CLUSTER_SCHEMA_VERSION,
+                        "kind": "cluster-recommendation",
+                        "selected_node": selected.node.name,
+                        "nodes": [
+                            {
+                                "name": reply.node.name,
+                                "node_id": reply.node.node_id,
+                                "priority": reply.node.priority,
+                                "error": reply.error,
+                                "recommendation": reply.payload,
+                            }
+                            for reply in replies
+                        ],
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+            return 0
         _print_cluster_candidates(candidates)
         return 0
 
@@ -332,6 +395,24 @@ def _cluster_recommend(config: ClusterConfig, argv: list[str], *, book: bool) ->
         )
     payload = result.payload or {}
     reservation = payload.get("reservation", {})
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "schema_version": CLUSTER_SCHEMA_VERSION,
+                    "kind": "cluster-booking-result",
+                    "node": {
+                        "name": selected.node.name,
+                        "node_id": selected.node.node_id,
+                    },
+                    "operation_id": operation_id,
+                    "result": payload,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 0
     print(
         f"{payload.get('status', 'created')} on {selected.node.name}: "
         f"{reservation.get('short_id', reservation.get('id', '?'))} "
@@ -342,11 +423,15 @@ def _cluster_recommend(config: ClusterConfig, argv: list[str], *, book: bool) ->
 
 
 def _cluster_usage(config: ClusterConfig, argv: list[str]) -> int:
-    remote_args = ["usage", "me", *argv, "--json", "--compact"]
+    json_output = "--json" in argv
+    forwarded = [item for item in argv if item not in {"--json", "--compact"}]
+    remote_args = ["usage", "me", *forwarded, "--json", "--compact"]
     replies = _parallel(config.nodes, remote_args)
+    principals = _aggregate_cluster_usage(config, replies)
     payload = {
         "schema_version": CLUSTER_SCHEMA_VERSION,
         "kind": "cluster-usage",
+        "principals": principals,
         "nodes": [
             {
                 "name": reply.node.name,
@@ -358,8 +443,95 @@ def _cluster_usage(config: ClusterConfig, argv: list[str]) -> int:
             for reply in replies
         ],
     }
-    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    if json_output:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print("Cluster usage | sampled history only; future reservations excluded")
+        print(f"{'Principal':<26} {'Nodes':>5} {'Active':>10} {'Reserved':>10} {'Idle':>10} {'Viol':>10}")
+        for principal in principals:
+            print(
+                f"{_clip(principal['id'], 26):<26} {len(principal['nodes']):>5} "
+                f"{_duration(principal['active_gpu_seconds']):>10} "
+                f"{_duration(principal['reserved_gpu_seconds']):>10} "
+                f"{_duration(principal['idle_reserved_gpu_seconds']):>10} "
+                f"{_duration(principal['violation_gpu_seconds']):>10}"
+            )
+        for reply in replies:
+            if reply.error:
+                print(f"warning: {reply.node.name}: {reply.error}")
     return 3 if all(reply.error for reply in replies) else 0
+
+
+def _aggregate_cluster_usage(config: ClusterConfig, replies: Sequence[NodeReply]) -> list[dict]:
+    groups: dict[str, dict] = {}
+    for reply in replies:
+        if reply.error or not reply.payload:
+            continue
+        for user in reply.payload.get("users", []):
+            uid = user.get("uid")
+            if isinstance(uid, bool) or not isinstance(uid, int):
+                continue
+            principal_id = _principal_for(config, reply.node.node_id, uid)
+            identity = principal_id or f"{reply.node.node_id}:{uid}"
+            group = groups.setdefault(
+                identity,
+                {
+                    "id": identity,
+                    "mapped": principal_id is not None,
+                    "nodes": set(),
+                    "members": [],
+                    "active_gpu_seconds": 0.0,
+                    "reserved_gpu_seconds": 0.0,
+                    "idle_reserved_gpu_seconds": 0.0,
+                    "violation_gpu_seconds": 0.0,
+                    "sampled_gpu_seconds": 0.0,
+                    "max_gpu_memory_mb": 0,
+                    "_sm_weighted": 0.0,
+                },
+            )
+            group["nodes"].add(reply.node.name)
+            group["members"].append(
+                {
+                    "node": reply.node.name,
+                    "node_id": reply.node.node_id,
+                    "uid": uid,
+                    "username": user.get("username"),
+                }
+            )
+            for key in (
+                "active_gpu_seconds",
+                "reserved_gpu_seconds",
+                "idle_reserved_gpu_seconds",
+                "violation_gpu_seconds",
+                "sampled_gpu_seconds",
+            ):
+                group[key] += max(0.0, float(user.get(key, 0)))
+            group["max_gpu_memory_mb"] = max(
+                group["max_gpu_memory_mb"], int(user.get("max_gpu_memory_mb") or 0)
+            )
+            average = user.get("avg_sm_percent")
+            if isinstance(average, (int, float)):
+                group["_sm_weighted"] += float(average) * max(
+                    0.0, float(user.get("sampled_gpu_seconds", 0))
+                )
+    result = []
+    for identity in sorted(groups):
+        group = groups[identity]
+        sampled = group["sampled_gpu_seconds"]
+        group["avg_sm_percent"] = (
+            round(group.pop("_sm_weighted") / sampled, 3) if sampled else None
+        )
+        group["nodes"] = sorted(group["nodes"])
+        for key in (
+            "active_gpu_seconds",
+            "reserved_gpu_seconds",
+            "idle_reserved_gpu_seconds",
+            "violation_gpu_seconds",
+            "sampled_gpu_seconds",
+        ):
+            group[key] = round(group[key], 3)
+        result.append(group)
+    return result
 
 
 def _cluster_edit(config: ClusterConfig, argv: list[str]) -> int:
@@ -408,6 +580,10 @@ def _parallel(nodes: Sequence[ClusterNode], argv: list[str]) -> list[NodeReply]:
             except BaseException as exc:
                 replies.append(NodeReply(futures[future], None, str(exc)))
     return sorted(replies, key=lambda item: (item.node.priority, item.node.name))
+
+
+def query_cluster_contexts(config: ClusterConfig) -> list[NodeReply]:
+    return _parallel(config.nodes, ["agent", "context", "--compact"])
 
 
 def _invoke(node: ClusterNode, argv: list[str], *, retry_timeout: bool = False) -> NodeReply:
@@ -575,6 +751,7 @@ def _cluster_booking_parser(prog: str) -> argparse.ArgumentParser:
     parser.add_argument("-m", "--mem")
     parser.add_argument("-s", "--share", type=int)
     parser.add_argument("--op-id")
+    parser.add_argument("--json", action="store_true")
     return parser
 
 
@@ -596,6 +773,7 @@ def _print_cluster_help() -> None:
   bk cluster recommend 2 1h  compare earliest legal placements
   bk cluster book 2 1h       book the best single node
   bk cluster usage --since 7d  aggregate this SSH identity's history
+  bk cluster tui              browse nodes in a full-screen view
   bk @NODE 2 1h --json       run a normal command on one explicit node
   bk cluster edit NODE/ID --duration 2h
   bk cluster cancel NODE/ID
@@ -607,6 +785,13 @@ Each destination broker performs the final transaction. A reservation never span
 
 def _clip(value: str, width: int) -> str:
     return value if len(value) <= width else value[: max(0, width - 1)] + "~"
+
+
+def _duration(seconds: object) -> str:
+    value = max(0, int(float(seconds)))
+    hours, remainder = divmod(value, 3600)
+    minutes = remainder // 60
+    return f"{hours}h{minutes:02d}m" if hours else f"{minutes}m"
 
 
 def _clock_skew_seconds(payload: dict) -> Optional[float]:
