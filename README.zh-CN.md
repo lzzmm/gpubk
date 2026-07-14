@@ -544,6 +544,29 @@ bk l
 bk t
 ```
 
+### 一条命令完成远端实机验收
+
+在可信的本地仓库中执行下面一条命令，即可自动下载指定的 PyPI 正式文件、逐个核对
+PyPI SHA-256、通过 SSH 上传私有测试包、在真实 GPU 拓扑上运行隔离调度测试、检查已
+部署服务，并把经过 SHA-256 校验的报告下载回本机：
+
+```bash
+python3 tools/remote_acceptance.py USER@GPU-HOST \
+  --remote-python /opt/gpubk/bin/python \
+  --system-bk /usr/local/bin/bk \
+  --sudo
+```
+
+GPU 服务器不需要连接外网。`--sudo` 只会在远端要求输入一次密码，用于只读检查服务
+账号、文件所有权和 systemd；脚本不会重启服务、写正式台账或启动 GPU 任务。候选版本
+的调度测试只使用 `~/.cache/gpubk/acceptance/` 下的私有临时目录，报告取回后自动清理。
+
+报告保存在本地 `acceptance-reports/`，包含 JSON 结果、文字摘要、上传清单、原始压缩包
+和校验值。即使自动检查失败，脚本仍会尽量下载报告并返回非零状态。只有排错时才使用
+`--keep-remote`；`--include-journal` 会额外收集两个 GPUBK unit 最近 80 行日志，必须
+显式开启。TUI 观感、第二个真实用户的越权测试、维护窗口内的小型 GPU 任务和重启后
+自启动仍需人工确认。
+
 需要把运行职责交给另一个已有本机账号时，先停止 broker 和 monitor，再预览、执行、
 重新加载并启动受跟踪的 unit：
 

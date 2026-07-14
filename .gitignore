@@ -6,4 +6,5 @@ __pycache__/
 htmlcov/
 build/
 dist/
+acceptance-reports/
 .DS_Store

@@ -79,6 +79,18 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("recursive-include tools *.py", manifest)
         self.assertIn("recursive-include .github/workflows *.yml", manifest)
 
+    def test_remote_gpu_acceptance_runner_is_packaged_and_documented(self):
+        english = (ROOT / "README.md").read_text(encoding="utf-8")
+        chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+        releasing = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
+        command = "python3 tools/remote_acceptance.py USER@GPU-HOST"
+
+        self.assertTrue((ROOT / "tools" / "remote_acceptance.py").is_file())
+        self.assertTrue((ROOT / "tools" / "acceptance_remote.py").is_file())
+        self.assertIn(command, english)
+        self.assertIn(command, chinese)
+        self.assertIn("tools/remote_acceptance.py", releasing)
+
     def test_version_entrypoint_does_not_import_the_full_cli(self):
         code = (
             "import sys\n"
