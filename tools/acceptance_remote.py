@@ -847,7 +847,7 @@ def run_system_checks(
                 "systemctl",
                 "show",
                 service,
-                "--property=ActiveState,SubState,MainPID,User,Group,ExecMainStatus,NRestarts,MemoryCurrent,CPUUsageNSec",
+                "--property=ActiveState,SubState,MainPID,User,Group,ExecMainStatus,NRestarts,MemoryCurrent,CPUUsageNSec,PrivateDevices,DevicePolicy,DeviceAllow",
             ],
             critical=False,
             success=f"{service} runtime properties captured",

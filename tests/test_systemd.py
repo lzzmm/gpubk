@@ -54,6 +54,11 @@ class BundledSystemdTests(unittest.TestCase):
         self.assertIn('ExecStart="/opt/gpubk/bin/python" -m bk broker', broker)
         self.assertIn("RuntimeDirectory=gpubk", broker)
         self.assertIn('ExecStart="/opt/gpubk/bin/python" -m bk monitor', monitor)
+        self.assertIn("DevicePolicy=closed", monitor)
+        self.assertIn("DeviceAllow=char-nvidia-frontend rw", monitor)
+        self.assertIn("DeviceAllow=char-nvidia-uvm rw", monitor)
+        self.assertIn("DeviceAllow=char-nvidia-caps rw", monitor)
+        self.assertNotIn("char-nvidia", broker)
         self.assertNotIn("RuntimeDirectory=", monitor)
 
     def test_system_broker_creates_nested_run_directory_but_not_persistent_path(self):
