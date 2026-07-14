@@ -240,6 +240,9 @@ class ReleaseConfigurationTests(unittest.TestCase):
         )
         self.assertIn("RuntimeDirectoryPreserve=yes", rendered_broker)
         self.assertIn("Wants=gpubk-broker.service", monitor)
+        self.assertIn("DevicePolicy=closed", monitor)
+        self.assertIn("DeviceAllow=char-nvidia-frontend rw", monitor)
+        self.assertNotIn("char-nvidia", broker)
 
     def test_prerelease_targets_a_documented_final_version(self):
         init = (ROOT / "src" / "bk" / "__init__.py").read_text(encoding="utf-8")
