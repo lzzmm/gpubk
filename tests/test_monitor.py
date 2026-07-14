@@ -279,9 +279,18 @@ class UsageMonitorTests(unittest.TestCase):
             self.assertEqual(len(third.events), 2)
             self.assertEqual({event["event"] for event in first.events}, {"process-start"})
             self.assertEqual({event["event"] for event in third.events}, {"process-stop"})
+            self.assertTrue(
+                all(event["extensions"]["gpubk.node"]["id"] for event in first.events)
+            )
             self.assertEqual(first.violation_count, 1)
             self.assertEqual(third.process_count, 0)
             self.assertEqual(len(audit_store.recent_events(10)), 4)
+            self.assertTrue(
+                all(
+                    record["extensions"]["gpubk.node"]["id"]
+                    for record in audit_store.recent_rollups(20)
+                )
+            )
 
     def test_process_telemetry_gap_does_not_emit_false_stop_events(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -96,12 +96,12 @@ Shared mode is the default:
 bk 1 30m                         # one GPU for 30 minutes
 bk book 1 30m                    # equivalent explicit command form
 bk 2 15m 5g                     # shorthand: 5 GiB expected VRAM per GPU
-bk 2 1h30m --mem 12g            # 12 GiB expected VRAM per GPU
-bk 1 1h --share 2               # request two integer shared slots per GPU
-bk s 1 2h --gpu 3               # explicit shared mode on GPU 3
-bk 1 1h --exclude 2,3           # automatic placement, except GPUs 2 and 3
+bk 2 1h30m -m 12g               # 12 GiB expected VRAM per GPU
+bk 1 1h -s 2                    # request two integer shared slots per GPU
+bk s 1 2h -g 3                  # explicit shared mode on GPU 3
+bk 1 1h -e 2,3                  # automatic placement, except GPUs 2 and 3
 bk x 2 4h                        # exclusive mode
-bk 1 1h --at +30m                # human-friendly relative time
+bk 1 1h -t +30m                 # human-friendly relative time
 bk 1 1h --at "tomorrow 09:00"   # local wall-clock time
 bk 1 1h --start 2030-01-01T20:00:00+08:00  # exact machine time
 ```
@@ -225,6 +225,7 @@ Useful TUI keys:
 | `c` | Toggle the dark/light theme |
 | `z` | Toggle capacity-sliced and solid-first shared bars |
 | `?` | Open the paged help and quick tour |
+| `u` | Open your sampled GPU-use dashboard |
 | `Enter`, `Esc`, `q` | Submit, cancel the current action, or quit |
 
 The TUI refreshes once per second by default. Set `tui_refresh_seconds` in the
@@ -255,15 +256,17 @@ bk run 1 30m --exclude 2,3 -- COMMAND  # avoid selected GPUs
 bk 2 1h30m --mem 12g -- python train.py --config exp.yaml
 bk j                    # list scheduled jobs
 bk j --cleanup          # inspect and prune private job files
-bk w                    # run this user's due jobs
-bk w --status           # read-only worker liveness check
+bk w                    # read-only worker liveness check
+bk w start              # run this user's scheduled-command worker
+bk w once               # process due work once, then exit
 bk jr ID --accept-duplicate-risk  # retry only after checking an uncertain job
 ```
 
 Plain `bk run` is read-only: it shows GPUs from current reservations or the next
 one-GPU suggestion. Immediate commands use stable GPU UUIDs when available and
-are stopped at the earliest selected reservation end. `bk w` is the short alias
-for `bk worker`, which launches commands attached to future reservations.
+are stopped at the earliest selected reservation end. Plain `bk w` is deliberately
+read-only. Use `bk w start` for the foreground worker, `bk w once` for one pass,
+or the full `bk worker` command in a service.
 
 The worker sets `CUDA_VISIBLE_DEVICES`, `CUDA_DEVICE_ORDER`,
 `BK_RESERVATION_ID`, and `BK_RESERVED_GPUS`. With the default live guard,
@@ -427,8 +430,9 @@ reservation; use the printed `bk 1 30m --gpu N` command to book it.
 `bk u` reports sampled history only. Future reservations are excluded.
 `Reserved` is past reservation time covered by monitor samples, while `Idle` is
 the sampled part of that time with no GPU process attributed to the user. The
-default personal view also draws the last 7 days by day and the last 8 weeks by
-week; pass `--no-chart` for the table alone.
+default personal view is a colored terminal dashboard with the last 7 days by
+day and the last 4 weeks by week; pass `--no-chart` to omit trends. In the TUI,
+press `u` for the same personal summary without leaving the timeline.
 
 On a real GPU host, activate a CUDA PyTorch environment and run
 `bk usage demo`. It checks the monitor, asks before booking one currently idle
@@ -474,6 +478,26 @@ available through Python, JSON CLI, and MCP; visualizers should not parse storag
 files. See [Telemetry](https://github.com/lzzmm/gpubk/blob/main/TELEMETRY.md).
 `usage_load_window_minutes` controls how much recent device history is retained
 and considered by automatic GPU placement.
+
+New history records also carry a versioned `gpubk.node` extension with a hashed
+stable node ID, hostname, and stable GPU UUID when available. Legacy records remain
+readable as node `legacy`; no raw machine ID is stored. This makes later export or
+import preserve the difference between, for example, GPU 0 on two hosts. User
+summaries already expose `nodes` and `(node_id, gpu)` devices, while capabilities
+state the current topology support explicitly.
+
+Every GPUBK ledger remains a single-host authority. Do not point independent brokers
+or monitors at one NFS directory. Optional cluster federation instead queries each
+host through non-interactive SSH and its versioned Agent JSON, then submits to exactly
+one destination broker. Stable `(node_id, numeric UID)` pairs can be mapped by an
+administrator to one global principal; usernames alone are never trusted as identity.
+Existing history needs no rewrite.
+
+Cluster controls remain hidden when no catalog exists. With a catalog, `bk c` shows
+all nodes and active reservations, `bk c recommend 2 1h` compares legal starts,
+`bk c book 2 1h` books the best single node, and `bk @NODE 2 1h` targets one node.
+See [CLUSTER.md](https://github.com/lzzmm/gpubk/blob/main/CLUSTER.md) for transport,
+failure, NFS export, and rollout boundaries.
 
 The monitor also has a user service:
 
@@ -569,11 +593,25 @@ sudo python3 -m venv /opt/gpubk
 sudo /opt/gpubk/bin/python -m pip install --upgrade pip
 sudo /opt/gpubk/bin/python -m pip install 'gpubk[gpu]'
 sudo ln -s /opt/gpubk/bin/bk /usr/local/bin/bk
-sudo /opt/gpubk/bin/bk admin init --yes
-sudo /opt/gpubk/bin/bk admin services install --yes
+sudo /opt/gpubk/bin/bk admin install
+bk doctor --probe --require-monitor --strict
+```
+
+The guided installer asks one question at a time and shows a final review. Press
+Enter to accept its conservative defaults. It initializes trusted configuration,
+installs the tracked broker and monitor units, optionally installs the colored
+login reminder, and enables both services at boot. Use `--dry-run` to preview,
+`--yes` for unattended defaults, or `--no-start` to install without starting.
+Python package installation itself never invokes `sudo` or changes `/etc`; this
+explicit administrator command owns those system changes.
+
+The equivalent step-by-step path remains available for troubleshooting:
+
+```bash
+sudo bk admin init --yes
+sudo bk admin services install --yes
 sudo systemctl daemon-reload
 sudo systemctl enable --now gpubk-broker.service gpubk-monitor.service
-bk doctor --probe --require-monitor --strict
 ```
 
 If `ln` reports `File exists`, do not force-replace the path. Inspect it first:
@@ -609,6 +647,25 @@ versioned document to tools and Agents. In the TUI, press `i`. The administrator
 can update these local account fields with `sudo chfn USER`; changes and
 `sudo bk admin transfer` take effect immediately without rewriting GPUBK data. Only
 put contact information there that may be shown to every local GPUBK user.
+
+To federate several working GPUBK hosts, initialize a catalog on the machine where
+users will run cluster commands. Read each remote stable node ID from
+`bk agent context --compact`, verify non-interactive SSH and its host key, then add it:
+
+```bash
+sudo bk admin cluster init gpu-a --yes
+ssh -T gpu-b /usr/local/bin/bk agent context --compact
+sudo bk admin cluster add gpu-b gpu-b NODE_ID_FROM_ABOVE --yes
+sudo bk admin cluster map lab-user gpu-a 1003 --yes
+sudo bk admin cluster map lab-user gpu-b 2042 --yes
+sudo bk admin cluster status
+bk c
+```
+
+The root-owned catalog contains endpoints, stable node IDs, priorities, and optional
+identity mappings, but no SSH keys. Each user is authenticated independently by SSH
+and acts as that remote numeric UID. Node priority only breaks ties after earliest
+start. The remote broker revalidates every write; one reservation never spans hosts.
 
 Useful non-interactive forms:
 
@@ -745,6 +802,40 @@ bk doctor --probe --require-monitor --strict
 See [UPGRADING.md](https://github.com/lzzmm/gpubk/blob/main/UPGRADING.md) for service restart, rollback, and release-specific
 checks.
 
+### Backup, clear, and restore
+
+The administrator commands cover the complete managed data tree: reservations,
+operation logs, internal ledger snapshots, usage events, rollups, and collector state.
+They do not silently replace the trusted system configuration. Stop both writers first:
+
+```bash
+sudo systemctl stop gpubk-broker.service gpubk-monitor.service
+
+sudo bk admin data backup /var/backups/gpubk/pre-change
+sudo bk admin data verify /var/backups/gpubk/pre-change
+
+# Destructive: this creates and verifies pre-clear before changing the data directory.
+sudo bk admin data clear --backup-to /var/backups/gpubk/pre-clear --yes
+
+# Restore is accepted only while the managed data directory is empty.
+sudo bk admin data restore /var/backups/gpubk/pre-change --yes
+
+sudo systemctl start gpubk-broker.service gpubk-monitor.service
+bk doctor --probe --require-monitor --strict
+```
+
+Omit the backup path on `backup` or `--backup-to` on `clear` to use a UTC-stamped
+directory below `/var/backups/gpubk`. Every snapshot is a private directory with a
+versioned manifest, an informational copy of the configuration, and per-file size and
+SHA-256 metadata. Creation, clear, and restore use same-filesystem atomic directory
+replacement and filesystem syncs. They reject symbolic links, hard links, special files,
+unexpected backup contents, ownership drift, checksum drift, and concurrent writers.
+Files are copied in bounded chunks, so large history does not need to fit in memory.
+
+`bk reset --yes` remains only for private/test data. It is disabled for shared server
+storage. `bk admin uninstall --purge-data` removes the tracked deployment; use
+`bk admin data clear` when keeping the installation but starting with empty history.
+
 An administrator may add a short reservation reminder to interactive login
 shells:
 
@@ -755,7 +846,9 @@ sudo bk admin login-hook status
 
 The hook runs `bk login --hook` only once per login, only when stdout is a
 terminal, and through a one-second `timeout`. It reads the committed ledger
-without taking a write lock or probing NVML. With no active or next-24-hour
+without taking a write lock or probing NVML. Color terminals distinguish current
+and upcoming reservations. A fresh trustworthy monitor also enables a red alert
+when this UID still occupies a GPU after its reservation expired. With no active or next-24-hour
 reservation it prints nothing; failures are suppressed so SSH login cannot be
 blocked. `sudo bk admin login-hook uninstall --yes` removes only the marked
 GPUBK file. A full tracked `sudo bk admin uninstall` also removes that managed hook.

@@ -38,6 +38,7 @@ from .models import (
     Actor,
     BookingError,
 )
+from .node_identity import stable_node_identity
 from .policy import DAEMON_POLICY_EXIT_CODE, DaemonPolicyError, validate_ledger_policy
 from .schedule_index import ReservationIndex
 from .scheduler import (
@@ -66,6 +67,7 @@ from .service import (
     submit_edit,
 )
 from .storage import AUDIT_SCHEMA_VERSION, LedgerStore
+from .terminal import color_enabled, colorize_help, style
 from .timeparse import (
     format_local,
     format_local_range,
@@ -134,6 +136,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                 from .mcp_server import main as mcp_main
 
                 return mcp_main(argv[1:], prog="bk mcp")
+            if head == "cluster" or (
+                head == "c" and _cluster_configured()
+            ):
+                from .cluster import run_cluster_cli
+
+                return run_cluster_cli(argv[1:])
+            if head.startswith("@") and len(head) > 1:
+                from .cluster import run_node_cli
+
+                return run_node_cli(head[1:], argv[1:])
 
         config = load_config()
         from .broker import ledger_store_for_config
@@ -160,7 +172,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         if head in {"usage", "u"}:
             return run_usage_cli(argv[1:], config)
         if head in {"worker", "w"}:
-            return _worker_command(argv[1:], config, store)
+            worker_args = _worker_alias_args(argv[1:]) if head == "w" else argv[1:]
+            return _worker_command(worker_args, config, store)
         if head in {"run", "r"}:
             return _run_command(argv[1:], config, store)
         if head in {"gpu", "g"}:
@@ -174,7 +187,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if head in {"status", "st"}:
             return _status_command(argv[1:], config, store)
         if head in {"login", "notice"}:
-            return _login_command(argv[1:], store)
+            return _login_command(argv[1:], config, store)
         if head in {"info", "contact", "about", "i"}:
             return _info_command(argv[1:], config)
         if head in {"timeline", "tl"}:
@@ -312,7 +325,7 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
         _status_command(args[1:], config, store)
         return True
     if head in {"login", "notice"}:
-        _login_command(args[1:], store)
+        _login_command(args[1:], config, store)
         return True
     if head in {"info", "contact", "about", "i"}:
         _info_command(args[1:], config)
@@ -360,7 +373,8 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
         run_usage_cli(args[1:], config)
         return True
     if head in {"worker", "w"}:
-        _worker_command(args[1:], config, store)
+        worker_args = _worker_alias_args(args[1:]) if head == "w" else args[1:]
+        _worker_command(worker_args, config, store)
         return True
     if head in {"run", "r"}:
         _run_command(args[1:], config, store)
@@ -422,20 +436,22 @@ def _book_command(
         help="exact ISO time, e.g. 2030-01-01T20:00:00+08:00; omitted means now with queueing",
     )
     start_group.add_argument(
+        "-t",
         "--at",
         help="exact local-friendly time: +30m, 20:00, 'tomorrow 09:00', or 07-13 20:00",
     )
     gpu_group = parser.add_mutually_exclusive_group()
     gpu_group.add_argument(
-        "--gpu", help="comma separated fixed GPU indexes, for example 0,1"
+        "-g", "--gpu", help="comma separated fixed GPU indexes, for example 0,1"
     )
     gpu_group.add_argument(
+        "-e",
         "--exclude-gpu",
         "--exclude",
         dest="exclude_gpu",
         help="comma separated GPU indexes to avoid during automatic selection",
     )
-    parser.add_argument("--mem", help="expected memory on each GPU, for example 12g or 4096m")
+    parser.add_argument("-m", "--mem", help="expected memory on each GPU, for example 12g or 4096m")
     _add_share_arguments(parser, config)
     parser.add_argument("--op-id", help="idempotency key for agents and retry-safe scripts")
     parser.add_argument("--json", action="store_true", help="emit a stable machine-readable result")
@@ -499,8 +515,11 @@ def _book_command(
         )
         return 0
     gpus = ",".join(str(item) for item in reservation["gpus"])
+    colors = color_enabled(sys.stdout)
+    status_role = "warning" if status == "queued" else "success"
     print(
-        f"{status}: {_short_id(reservation)} mode={reservation['mode']} "
+        f"{style(status + ':', status_role, enabled=colors)} "
+        f"{style(_short_id(reservation), 'id', enabled=colors)} mode={reservation['mode']} "
         f"{_reservation_share_label(reservation, config)}"
         f"gpu={gpus} {format_local_range(reservation['start_at'], reservation['end_at'])}"
     )
@@ -589,6 +608,7 @@ def _slots_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     parser.add_argument("duration")
     parser.add_argument("--mode", choices=["s", "shared", "x", "exclusive"])
     parser.add_argument(
+        "-f",
         "--from",
         dest="start",
         default="now",
@@ -596,15 +616,16 @@ def _slots_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     )
     gpu_group = parser.add_mutually_exclusive_group()
     gpu_group.add_argument(
-        "--gpu", help="restrict the search to one exact GPU set, e.g. 0,1"
+        "-g", "--gpu", help="restrict the search to one exact GPU set, e.g. 0,1"
     )
     gpu_group.add_argument(
+        "-e",
         "--exclude-gpu",
         "--exclude",
         dest="exclude_gpu",
         help="GPU indexes to avoid during automatic search",
     )
-    parser.add_argument("--mem", help="expected VRAM on each GPU, e.g. 12g")
+    parser.add_argument("-m", "--mem", help="expected VRAM on each GPU, e.g. 12g")
     _add_share_arguments(parser, config)
     parser.add_argument("--limit", type=int, default=5, help="number of alternatives to show (default: 5)")
     args = parser.parse_args(argv)
@@ -838,6 +859,20 @@ def _worker_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     if args.once and summary.waiting:
         return WORKER_WAITING_EXIT_CODE
     return 0
+
+
+def _worker_alias_args(argv: List[str]) -> List[str]:
+    if not argv:
+        return ["--status"]
+    aliases = {
+        "status": "--status",
+        "once": "--once",
+    }
+    if argv[0] == "start":
+        return argv[1:]
+    if argv[0] in aliases:
+        return [aliases[argv[0]], *argv[1:]]
+    return argv
 
 
 def _run_command(argv: List[str], config: Config, store: LedgerStore) -> int:
@@ -1367,6 +1402,7 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             payload = {
                 "schema_version": AGENT_SCHEMA_VERSION,
                 "kind": "cancellation_result",
+                "node": stable_node_identity(),
                 "reservation": public_reservation(
                     reservation, actor, config.max_shared_users
                 ),
@@ -1508,7 +1544,7 @@ def _worker_status_line(status: dict) -> str:
         suffix = f": {status['warning']}" if status.get("warning") else ""
         return f"worker: stopped{suffix}"
     if state == "not-seen":
-        return "worker: not seen (start `bk w` to launch scheduled commands)"
+        return "worker: not seen (`bk w` checks status; `bk w start` launches it)"
     warning = str(status.get("warning") or "status unavailable")
     return f"worker: {state}: {warning}"
 
@@ -2433,32 +2469,35 @@ def _delete_command(argv: List[str], config: Config, store: LedgerStore) -> int:
 def _edit_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     parser = argparse.ArgumentParser(prog="bk edit")
     parser.add_argument("reservation_id", nargs="?")
-    parser.add_argument("--duration")
+    parser.add_argument("-d", "--duration")
     start_group = parser.add_mutually_exclusive_group()
     start_group.add_argument(
         "--start",
         help="exact ISO time, e.g. 2030-01-01T20:00:00+08:00",
     )
     start_group.add_argument(
+        "-t",
         "--at",
         help="local-friendly time: +30m, 20:00, 'tomorrow 09:00', or 07-13 20:00",
     )
     gpu_group = parser.add_mutually_exclusive_group()
     gpu_group.add_argument(
+        "-g",
         "--gpu",
         help="comma separated fixed GPU indexes; use with --count to change GPU count",
     )
     gpu_group.add_argument(
+        "-e",
         "--exclude-gpu",
         "--exclude",
         dest="exclude_gpu",
         help="GPU indexes to avoid while automatically reallocating",
     )
-    parser.add_argument("--count", type=int)
+    parser.add_argument("-c", "--count", type=int)
     parser.add_argument("--mode", choices=["s", MODE_SHARED, "x", MODE_EXCLUSIVE])
-    parser.add_argument("--mem", help="expected memory per GPU; use - to clear")
+    parser.add_argument("-m", "--mem", help="expected memory per GPU; use - to clear")
     _add_share_arguments(parser, config)
-    parser.add_argument("--queue", action="store_true", help="allow moving to the next available slot")
+    parser.add_argument("-q", "--queue", action="store_true", help="allow moving to the next available slot")
     args = parser.parse_args(argv)
 
     actor = _current_actor()
@@ -2742,7 +2781,7 @@ def _list_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     return 0
 
 
-def _login_command(argv: List[str], store: LedgerStore) -> int:
+def _login_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     from .login_notice import build_login_summary, render_login_summary
 
     parser = argparse.ArgumentParser(
@@ -2760,16 +2799,42 @@ def _login_command(argv: List[str], store: LedgerStore) -> int:
     within_seconds = parse_duration_seconds(args.within)
     if within_seconds <= 0:
         raise ValueError("login notice window must be greater than zero")
+    now = utc_now()
+    audit_store = UsageAuditStore(
+        config.data_dir,
+        config.lock_timeout_seconds,
+        config.file_mode,
+        config.dir_mode,
+        config.storage_gid,
+    )
+    collector = audit_store.load_collector_status(
+        now=now,
+        expected_gpu_count=config.gpu_count,
+    )
+    reliable_gpus = []
+    process_state = {}
+    if collector.get("fresh") is True:
+        gaps = set(collector.get("process_telemetry_gap", [])) | set(
+            collector.get("process_identity_gap", [])
+        )
+        reliable_gpus = [
+            int(device["gpu"])
+            for device in collector.get("devices", [])
+            if int(device["gpu"]) not in gaps
+        ]
+        process_state = audit_store.load_state_read_only()
     summary = build_login_summary(
         store.load_read_only(),
         _current_actor().uid,
-        now=utc_now(),
+        now=now,
         within_seconds=within_seconds,
+        process_state=process_state,
+        reliable_gpus=reliable_gpus,
     )
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
         return 0
-    rendered = render_login_summary(summary)
+    rendered = render_login_summary(summary, color=color_enabled(sys.stdout))
     if rendered:
         print(rendered)
     elif not args.hook:
@@ -3152,6 +3217,7 @@ def _parse_gpu_list(value: str, *, label: str = "--gpu") -> List[int]:
 
 def _add_share_arguments(parser: argparse.ArgumentParser, config: Config) -> None:
     parser.add_argument(
+        "-s",
         "--share",
         type=int,
         metavar="SLOTS",
@@ -3402,22 +3468,43 @@ def _is_administrator(config: Optional[Config]) -> bool:
     return _current_actor().uid == administrator_info(config).uid
 
 
+def _cluster_configured() -> bool:
+    from .cluster import cluster_configured
+
+    return cluster_configured()
+
+
 def _print_help(config: Optional[Config] = None, file=None) -> None:
     file = file or sys.stdout
     admin_help = ""
     if _is_administrator(config):
         admin_help = """
 ADMINISTRATION (current administrator only)
+  sudo bk admin install              guided install and service startup
   sudo bk admin init                 initialize a shared server
   sudo bk admin services install     install tracked boot services
   sudo bk admin login-hook install   optional login booking notice
+  sudo bk admin data backup [PATH]   checksummed data snapshot
+  sudo bk admin data verify PATH     read-only integrity check
+  sudo bk admin data clear --yes     backup, then empty reset
+  sudo bk admin data restore PATH    restore into empty data
+  sudo bk admin cluster status       inspect federated GPU nodes
   sudo bk admin transfer USER        hand off administration
   sudo bk admin uninstall --dry-run  preview tracked removal
   bk broker                      service-account ledger writer
   bk reset --yes                 private/test only; never shared
 """
-    print(
-        f"""GPUBK - shared GPU booking from the terminal
+    cluster_help = ""
+    if _cluster_configured():
+        cluster_help = """
+CLUSTER (shown only when a catalog is configured)
+  bk c                           all configured GPU nodes
+  bk c recommend 2 1h           compare earliest single-node slots
+  bk c book 2 1h                book the best node
+  bk @NODE 2 1h                 book one explicit node
+  bk c usage --since 7d         personal history from every node
+"""
+    help_text = f"""GPUBK - shared GPU booking from the terminal
 
 START HERE
   bk tutorial                    safe, replayable CLI walkthrough
@@ -3427,9 +3514,9 @@ BOOK
   bk 2 1h                        earliest shared slot
   bk book 2 1h                   explicit alias for the same booking
   bk x 1 1h                      earliest exclusive slot
-  bk 1 1h --gpu 3 --mem 12g      choose GPU and expected VRAM
-  bk 1 1h --share 2              reserve two integer shared slots
-  bk 1 1h --at +30m              exact friendly local time
+  bk 1 1h -g 3 -m 12g            choose GPU and expected VRAM
+  bk 1 1h -s 2                    reserve two integer shared slots
+  bk 1 1h -t +30m                 exact friendly local time
   bk 1 1h -- command args...     book and schedule a command
   bk a                            guided booking with input recovery
 
@@ -3453,8 +3540,10 @@ MANAGE
 JOBS AND USAGE
   bk run -- COMMAND              run on your active booking
   bk run 1 30m -- COMMAND        book the earliest GPU and run now/later
-  bk worker                       launch commands at booking start
-  bk w --status                   inspect the command worker (`w` alias)
+  bk w                            inspect your scheduled-command worker
+  bk w start                      launch it in the foreground
+  bk w once                       run due work once, then exit
+  bk worker                       full long-running worker command
   bk j / bk jl ID / bk jr ID     list, inspect, or retry jobs
   bk j --cleanup                  prune private job files by policy
   bk m [--once]                  monitor GPU processes
@@ -3471,11 +3560,15 @@ AUTOMATION
   bk doctor                      read-only personal/server health check
   bk doctor --require-worker     verify this UID's scheduled-job worker
 {admin_help}
+{cluster_help}
 
 TIME AND POLICY
   Duration: 30m, 1h30m, 1d; align to the configured slice (default 5m).
   No start: try now, then queue to the earliest valid slot.
-  Friendly start: --at +30m | 20:00 | "tomorrow 09:00".
+  Common flags: -g GPU, -e EXCLUDED, -m VRAM, -s SLOTS, -t TIME.
+  Help: -h is the short form of --help on every subcommand.
+  Admin help: bk help admin | bk admin data -h.
+  Friendly start: -t +30m | 20:00 | "tomorrow 09:00".
   Exact machine start: --start 2030-01-01T20:00:00+08:00.
   Shared is default (`s`); exclusive is `x`.
   --share N reserves N slots/GPU; auto VRAM uses the N/max proportion.
@@ -3483,9 +3576,8 @@ TIME AND POLICY
 
 Run `bk COMMAND --help` or `bk help COMMAND` for more options.
 Plain `bk` opens the prompt; `bk t` opens the full-screen TUI.
-""",
-        file=file,
-    )
+"""
+    print(colorize_help(help_text, enabled=color_enabled(file)), file=file, end="")
 
 
 def _print_shell_help() -> None:
@@ -3545,20 +3637,22 @@ def _status_command(
     if timeline_only:
         parser.add_argument("window_arg", nargs="?", help="display span shorthand, e.g. 8h")
     parser.add_argument(
+        "-f",
         "--from",
         dest="start",
         default="now",
         help="window start: now, +30m, 20:00, tomorrow 09:00, or ISO; past times are allowed",
     )
-    parser.add_argument("--window", help="display span, e.g. 2h, 8h, or 1d")
+    parser.add_argument("-w", "--window", help="display span, e.g. 2h, 8h, or 1d")
     parser.add_argument(
+        "-s",
         "--step",
         default=f"{config.slot_minutes}m",
         help=f"cell size: {config.slot_minutes}m, another whole slice multiple, or auto",
     )
-    parser.add_argument("--gpu", help="show only comma-separated GPU IDs on the timeline")
+    parser.add_argument("-g", "--gpu", help="show only comma-separated GPU IDs on the timeline")
     if not timeline_only:
-        parser.add_argument("--timeline", action="store_true", help="append the configurable timeline")
+        parser.add_argument("-t", "--timeline", action="store_true", help="append the configurable timeline")
         parser.add_argument("-v", "--verbose", action="store_true", help="show processes and all reservations")
     args = parser.parse_args(argv)
 
@@ -3652,7 +3746,8 @@ def _print_status(
         gpu_snapshots = [gpu for gpu in gpu_snapshots if gpu.index in selected_gpu_ids]
     usage_by_gpu = classify_process_usage(gpu_snapshots, active, now)
     live_states = assess_gpu_live_states(gpu_snapshots, config.gpu_count)
-    print("GPU status")
+    colors = color_enabled(sys.stdout)
+    print(style("GPU status", "heading", enabled=colors))
     terminal_width = shutil.get_terminal_size(fallback=(100, 24)).columns
     wide_status = terminal_width >= 88
     wide_reservations = terminal_width >= 124
@@ -3675,6 +3770,12 @@ def _print_status(
         workload_rows = [item for item in rows if item.status != USAGE_SYSTEM]
         violations = sum(1 for item in rows if item.violation)
         state = "unreserved" if violations else live_states[gpu.index].status
+        state_role = (
+            "error"
+            if state in {"unreserved", "busy"}
+            else "success" if state == "idle" else "muted"
+        )
+        state_column = style(f"{state:<10}", state_role, enabled=colors)
         overlapping_now = [
             item
             for item in active
@@ -3694,13 +3795,13 @@ def _print_status(
         if wide_status:
             print(
                 f"{gpu.index:<4} {_clip_text(gpu.name, 14):<14} {util:>5} {mem:>16} "
-                f"{len(workload_rows):>4} {state:<10} {share:>4} "
+                f"{len(workload_rows):>4} {state_column} {share:>4} "
                 f"{config.max_shared_users:>3} {x_free:<11}"
             )
         else:
             print(
                 f"{gpu.index:<4} {util:>5} {mem:>16} {len(workload_rows):>4} "
-                f"{state:<10} {share:>4} {config.max_shared_users:>3} {x_free:<11}"
+                f"{state_column} {share:>4} {config.max_shared_users:>3} {x_free:<11}"
             )
         if verbose:
             for item in rows:
@@ -3714,7 +3815,14 @@ def _print_status(
 
     actor = _current_actor()
     mine = _own_active_reservations(store, actor)
-    print(f"Reservations: {len(active)} active, {len(mine)} yours | `bk l` details | `bk tl` timeline")
+    print(
+        style(
+            f"Reservations: {len(active)} active, {len(mine)} yours",
+            "heading",
+            enabled=colors,
+        )
+        + " | `bk l` details | `bk tl` timeline"
+    )
     if mine:
         memory_capacities = {
             gpu.index: gpu.memory_total_mb

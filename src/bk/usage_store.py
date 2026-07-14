@@ -31,6 +31,7 @@ from .fileio import (
     setgid_directory_gid,
 )
 from .jsonl import JsonlFormatError, append_json_objects
+from .node_identity import record_node_id
 from .storage import FileLock
 from .timeparse import parse_iso, to_iso, utc_now
 from .usage_schema import (
@@ -233,6 +234,9 @@ class UsageAuditStore:
     def load_state(self) -> Dict[str, dict]:
         if self.transition_journal_path.exists():
             self._recover_state_transition()
+        return self.load_state_read_only()
+
+    def load_state_read_only(self) -> Dict[str, dict]:
         path = self.state_path if self.state_path.exists() else self.legacy_state_path
         if not path.exists():
             return {}
@@ -1754,6 +1758,7 @@ def _event_storage_key(record: dict) -> tuple:
         record.get("g"),
         record.get("p"),
         record.get("u"),
+        _stored_node_id(record),
     )
 
 
@@ -1767,6 +1772,7 @@ def _rollup_storage_key(record: dict) -> tuple:
         record.get("g"),
         record.get("u"),
         record.get("s"),
+        _stored_node_id(record),
         tuple(record.get("r", [])),
     )
 
@@ -1782,6 +1788,7 @@ def _public_event_key(record: dict) -> tuple:
         record.get("gpu"),
         record.get("pid"),
         record.get("uid"),
+        record_node_id(record),
     )
 
 
@@ -1795,8 +1802,13 @@ def _public_rollup_key(record: dict) -> tuple:
         record.get("gpu"),
         record.get("uid"),
         record.get("status"),
+        record_node_id(record),
         tuple(record.get("reservation_ids", [])),
     )
+
+
+def _stored_node_id(record: dict) -> str:
+    return record_node_id({"extensions": record.get("x")})
 
 
 def _verify_gzip(path: Path, expected_digest: str, expected_count: int) -> None:

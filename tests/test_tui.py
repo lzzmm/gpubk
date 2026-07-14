@@ -81,6 +81,7 @@ from bk.tui import (
     _time_axis_lines,
     _theme_color_pairs,
     _toggle_focus,
+    _usage_summary_lines,
     _visible_shared_reservations,
     _visible_id_width,
     _weekday_label,
@@ -289,6 +290,51 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertEqual(dialog.call_args.args[1], "GPUBK administrator")
         self.assertIn("Administrator: Chen Yuhan", dialog.call_args.args[2][0])
         self.assertIn("admin@example.com", dialog.call_args.args[2][-1])
+
+    def test_personal_usage_summary_is_compact_and_uses_four_week_trend(self):
+        end = datetime(2030, 1, 28, 12, tzinfo=timezone.utc)
+        users = {
+            "collector": {"state": "running"},
+            "users": [
+                {
+                    "active_gpu_seconds": 1800,
+                    "reserved_gpu_seconds": 3600,
+                    "idle_reserved_gpu_seconds": 1800,
+                    "violation_gpu_seconds": 0,
+                    "max_gpu_memory_mb": 12288,
+                    "avg_sm_percent": 42.5,
+                }
+            ],
+        }
+        samples = {
+            "records": [
+                {
+                    "window_start": iso(end - timedelta(days=1)),
+                    "status": "ok",
+                    "active_observed_seconds": 1800,
+                    "observed_seconds": 3600,
+                }
+            ]
+        }
+
+        lines = _usage_summary_lines(users, samples, end, width=72)
+        text = "\n".join(lines)
+
+        self.assertIn("LAST 24 HOURS", text)
+        self.assertIn("Use  50.0%", text)
+        self.assertIn("LAST 7 DAYS", text)
+        self.assertIn("LAST 4 WEEKS", text)
+        self.assertEqual(sum(line.startswith("week ") for line in lines), 4)
+        self.assertTrue(all(len(line) <= 72 for line in lines), text)
+
+    def test_usage_key_opens_dashboard_outside_editor(self):
+        config = Config(data_dir=Path("/tmp/gpubk-tui-usage"))
+        state = TuiState()
+
+        with mock.patch("bk.tui._show_usage_summary") as dialog:
+            _handle_key(mock.Mock(), ord("u"), config, LedgerStore(config.data_dir), state)
+
+        dialog.assert_called_once()
 
     def test_collector_labels_are_compact_and_defensive(self):
         expected = {

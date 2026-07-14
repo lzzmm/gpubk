@@ -102,6 +102,20 @@ class UsageSchemaTests(unittest.TestCase):
         self.assertEqual(result["workload_ids"], [2, 3])
         self.assertEqual(result["workload_observed_seconds"], {"2": 60.0, "3": 60.0})
 
+    def test_rollups_from_two_nodes_never_merge_their_gpu_zero(self):
+        first = self._record("2030-01-01T12:00:00Z", 10, 100, 2)
+        second = self._record("2030-01-01T12:00:00Z", 30, 300, 3)
+        first["extensions"] = {"gpubk.node": {"schema": 1, "id": "node-a"}}
+        second["extensions"] = {"gpubk.node": {"schema": 1, "id": "node-b"}}
+
+        result = aggregate_rollups([first, second], 300)
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(
+            {item["extensions"]["gpubk.node"]["id"] for item in result},
+            {"node-a", "node-b"},
+        )
+
     def test_compactor_detects_future_storage_fields(self):
         self.assertEqual(unknown_storage_fields({"v": 1, "t": 1, "future": 9}, "rollups"), {"future"})
 

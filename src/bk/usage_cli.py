@@ -4,14 +4,22 @@ import argparse
 import json
 import os
 import shutil
+import sys
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from .config import Config
 from .monitor import authorize_monitor
 from .timeparse import parse_duration_seconds, parse_iso, utc_now
+from .terminal import color_enabled, style
 from .usage_api import UsageQueryService
 from .usage_store import UsageAuditStore, UsageRetentionPolicy
+from .usage_view import (
+    activity_bar_cells,
+    build_activity_trends,
+    format_usage_duration,
+    format_usage_memory,
+)
 
 
 def run_usage_cli(argv: List[str], config: Config) -> int:
@@ -47,20 +55,20 @@ def run_usage_cli(argv: List[str], config: Config) -> int:
         return _admin_command(action, args_argv, config)
 
     parser = argparse.ArgumentParser(prog=f"bk usage {action}")
-    parser.add_argument("--since", default="24h", help="lookback such as 2h, 30d, or 1d12h")
-    parser.add_argument("--from", dest="start", help="start time, ISO/local date, or -2h")
-    parser.add_argument("--until", help="end time, default now")
-    parser.add_argument("--resolution", default="auto", choices=["auto", "1m", "5m", "10m", "1h", "1d"])
+    parser.add_argument("-s", "--since", default="24h", help="lookback such as 2h, 30d, or 1d12h")
+    parser.add_argument("-f", "--from", dest="start", help="start time, ISO/local date, or -2h")
+    parser.add_argument("-u", "--until", help="end time, default now")
+    parser.add_argument("-r", "--resolution", default="auto", choices=["auto", "1m", "5m", "10m", "1h", "1d"])
     parser.add_argument("--user", help="numeric UID or 'me'")
     parser.add_argument("--all", action="store_true", help="include all visible UIDs")
-    parser.add_argument("--gpu", type=int)
-    parser.add_argument("--limit", type=int, default=1000)
-    parser.add_argument("--json", action="store_true", help="emit one stable versioned JSON object")
-    parser.add_argument("--compact", action="store_true", help="compact JSON with --json")
+    parser.add_argument("-g", "--gpu", type=int)
+    parser.add_argument("-n", "--limit", type=int, default=1000)
+    parser.add_argument("-j", "--json", action="store_true", help="emit one stable versioned JSON object")
+    parser.add_argument("-c", "--compact", action="store_true", help="compact JSON with --json")
     parser.add_argument(
         "--no-chart",
         action="store_true",
-        help="omit the 7-day and 8-week activity charts from the default personal summary",
+        help="omit the 7-day and 4-week activity charts from the default personal summary",
     )
     args = parser.parse_args(args_argv)
     if args.limit < 1:
@@ -100,7 +108,7 @@ def run_usage_cli(argv: List[str], config: Config) -> int:
         for record in payload.get("records", []):
             print(json.dumps(record, ensure_ascii=False, sort_keys=True))
     else:
-        _print_payload(payload)
+        _print_payload(payload, personal=action == "me")
         if action == "me" and not args.no_chart:
             _print_usage_trends(api, uid if uid is not None else os.getuid(), end)
     return 0
@@ -211,11 +219,11 @@ def _parse_time(value: str, reference: datetime) -> datetime:
     raise ValueError("usage time must be -2h, YYYY-MM-DD, YYYY-MM-DD HH:MM, or ISO 8601")
 
 
-def _print_payload(payload: dict) -> None:
+def _print_payload(payload: dict, *, personal: bool = False) -> None:
     _print_collector_summary(payload.get("collector"))
     kind = payload.get("kind")
     if kind == "usage-users":
-        _print_users(payload)
+        _print_users(payload, personal=personal)
     elif kind == "usage-events":
         _print_events(payload)
     elif kind == "usage-samples":
@@ -258,10 +266,12 @@ def _print_collector_summary(collector: object) -> None:
         )
     else:
         detail = f" ({collector.get('error')})" if collector.get("error") else ""
-    print(f"collector: {state}{detail}")
+    colors = color_enabled(sys.stdout)
+    role = "success" if state == "running" else "warning" if state in {"degraded", "stale"} else "muted"
+    print(style(f"collector: {state}{detail}", role, enabled=colors))
 
 
-def _print_users(payload: dict) -> None:
+def _print_users(payload: dict, *, personal: bool = False) -> None:
     query = payload.get("query", {})
     try:
         start = parse_iso(str(query["start_at"])).astimezone()
@@ -276,22 +286,62 @@ def _print_users(payload: dict) -> None:
     if not users:
         print("no user usage records in this interval")
         return
+    if personal and len(users) == 1:
+        _print_personal_dashboard(users[0])
+        return
     print(f"{'UID':>7} {'User':<16} {'Active':>9} {'Reserved':>9} {'Idle':>9} {'Viol':>8} {'PeakMem':>9} {'AvgSM':>7} Workloads")
     for item in users:
         workloads = ",".join(str(workload.get("label", "?")) for workload in item.get("workloads", [])[:3]) or "-"
         avg_sm = "-" if item.get("avg_sm_percent") is None else f"{item['avg_sm_percent']:.1f}%"
         print(
             f"{item['uid']:>7} {_clip_text(str(item['username']), 16):<16} "
-            f"{_usage_duration(int(item['active_gpu_seconds'])):>9} "
-            f"{_usage_duration(int(item['reserved_gpu_seconds'])):>9} "
-            f"{_usage_duration(int(item['idle_reserved_gpu_seconds'])):>9} "
-            f"{_usage_duration(int(item['violation_gpu_seconds'])):>8} "
-            f"{_memory_compact(int(item['max_gpu_memory_mb'])):>9} {avg_sm:>7} {workloads}"
+            f"{format_usage_duration(int(item['active_gpu_seconds'])):>9} "
+            f"{format_usage_duration(int(item['reserved_gpu_seconds'])):>9} "
+            f"{format_usage_duration(int(item['idle_reserved_gpu_seconds'])):>9} "
+            f"{format_usage_duration(int(item['violation_gpu_seconds'])):>8} "
+            f"{format_usage_memory(int(item['max_gpu_memory_mb'])):>9} {avg_sm:>7} {workloads}"
         )
 
 
+def _print_personal_dashboard(item: dict) -> None:
+    colors = color_enabled(sys.stdout)
+    active = max(0, int(item.get("active_gpu_seconds", 0)))
+    reserved = max(0, int(item.get("reserved_gpu_seconds", 0)))
+    idle = max(0, int(item.get("idle_reserved_gpu_seconds", 0)))
+    violations = max(0, int(item.get("violation_gpu_seconds", 0)))
+    ratio = 0.0 if reserved <= 0 else min(1.0, active / reserved)
+    width = max(12, min(32, shutil.get_terminal_size(fallback=(100, 24)).columns - 48))
+    active_cells = round(width * ratio)
+    idle_cells = max(0, width - active_cells)
+    bar = style("━" * active_cells, "success", enabled=colors) + style(
+        "─" * idle_cells,
+        "muted",
+        enabled=colors,
+    )
+    print()
+    print(style("YOUR GPU USE", "heading", enabled=colors))
+    print(
+        f"  ACTIVE {format_usage_duration(active):>7}   RESERVED {format_usage_duration(reserved):>7}   "
+        f"USE {ratio * 100:>5.1f}%"
+    )
+    print(f"  {bar}  active {ratio * 100:.0f}% / idle {idle / reserved * 100 if reserved else 0:.0f}%")
+    peak = format_usage_memory(int(item.get("max_gpu_memory_mb", 0)))
+    avg_sm = item.get("avg_sm_percent")
+    avg_text = "-" if avg_sm is None else f"{float(avg_sm):.1f}%"
+    violation_text = format_usage_duration(violations)
+    violation_role = "error" if violations else "muted"
+    print(
+        f"  PEAK VRAM {peak:<8} AVG SM {avg_text:<7} VIOLATION "
+        + style(violation_text, violation_role, enabled=colors)
+    )
+    workloads = ", ".join(
+        str(workload.get("label", "?")) for workload in item.get("workloads", [])[:4]
+    )
+    print(f"  WORKLOADS {workloads or '-'}")
+
+
 def _print_usage_trends(api: UsageQueryService, uid: int, end: datetime) -> None:
-    start = end - timedelta(days=56)
+    start = end - timedelta(days=28)
     payload = api.samples(
         start=start,
         end=end,
@@ -299,58 +349,36 @@ def _print_usage_trends(api: UsageQueryService, uid: int, end: datetime) -> None
         uid=uid,
         limit=1000,
     )
-    records = payload.get("records", [])
-    daily: dict[datetime.date, list[float]] = {}
-    weekly: dict[datetime.date, list[float]] = {}
-    for record in records:
-        try:
-            local_start = parse_iso(str(record["window_start"])).astimezone()
-        except (KeyError, TypeError, ValueError):
-            continue
-        active = max(0.0, float(record.get("active_observed_seconds", 0)))
-        reserved = (
-            max(0.0, float(record.get("observed_seconds", 0)))
-            if str(record.get("status", "")) == "ok"
-            else 0.0
-        )
-        day = local_start.date()
-        week = day - timedelta(days=day.weekday())
-        day_values = daily.setdefault(day, [0.0, 0.0])
-        week_values = weekly.setdefault(week, [0.0, 0.0])
-        day_values[0] += active
-        day_values[1] += reserved
-        week_values[0] += active
-        week_values[1] += reserved
-
-    today = end.astimezone().date()
-    current_week = today - timedelta(days=today.weekday())
-    daily_rows = [
-        (today - timedelta(days=offset), daily.get(today - timedelta(days=offset), [0.0, 0.0]))
-        for offset in range(6, -1, -1)
-    ]
-    weekly_rows = [
-        (
-            current_week - timedelta(days=7 * offset),
-            weekly.get(current_week - timedelta(days=7 * offset), [0.0, 0.0]),
-        )
-        for offset in range(7, -1, -1)
-    ]
-    print("\nActive GPU time (historical samples; active/reserved GPU-hours)")
-    print("Last 7 days")
+    daily_rows, weekly_rows = build_activity_trends(payload.get("records", []), end)
+    colors = color_enabled(sys.stdout)
+    print("\n" + style("ACTIVITY TREND", "heading", enabled=colors))
+    print(style("Last 7 days", "accent", enabled=colors))
     _print_trend_rows(daily_rows, label_format=lambda day: day.strftime("%a %m-%d"))
-    print("Last 8 weeks")
+    print(style("Last 4 weeks", "accent", enabled=colors))
     _print_trend_rows(weekly_rows, label_format=lambda day: day.strftime("%m-%d"))
 
 
 def _print_trend_rows(rows, *, label_format) -> None:
-    hours = [values[0] / 3600 for _, values in rows]
-    peak = max(hours, default=0.0)
-    for (period, values), active_hours in zip(rows, hours):
-        reserved_hours = values[1] / 3600
-        length = 0 if peak <= 0 else max(1, round(active_hours / peak * 18))
-        bar = "█" * length
+    colors = color_enabled(sys.stdout)
+    active_values = [values[0] / 3600 for _, values in rows]
+    reserved_values = [values[1] / 3600 for _, values in rows]
+    peak = max(reserved_values, default=0.0)
+    width = max(12, min(24, shutil.get_terminal_size(fallback=(100, 24)).columns - 38))
+    for (period, values), active_hours, reserved_hours in zip(rows, active_values, reserved_values):
+        active_cells, idle_cells = activity_bar_cells(
+            active_hours,
+            reserved_hours,
+            peak,
+            width,
+        )
+        bar = style("━" * active_cells, "success", enabled=colors) + style(
+            "─" * idle_cells,
+            "muted",
+            enabled=colors,
+        )
+        padding = " " * (width - active_cells - idle_cells)
         print(
-            f"  {label_format(period):<9} {bar:<18} "
+            f"  {label_format(period):<9} {bar}{padding} "
             f"{active_hours:>6.1f}/{reserved_hours:<6.1f}"
         )
 
@@ -392,8 +420,8 @@ def _print_samples(payload: dict) -> None:
         start = parse_iso(str(record["window_start"])).astimezone().strftime("%m-%d %H:%M")
         resolution = _duration_compact(int(record.get("resolution_seconds", 0)))
         avg_sm = "-" if record.get("avg_sm_percent") is None else f"{record['avg_sm_percent']:.0f}%"
-        active = _usage_duration(int(record.get("active_observed_seconds", 0)))
-        memory = _memory_compact(int(record.get("max_gpu_memory_mb") or 0))
+        active = format_usage_duration(int(record.get("active_observed_seconds", 0)))
+        memory = format_usage_memory(int(record.get("max_gpu_memory_mb") or 0))
         if wide:
             print(
                 f"{start:<14} {resolution:>4} {str(record.get('gpu', '-')):>3} "
@@ -422,16 +450,6 @@ def _duration_compact(seconds: int) -> str:
     if minutes:
         parts.append(f"{minutes}m")
     return "".join(parts) or "0m"
-
-
-def _memory_compact(memory_mb: int) -> str:
-    return "-" if memory_mb <= 0 else f"{memory_mb / 1024:.1f}G"
-
-
-def _usage_duration(seconds: int) -> str:
-    if seconds <= 0:
-        return "0s"
-    return f"{seconds}s" if seconds < 60 else _duration_compact(seconds)
 
 
 def _clip_text(value: object, width: int) -> str:

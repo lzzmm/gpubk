@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+from .node_identity import record_node_id
 from .timeparse import parse_iso, to_iso
 from .workload import WorkloadDescriptor
 
@@ -348,12 +349,18 @@ def decode_workload(record: dict) -> dict:
 def aggregate_rollups(records: Sequence[dict], resolution_seconds: int) -> List[dict]:
     if resolution_seconds not in TIER_FOR_RESOLUTION:
         raise ValueError("unsupported rollup resolution")
-    groups: Dict[Tuple[int, int, Optional[int], str], dict] = {}
+    groups: Dict[Tuple[int, str, int, Optional[int], str], dict] = {}
     for record in records:
         start = parse_iso(str(record["window_start"]))
         bucket = int(start.timestamp())
         bucket -= bucket % resolution_seconds
-        key = (bucket, int(record["gpu"]), _optional_int(record.get("uid")), str(record.get("status", "unknown")))
+        key = (
+            bucket,
+            record_node_id(record),
+            int(record["gpu"]),
+            _optional_int(record.get("uid")),
+            str(record.get("status", "unknown")),
+        )
         group = groups.setdefault(key, _new_aggregate(record, bucket, resolution_seconds))
         _merge_rollup(group, record)
     return [_finish_aggregate(groups[key]) for key in sorted(groups)]
@@ -534,6 +541,7 @@ def _rollup_id(record: dict) -> str:
         "gpu": record.get("gpu"),
         "uid": record.get("uid"),
         "status": record.get("status"),
+        "node_id": record_node_id(record),
         "reservation_ids": sorted(str(value) for value in record.get("reservation_ids", [])),
     }
     payload = json.dumps(identity, ensure_ascii=True, separators=(",", ":"), sort_keys=True)

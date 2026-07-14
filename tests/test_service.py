@@ -568,7 +568,7 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(submission.worker_status["state"], "not-seen")
         self.assertEqual(payload["worker"]["state"], "not-seen")
         self.assertTrue(
-            any("start `bk w`" in warning for warning in payload["warnings"])
+            any("start `bk w start`" in warning for warning in payload["warnings"])
         )
         self.assertEqual(edited.worker_status["state"], "not-seen")
 

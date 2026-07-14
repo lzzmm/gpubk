@@ -4,6 +4,26 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.1 - 2026-07-15
 
+- Add `sudo bk admin install`, a guided one-command shared-server setup that writes the
+  trusted configuration, installs tracked boot services, optionally installs the login
+  reminder, and keeps preview, unattended, and install-without-start modes.
+- Turn `bk u` into a colored personal terminal dashboard with a shared 7-day/4-week trend
+  model, add the same summary behind `u` in the TUI, and keep future reservations excluded.
+- Make plain `bk w` a safe read-only worker status command; use `bk w start` or `bk w once`
+  for explicit execution, with full long forms retained for services and automation.
+- Add concise booking and usage flags, color-aware help and status output, and a reliable
+  login warning when a fresh monitor sees the user still occupying a GPU after expiry.
+- Persist a versioned stable node identity and GPU UUID in new usage records, keep legacy
+  history readable, prevent same-index GPUs from different nodes merging during rollups,
+  and expose the migration boundary without claiming multi-host scheduling support.
+- Publish a GitHub Release with the exact distributions and checksums already verified on
+  PyPI, after the production tag workflow succeeds.
+- Add stopped-service administrator data backup, verification, backup-required atomic clear,
+  and empty-target restore commands with streaming SHA-256 checks and safe-tree validation.
+- Add optional cluster federation with trusted node catalogs, bounded SSH queries, parallel
+  status and recommendation, single-node remote booking, node-qualified edits/cancels,
+  usage aggregation, and administrator `(node_id, UID)` principal mappings. It remains
+  hidden without a catalog and never turns NFS into a shared live ledger.
 - Repair the GPU-focused TUI reservation and process tables: align every column, put the row
   number and booking ID first, show expected VRAM and scheduled job summaries, and distinguish
   reservation IDs from live process commands.

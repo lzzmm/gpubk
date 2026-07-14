@@ -79,6 +79,92 @@ class LoginNoticeTests(unittest.TestCase):
 
         self.assertEqual(render_login_summary(summary), "")
 
+    def test_expired_reservation_with_reliable_unreserved_process_warns(self):
+        now = datetime(2030, 1, 1, 10, 0, tzinfo=timezone.utc)
+        ledger = {
+            "reservations": [
+                reservation(
+                    "expired-booking",
+                    1001,
+                    now - timedelta(hours=1),
+                    now - timedelta(minutes=5),
+                    status="expired",
+                    gpus=(2,),
+                )
+            ]
+        }
+        summary = build_login_summary(
+            ledger,
+            1001,
+            now=now,
+            within_seconds=86400,
+            process_state={
+                "g2:p123": {
+                    "gpu": 2,
+                    "pid": 123,
+                    "uid": 1001,
+                    "status": "unreserved",
+                }
+            },
+            reliable_gpus=(2,),
+        )
+
+        self.assertEqual(summary["overdue"][0]["pids"], [123])
+        plain = render_login_summary(summary)
+        colored = render_login_summary(summary, color=True)
+        self.assertIn("ALERT GPU 2", plain)
+        self.assertIn("reservation expire", plain)
+        self.assertIn("\x1b[1;31m", colored)
+
+    def test_overdue_warning_requires_reliable_gpu_and_no_current_booking(self):
+        now = datetime(2030, 1, 1, 10, 0, tzinfo=timezone.utc)
+        expired = reservation(
+            "expired-booking",
+            1001,
+            now - timedelta(hours=1),
+            now - timedelta(minutes=5),
+            status="expired",
+            gpus=(0,),
+        )
+        process_state = {
+            "g0:p123": {
+                "gpu": 0,
+                "pid": 123,
+                "uid": 1001,
+                "status": "unreserved",
+            }
+        }
+        unreliable = build_login_summary(
+            {"reservations": [expired]},
+            1001,
+            now=now,
+            within_seconds=86400,
+            process_state=process_state,
+            reliable_gpus=(),
+        )
+        active = build_login_summary(
+            {
+                "reservations": [
+                    expired,
+                    reservation(
+                        "current-booking",
+                        1001,
+                        now - timedelta(minutes=1),
+                        now + timedelta(minutes=30),
+                        gpus=(0,),
+                    ),
+                ]
+            },
+            1001,
+            now=now,
+            within_seconds=86400,
+            process_state=process_state,
+            reliable_gpus=(0,),
+        )
+
+        self.assertEqual(unreliable["overdue"], [])
+        self.assertEqual(active["overdue"], [])
+
 
 class LoginHookTests(unittest.TestCase):
     def test_hook_is_bounded_interactive_and_reversible(self):

@@ -90,12 +90,12 @@ bk t                 # 进入可视化时间轴
 bk 1 30m                         # 预约 1 张 GPU，持续 30 分钟
 bk book 1 30m                    # 完全等价的显式命令形式
 bk 2 15m 5g                     # 简写：每张卡预计使用 5 GiB 显存
-bk 2 1h30m --mem 12g            # 每张卡预计使用 12 GiB 显存
-bk 1 1h --share 2               # 每张卡申请 2 个整数 shared slot
-bk s 1 2h --gpu 3               # 显式 shared，固定 GPU 3
-bk 1 1h --exclude 2,3           # 自动调度，但排除 GPU 2、3
+bk 2 1h30m -m 12g               # 每张卡预计使用 12 GiB 显存
+bk 1 1h -s 2                    # 每张卡申请 2 个整数 shared slot
+bk s 1 2h -g 3                  # 显式 shared，固定 GPU 3
+bk 1 1h -e 2,3                  # 自动调度，但排除 GPU 2、3
 bk x 2 4h                        # exclusive 排他预约
-bk 1 1h --at +30m               # 30 分钟后，当地时间
+bk 1 1h -t +30m                 # 30 分钟后，当地时间
 bk 1 1h --at "tomorrow 09:00"  # 明天 09:00
 bk 1 1h --start 2030-01-01T20:00:00+08:00  # 脚本使用的精确时间
 ```
@@ -232,15 +232,17 @@ bk run 1 30m --exclude 2,3 -- COMMAND  # 自动选择时排除指定 GPU
 bk 2 1h30m --mem 12g -- python train.py --config exp.yaml
 bk j                    # 查看任务
 bk j --cleanup          # 检查并清理私有任务文件
-bk w                    # 执行当前用户已经到点的任务
-bk w --status           # 只读检查当前用户的 worker 是否在线
+bk w                    # 只读检查当前用户的 worker 是否在线
+bk w start              # 前台运行当前用户的定时命令 worker
+bk w once               # 只处理一次到期任务后退出
 bk jr ID --accept-duplicate-risk  # 检查 uncertain 任务后再确认重试
 ```
 
 只输入 `bk run` 不会写台账：它会显示当前属于你的 GPU；若当前没有生效预约，则只读给出
 最早的 1-GPU 建议。即时命令使用稳定 GPU UUID（可用时）设置
 `CUDA_VISIBLE_DEVICES`，并在所选预约中最早的结束时间停止整个命令进程组。
-`bk w` 是 `bk worker` 的短别名；worker 专门负责启动“预约时附带、需要到点执行”的命令。
+裸 `bk w` 特意设计成只读状态检查，不会意外启动常驻进程。前台运行使用 `bk w start`，
+单次处理使用 `bk w once`，systemd 等服务使用完整命令 `bk worker`。
 
 worker 会设置 `CUDA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER`、
 `BK_RESERVATION_ID` 和 `BK_RESERVED_GPUS`。默认 live guard 会把同一轮 NVML 启动校验
@@ -366,7 +368,8 @@ bk u events --user me --since 7d
 
 `bk u` 只统计 monitor 已采样到的过去数据，未来预约不会进入任何统计。`Reserved` 是已有
 采样覆盖的历史预约时长，`Idle` 是其中没有检测到该用户 GPU 进程的部分。个人默认视图还
-会画最近 7 天逐日图和最近 8 周逐周图；只看表格可加 `--no-chart`。
+是彩色终端仪表盘，并画最近 7 天逐日图和最近 4 周逐周图；不看趋势可加
+`--no-chart`。TUI 普通模式按 `u` 可直接打开同一份个人总结，不必退出时间轴。
 
 在真实 GPU 主机上激活带 CUDA PyTorch 的环境后运行 `bk usage demo`。它会先检查
 monitor，确认后预约一张当前空闲卡，运行短时低占用负载，打印统计结果，并始终尝试取消
@@ -398,6 +401,20 @@ monitor 还会原子更新一个很小的 `usage/collector.json` 心跳。Usage 
 Python、JSON CLI 和 MCP 统一返回 `gpubk.usage.v1` 公共模型；可视化程序不应
 直接解析内部文件。完整说明见 [Telemetry](TELEMETRY.md)。
 `usage_load_window_minutes` 同时控制自动选卡保留并纳入判断的近期设备历史长度。
+
+新写入的历史还会带版本化 `gpubk.node` 扩展，其中包含经过哈希的稳定节点 ID、主机名，
+以及可用时的稳定 GPU UUID；不会保存原始 machine-id。旧记录继续作为 `legacy` 节点读取。
+因此以后导出、汇总或迁移时，两台机器各自的 GPU 0 不会被误认为同一设备。用户汇总已经
+返回 `nodes` 和 `(node_id, gpu)` 设备对，capabilities 也会明确说明当前拓扑能力。
+
+每份 GPUBK 台账仍只管理一台主机。不要让多台机器上的独立 broker/monitor 共写同一个
+NFS 目录。可选集群联邦通过非交互 SSH 和版本化 Agent JSON 查询各主机，并把预约提交给
+唯一一台目标机器的 broker。管理员可以把稳定的 `(node_id, 数字 UID)` 映射成统一人员；
+不能只凭用户名合并，已有历史数据无需重写。
+
+没有集群目录时，所有节点入口都会隐藏。配置后，`bk c` 查看所有节点和活动预约，
+`bk c recommend 2 1h` 比较合法开始时间，`bk c book 2 1h` 在最佳单节点预约，
+`bk @NODE 2 1h` 则明确指定机器。传输、故障、NFS 导出及上线边界见 [CLUSTER.md](CLUSTER.md)。
 
 监测器也提供用户服务：
 
@@ -482,11 +499,23 @@ sudo python3 -m venv /opt/gpubk
 sudo /opt/gpubk/bin/python -m pip install --upgrade pip
 sudo /opt/gpubk/bin/python -m pip install 'gpubk[gpu]'
 sudo ln -s /opt/gpubk/bin/bk /usr/local/bin/bk
-sudo /opt/gpubk/bin/bk admin init --yes
-sudo /opt/gpubk/bin/bk admin services install --yes
+sudo /opt/gpubk/bin/bk admin install
+bk doctor --probe --require-monitor --strict
+```
+
+安装向导每次只问一个设置，所有问题都有稳妥默认值，直接回车即可接受；最后会统一预览再
+确认。它会初始化可信配置、安装受跟踪的 broker/monitor unit、可选安装彩色登录提醒，
+并设置两个服务开机启动。`--dry-run` 只预览，`--yes` 使用无人值守默认值，`--no-start`
+只安装不启动。pip 本身不会调用 sudo，也不会修改 `/etc`；系统级改动只由这条明确的
+管理员命令执行。
+
+排障或高级部署仍可使用完全等价的分步流程：
+
+```bash
+sudo bk admin init --yes
+sudo bk admin services install --yes
 sudo systemctl daemon-reload
 sudo systemctl enable --now gpubk-broker.service gpubk-monitor.service
-bk doctor --probe --require-monitor --strict
 ```
 
 若 `ln` 提示 `File exists`，不要强制覆盖，先检查：
@@ -516,6 +545,24 @@ Phone 和 Other；`bk info --json` 会把同一份带版本结构的数据提供
 TUI 中按 `i` 即可查看。管理员可以用 `sudo chfn 用户名` 更新这些本机账号字段；修改后
 立即生效，执行 `sudo bk admin transfer` 后也会自动跟随新账号，不需要重写 GPUBK 数据。
 这些字段会展示给所有本机 GPUBK 用户，因此只应填写适合公开的联系方式。
+
+若要把多台正常工作的 GPUBK 主机组成联邦，在用户执行集群命令的机器上初始化目录。
+先从每台远端的 `bk agent context --compact` 读取稳定节点 ID，并确认普通用户可通过已验证
+主机密钥的非交互 SSH 登录，再添加节点：
+
+```bash
+sudo bk admin cluster init gpu-a --yes
+ssh -T gpu-b /usr/local/bin/bk agent context --compact
+sudo bk admin cluster add gpu-b gpu-b NODE_ID_FROM_ABOVE --yes
+sudo bk admin cluster map lab-user gpu-a 1003 --yes
+sudo bk admin cluster map lab-user gpu-b 2042 --yes
+sudo bk admin cluster status
+bk c
+```
+
+root 管理的目录只保存端点、稳定节点 ID、优先级和可选身份映射，不保存 SSH 私钥。每个
+用户仍由目标机器的 SSH 独立认证，并以远端真实数字 UID 操作。节点优先级只在最早开始
+时间相同时打破平局；所有写入都由远端 broker 最终校验，一条预约不会跨机器拆分。
 
 常用的非交互形式：
 
@@ -639,6 +686,37 @@ bk doctor --probe --require-monitor --strict
 
 服务重启、版本回滚和跨版本注意事项见 [UPGRADING.md](UPGRADING.md)。
 
+### 备份、清空与恢复
+
+管理员数据命令覆盖完整受管数据树：预约、操作日志、台账内部快照、用量事件、聚合记录和
+采集器状态；它不会用旧备份悄悄覆盖当前可信系统配置。操作前先停掉两个写进程：
+
+```bash
+sudo systemctl stop gpubk-broker.service gpubk-monitor.service
+
+sudo bk admin data backup /var/backups/gpubk/pre-change
+sudo bk admin data verify /var/backups/gpubk/pre-change
+
+# 破坏性操作：必须先成功创建并校验 pre-clear，之后才会清空。
+sudo bk admin data clear --backup-to /var/backups/gpubk/pre-clear --yes
+
+# 只有受管数据目录为空时才允许恢复。
+sudo bk admin data restore /var/backups/gpubk/pre-change --yes
+
+sudo systemctl start gpubk-broker.service gpubk-monitor.service
+bk doctor --probe --require-monitor --strict
+```
+
+`backup` 不写路径或 `clear` 不写 `--backup-to` 时，默认使用
+`/var/backups/gpubk` 下带 UTC 时间戳的目录。每份快照都是私有目录，包含版本化清单、仅供
+核对的配置副本，以及每个文件的大小和 SHA-256。创建、清空和恢复都使用同文件系统原子
+目录替换和 fsync；符号链接、硬链接、特殊文件、额外备份内容、所有权漂移、摘要不一致及
+并发写入都会被拒绝。文件按固定大小分块复制，多年历史也不需要整体装入内存。
+
+`bk reset --yes` 仍只用于个人/测试数据，共享服务器存储会直接禁用它。若保留安装但从空
+历史重新开始，使用 `bk admin data clear`；若要移除整个受跟踪部署，使用
+`bk admin uninstall --purge-data`。
+
 管理员可以选择在用户交互式登录时显示一条很短的预约提醒：
 
 ```bash
@@ -648,7 +726,9 @@ sudo bk admin login-hook status
 
 该钩子每次登录最多运行一次，并且仅在标准输出是终端时通过一秒 `timeout` 执行
 `bk login --hook`。它只读已提交台账，不申请写锁，也不探测 NVML。用户没有正在进行或
-未来 24 小时内的预约时完全无输出；所有错误都会被抑制，因此不会阻塞 SSH 登录。
+未来 24 小时内的预约时完全无输出。终端支持颜色时会区分当前和即将开始的预约；若新鲜
+且可信的 monitor 仍看到当前 UID 在预约过期后占用 GPU，则显示红色告警。所有错误都会
+被抑制，因此不会阻塞 SSH 登录。
 `sudo bk admin login-hook uninstall --yes` 只删除带 GPUBK 标记的受管文件；完整执行
 `sudo bk admin uninstall` 也会自动清理该钩子。
 

@@ -118,6 +118,8 @@ class UsageApiTests(unittest.TestCase):
         self.assertEqual(payload["collector"]["state"], "not-seen")
         self.assertNotIn("collector", payload["storage"])
         self.assertEqual(payload["retention"]["minute_days"], 30)
+        self.assertEqual(payload["topology"]["record_extension"], "gpubk.node")
+        self.assertFalse(payload["topology"]["multi_node_scheduling"])
         self.assertEqual(payload["retention"]["daily_days"], 0)
         self.assertEqual(
             payload["writer_policy"],

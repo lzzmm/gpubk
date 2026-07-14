@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .config import Config
+from .node_identity import record_node_id, stable_node_identity
 from .timeparse import parse_iso, to_iso, utc_now
 from .usage_schema import (
     RESOLUTIONS,
@@ -70,6 +71,7 @@ class UsageQueryService:
             "schema_version": USAGE_API_VERSION,
             "kind": "usage-samples",
             "generated_at": to_iso(generated_at),
+            "node": stable_node_identity(),
             "collector": self.store.load_collector_status(
                 now=generated_at,
                 expected_gpu_count=self.config.gpu_count,
@@ -123,6 +125,7 @@ class UsageQueryService:
             "schema_version": USAGE_API_VERSION,
             "kind": "usage-events",
             "generated_at": to_iso(generated_at),
+            "node": stable_node_identity(),
             "collector": self.store.load_collector_status(
                 now=generated_at,
                 expected_gpu_count=self.config.gpu_count,
@@ -175,6 +178,7 @@ class UsageQueryService:
             "schema_version": USAGE_API_VERSION,
             "kind": "usage-users",
             "generated_at": to_iso(generated_at),
+            "node": stable_node_identity(),
             "collector": self.store.load_collector_status(
                 now=generated_at,
                 expected_gpu_count=self.config.gpu_count,
@@ -205,6 +209,7 @@ class UsageQueryService:
             "schema_version": USAGE_API_VERSION,
             "kind": "usage-capabilities",
             "generated_at": to_iso(generated_at),
+            "node": stable_node_identity(),
             "collector": self.store.load_collector_status(
                 now=generated_at,
                 expected_gpu_count=self.config.gpu_count,
@@ -228,6 +233,14 @@ class UsageQueryService:
                 "collector_status_protocol": "bk.telemetry.CollectorStatusSink",
                 "json_cli": "bk usage ... --json",
                 "mcp": "get_my_gpu_usage",
+            },
+            "topology": {
+                "current_node": stable_node_identity(),
+                "record_extension": "gpubk.node",
+                "legacy_records_node": "legacy",
+                "multi_node_scheduling": False,
+                "cross_node_identity_mapping": False,
+                "federated_cluster_client": True,
             },
             "writer_policy": {
                 "configured_uid": self.config.monitor_uid,
@@ -334,6 +347,8 @@ def _summarize_users(records: Sequence[dict], workloads: Dict[int, dict], redact
                 "max_sm_percent": None,
                 "max_gpu_memory_mb": 0,
                 "gpus": set(),
+                "nodes": set(),
+                "devices": set(),
                 "statuses": {},
                 "workload_observed_seconds": {},
             },
@@ -349,6 +364,9 @@ def _summarize_users(records: Sequence[dict], workloads: Dict[int, dict], redact
         elif status not in {"idle", "system"}:
             group["violation_gpu_seconds"] += active or observed
         group["gpus"].add(int(record.get("gpu", -1)))
+        node_id = record_node_id(record)
+        group["nodes"].add(node_id)
+        group["devices"].add((node_id, int(record.get("gpu", -1))))
         group["statuses"][status] = group["statuses"].get(status, 0.0) + observed
         sm_samples = max(0, int(record.get("sm_sample_count", 0)))
         if record.get("avg_sm_percent") is not None:
@@ -371,6 +389,12 @@ def _summarize_users(records: Sequence[dict], workloads: Dict[int, dict], redact
         workload_seconds = group.pop("workload_observed_seconds")
         group["avg_sm_percent"] = round(sm_total / sm_samples, 3) if sm_samples else None
         group["gpus"] = sorted(value for value in group["gpus"] if value >= 0)
+        group["nodes"] = sorted(group["nodes"])
+        group["devices"] = [
+            {"node_id": node_id, "gpu": gpu}
+            for node_id, gpu in sorted(group["devices"])
+            if gpu >= 0
+        ]
         for key in (
             "reserved_gpu_seconds",
             "active_gpu_seconds",

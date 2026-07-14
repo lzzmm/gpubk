@@ -12,6 +12,7 @@ import pwd
 import shutil
 import socket
 import stat
+import subprocess
 import sys
 import tempfile
 from contextlib import ExitStack, contextmanager
@@ -32,6 +33,12 @@ from .admin_services import (
     plan_system_services_uninstall,
     retarget_system_services_document,
     validate_system_services_document,
+)
+from .admin_data import (
+    clear_data_directory,
+    create_data_backup,
+    restore_data_backup,
+    verify_data_backup,
 )
 from .config import (
     BROKER_ALL_SOCKET_MODE,
@@ -284,8 +291,50 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         description=(
             "Initialize, supervise, transfer, or safely remove a shared GPUBK server."
         ),
+        epilog=(
+            "Common maintenance:\n"
+            "  sudo bk admin install\n"
+            "  sudo bk admin data backup /var/backups/gpubk/pre-upgrade\n"
+            "  sudo bk admin data verify /var/backups/gpubk/pre-upgrade\n"
+            "  sudo bk admin data clear --backup-to /var/backups/gpubk/pre-clear --yes\n"
+            "Run 'bk admin COMMAND -h' for command-specific safety requirements."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     commands = parser.add_subparsers(dest="action", required=True)
+    install_parser = commands.add_parser(
+        "install",
+        help="guided one-command initialization and boot-service setup",
+    )
+    install_parser.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
+    install_parser.add_argument("--data-dir", type=Path)
+    install_parser.add_argument("--access", choices=("all", "group"))
+    install_parser.add_argument("--group")
+    install_parser.add_argument("--service-user")
+    install_parser.add_argument("--broker-socket", type=Path, default=DEFAULT_BROKER_SOCKET)
+    install_parser.add_argument("--gpu-count", type=int)
+    install_parser.add_argument("--disabled-gpus")
+    install_parser.add_argument("--gpu-priority")
+    install_parser.add_argument("--slot-minutes", type=int)
+    install_parser.add_argument("--max-shared-users", type=int)
+    install_memory = install_parser.add_mutually_exclusive_group()
+    install_memory.add_argument(
+        "--require-shared-memory",
+        dest="require_shared_memory",
+        action="store_true",
+    )
+    install_memory.add_argument(
+        "--allow-implicit-shared-memory",
+        dest="require_shared_memory",
+        action="store_false",
+    )
+    install_parser.set_defaults(require_shared_memory=None)
+    install_parser.add_argument("--python-executable", type=Path)
+    install_parser.add_argument("--login-hook", action="store_true")
+    install_parser.add_argument("--no-start", action="store_true")
+    install_parser.add_argument("--force", action="store_true")
+    install_parser.add_argument("--yes", action="store_true")
+    install_parser.add_argument("--dry-run", action="store_true")
     init_parser = commands.add_parser(
         "init",
         help="preview or initialize shared server configuration",
@@ -430,6 +479,49 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         "--dry-run", action="store_true", help="show the plan only"
     )
     uninstall_parser.add_argument("--json", action="store_true")
+    data_parser = commands.add_parser(
+        "data",
+        help="back up, verify, clear, or restore managed server data",
+        description=(
+            "Maintain the complete reservation, audit, and usage data tree. "
+            "Backup, clear, and restore require stopped broker/monitor services; "
+            "clear always creates and verifies a backup first."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  sudo bk admin data backup /var/backups/gpubk/pre-upgrade\n"
+            "  sudo bk admin data verify /var/backups/gpubk/pre-upgrade\n"
+            "  sudo bk admin data clear --backup-to /var/backups/gpubk/pre-clear --yes\n"
+            "  sudo bk admin data restore /var/backups/gpubk/pre-clear --yes"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    data_commands = data_parser.add_subparsers(dest="data_action", required=True)
+    data_backup = data_commands.add_parser(
+        "backup", help="create a checksummed, immutable-style data snapshot"
+    )
+    data_backup.add_argument("path", nargs="?", type=Path)
+    data_backup.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
+    data_backup.add_argument("--json", action="store_true")
+    data_verify = data_commands.add_parser(
+        "verify", help="verify a backup without changing server data"
+    )
+    data_verify.add_argument("path", type=Path)
+    data_verify.add_argument("--json", action="store_true")
+    data_clear = data_commands.add_parser(
+        "clear", help="back up first, then atomically replace server data with empty state"
+    )
+    data_clear.add_argument("--backup-to", type=Path)
+    data_clear.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
+    data_clear.add_argument("--yes", action="store_true")
+    data_clear.add_argument("--json", action="store_true")
+    data_restore = data_commands.add_parser(
+        "restore", help="verify and restore a backup into empty managed data"
+    )
+    data_restore.add_argument("path", type=Path)
+    data_restore.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
+    data_restore.add_argument("--yes", action="store_true")
+    data_restore.add_argument("--json", action="store_true")
     services_parser = commands.add_parser(
         "services",
         help="install, inspect, or remove tracked system-level services",
@@ -503,8 +595,49 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     login_hook_uninstall.add_argument("--yes", action="store_true")
     login_hook_uninstall.add_argument("--dry-run", action="store_true")
     login_hook_uninstall.add_argument("--json", action="store_true")
+    cluster_parser = commands.add_parser(
+        "cluster",
+        help="inspect or update the optional federated node catalog",
+    )
+    cluster_commands = cluster_parser.add_subparsers(
+        dest="cluster_action", required=True
+    )
+    cluster_status = cluster_commands.add_parser("status", help="validate and show nodes")
+    cluster_status.add_argument("--cluster-file", type=Path)
+    cluster_status.add_argument("--json", action="store_true")
+    cluster_init = cluster_commands.add_parser("init", help="create a catalog with this local node")
+    cluster_init.add_argument("name")
+    cluster_init.add_argument("--cluster-file", type=Path)
+    cluster_init.add_argument("--yes", action="store_true")
+    cluster_add = cluster_commands.add_parser("add", help="add one SSH-reachable GPU node")
+    cluster_add.add_argument("name")
+    cluster_add.add_argument("target")
+    cluster_add.add_argument("node_id")
+    cluster_add.add_argument("--executable", default="/usr/local/bin/bk")
+    cluster_add.add_argument("--priority", type=int, default=0)
+    cluster_add.add_argument("--timeout", type=float, default=8)
+    cluster_add.add_argument("--cluster-file", type=Path)
+    cluster_add.add_argument("--yes", action="store_true")
+    cluster_remove = cluster_commands.add_parser("remove", help="remove one node by name")
+    cluster_remove.add_argument("name")
+    cluster_remove.add_argument("--cluster-file", type=Path)
+    cluster_remove.add_argument("--yes", action="store_true")
+    cluster_map = cluster_commands.add_parser(
+        "map", help="map one node-local numeric UID to a global principal"
+    )
+    cluster_map.add_argument("principal")
+    cluster_map.add_argument("node")
+    cluster_map.add_argument("uid", type=int)
+    cluster_map.add_argument("--cluster-file", type=Path)
+    cluster_map.add_argument("--yes", action="store_true")
     args = parser.parse_args(list(argv))
 
+    if args.action == "install":
+        return _run_admin_install(args)
+    if args.action == "data":
+        return _run_admin_data(args)
+    if args.action == "cluster":
+        return _run_admin_cluster(args)
     if args.action == "login-hook":
         return _run_admin_login_hook(args)
     if args.action == "services":
@@ -579,6 +712,264 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     return 0
 
 
+def _run_admin_data(args: argparse.Namespace) -> int:
+    if os.geteuid() != 0:
+        raise BookingError("administrator data maintenance must run as root; use sudo bk admin data")
+    action = args.data_action
+    if action == "verify":
+        result = verify_data_backup(args.path)
+        return _print_admin_data_result(result, json_output=args.json)
+
+    config_file = _absolute_path(args.config_file)
+    manifest, _document = _load_admin_services_manifest(config_file, expected_owner=0)
+    data_dir = _manifest_absolute_path(manifest, "data_dir")
+    broker_socket = _manifest_absolute_path(manifest, "broker_socket")
+    service_uid = _manifest_nonnegative_int(manifest, "service_uid")
+    service_gid = _manifest_nonnegative_int(manifest, "service_gid")
+    owner = (service_uid, service_gid)
+    _validate_transfer_directory(data_dir, {owner}, BROKER_DIR_MODE, "data")
+    _validate_transfer_directory(
+        broker_socket.parent,
+        {owner},
+        BROKER_SOCKET_DIRECTORY_MODE,
+        "broker socket",
+    )
+    blockers = _admin_service_blockers(
+        data_dir,
+        broker_socket,
+        owner_pair={owner},
+        socket_owner_uids={0, service_uid},
+    )
+    if blockers:
+        raise BookingError(
+            "; ".join(blockers)
+            + "; stop gpubk-broker.service and gpubk-monitor.service, then retry"
+        )
+
+    backup_path = getattr(args, "path", None) or getattr(args, "backup_to", None)
+    if action in {"backup", "clear"} and backup_path is None:
+        backup_path = _default_admin_backup_path()
+    if action in {"clear", "restore"} and not args.yes:
+        if args.json or not sys.stdin.isatty():
+            print(f"bk: pass --yes to {action} managed server data", file=sys.stderr)
+            return 1
+        prompt = (
+            f"Clear all managed data after backup to {backup_path}? [y/N]: "
+            if action == "clear"
+            else f"Restore {args.path} into the empty managed data directory? [y/N]: "
+        )
+        if input(prompt).strip().lower() not in {"y", "yes"}:
+            print("No changes made.")
+            return 1
+
+    with _admin_service_guard(
+        data_dir,
+        broker_socket,
+        allowed_owner_pairs={owner},
+        lock_owner=owner,
+        socket_owner_uids={0, service_uid},
+        operation=f"data {action}",
+    ):
+        if action == "backup":
+            result = create_data_backup(
+                data_dir,
+                config_file,
+                backup_path,
+                service_uid=service_uid,
+                service_gid=service_gid,
+            )
+        elif action == "clear":
+            result = create_data_backup(
+                data_dir,
+                config_file,
+                backup_path,
+                service_uid=service_uid,
+                service_gid=service_gid,
+            )
+            clear_data_directory(
+                data_dir,
+                service_uid=service_uid,
+                service_gid=service_gid,
+                directory_mode=BROKER_DIR_MODE,
+            )
+            result = {**result, "status": "cleared", "data_dir": str(data_dir)}
+        else:
+            result = restore_data_backup(
+                args.path,
+                data_dir,
+                service_uid=service_uid,
+                service_gid=service_gid,
+                directory_mode=BROKER_DIR_MODE,
+            )
+            result = {**result, "status": "restored", "data_dir": str(data_dir)}
+    return _print_admin_data_result(result, json_output=args.json)
+
+
+def _default_admin_backup_path() -> Path:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return Path("/var/backups/gpubk") / f"gpubk-{stamp}"
+
+
+def _print_admin_data_result(result: dict, *, json_output: bool) -> int:
+    public = {key: value for key, value in result.items() if key != "manifest"}
+    if json_output:
+        print(json.dumps(public, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"data {public['status']}: {public['path']}")
+        print(
+            f"contents: {public['files']} file(s), {public['directories']} "
+            f"director(ies), {public['bytes']} byte(s)"
+        )
+        if public.get("data_dir"):
+            print(f"data directory: {public['data_dir']}")
+    return 0
+
+
+def _run_admin_cluster(args: argparse.Namespace) -> int:
+    from .cluster import (
+        ClusterConfig,
+        ClusterNode,
+        cluster_config_path,
+        load_cluster_config,
+        write_cluster_config,
+    )
+    from .node_identity import stable_node_identity
+
+    if os.geteuid() != 0:
+        raise BookingError("cluster catalog administration must run as root; use sudo")
+    path = args.cluster_file or cluster_config_path()
+    if not path.is_absolute():
+        raise BookingError("cluster catalog path must be absolute")
+    action = args.cluster_action
+    desired = None
+    if action == "init":
+        if os.path.lexists(path):
+            raise BookingError(f"cluster catalog already exists: {path}")
+        identity = stable_node_identity()
+        desired = ClusterConfig(
+            path,
+            (
+                ClusterNode(
+                    args.name,
+                    identity["id"],
+                    "local",
+                    None,
+                    "/usr/local/bin/bk",
+                    0,
+                    8,
+                ),
+            ),
+        )
+    else:
+        current = load_cluster_config(path)
+        if action == "status":
+            return _print_admin_cluster(current, json_output=args.json)
+        nodes = list(current.nodes)
+        principals = [
+            {"id": item["id"], "members": [dict(member) for member in item["members"]]}
+            for item in current.principals
+        ]
+        if action == "add":
+            if any(node.name == args.name for node in nodes):
+                raise BookingError(f"cluster node already exists: {args.name}")
+            nodes.append(
+                ClusterNode(
+                    args.name,
+                    args.node_id,
+                    "ssh",
+                    args.target,
+                    args.executable,
+                    args.priority,
+                    args.timeout,
+                )
+            )
+        elif action == "remove":
+            matches = [node for node in nodes if node.name == args.name]
+            if not matches:
+                raise BookingError(f"unknown cluster node: {args.name}")
+            removed_id = matches[0].node_id
+            nodes = [node for node in nodes if node.name != args.name]
+            cleaned = []
+            for principal in principals:
+                members = [
+                    member for member in principal["members"]
+                    if member["node_id"] != removed_id
+                ]
+                if members:
+                    cleaned.append({"id": principal["id"], "members": members})
+            principals = cleaned
+        else:
+            node = current.node(args.node)
+            pair = (node.node_id, args.uid)
+            for principal in principals:
+                for member in principal["members"]:
+                    if (member["node_id"], member["uid"]) == pair:
+                        if principal["id"] == args.principal:
+                            desired = current
+                            break
+                        raise BookingError(
+                            "node-local UID is already mapped to principal "
+                            f"{principal['id']}"
+                        )
+                else:
+                    continue
+                break
+            else:
+                target = next(
+                    (item for item in principals if item["id"] == args.principal),
+                    None,
+                )
+                if target is None:
+                    target = {"id": args.principal, "members": []}
+                    principals.append(target)
+                target["members"].append({"node_id": node.node_id, "uid": args.uid})
+        if desired is None:
+            desired = ClusterConfig(path, tuple(nodes), tuple(principals))
+
+    _print_admin_cluster(desired, json_output=False)
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print("bk: pass --yes to update the cluster catalog", file=sys.stderr)
+            return 1
+        if input("Write this cluster catalog? [y/N]: ").strip().lower() not in {"y", "yes"}:
+            print("No changes made.")
+            return 1
+    write_cluster_config(desired)
+    print(f"cluster catalog updated: {path}")
+    return 0
+
+
+def _print_admin_cluster(config, *, json_output: bool) -> int:
+    document = {
+        "schema_version": "gpubk.cluster.v1",
+        "path": str(config.path),
+        "nodes": [
+            {
+                "name": node.name,
+                "node_id": node.node_id,
+                "transport": node.transport,
+                "target": node.target,
+                "priority": node.priority,
+            }
+            for node in config.nodes
+        ],
+        "principals": list(config.principals),
+    }
+    if json_output:
+        print(json.dumps(document, ensure_ascii=False, sort_keys=True))
+        return 0
+    print(f"Cluster catalog: {config.path}")
+    for node in config.nodes:
+        endpoint = "this host" if node.transport == "local" else node.target
+        print(
+            f"  {node.name:<16} {node.node_id} {node.transport:<5} "
+            f"priority={node.priority} endpoint={endpoint}"
+        )
+    if config.principals:
+        print(f"Identity mappings: {len(config.principals)} principal(s)")
+    return 0
+
+
 def _run_admin_login_hook(args: argparse.Namespace) -> int:
     from .login_hook import (
         DEFAULT_LOGIN_EXECUTABLE,
@@ -634,6 +1025,91 @@ def _run_admin_login_hook(args: argparse.Namespace) -> int:
         outcome = "installed" if action == "install" else "removed"
         print(f"login notice {outcome}: {result['path']}")
     return 0
+
+
+def _run_admin_install(args: argparse.Namespace) -> int:
+    if os.geteuid() != 0 and not args.dry_run:
+        raise BookingError("administrator install must run as root; use sudo bk admin install")
+    interactive = sys.stdin.isatty() and not args.yes
+    detected_gpu_count = _detected_gpu_count(args.gpu_count)
+    default_service = _default_service_identity(args.service_user)
+    plan = _build_plan(
+        args,
+        detected_gpu_count,
+        default_service,
+        interactive=interactive,
+    )
+    _validate_plan(plan)
+    inspection = inspect_admin_init(plan, force=args.force, expected_owner=0)
+    login_hook = bool(args.login_hook)
+    if interactive and not args.login_hook:
+        login_hook = _ask_bool("Install the interactive login reminder", True, enabled=True)
+
+    _print_plan(plan, inspection)
+    print(f"  Python:  {_absolute_path(args.python_executable or Path(sys.executable))}")
+    print(f"  login:   {'install reminder' if login_hook else 'leave unchanged'}")
+    print(f"  services: {'install only' if args.no_start else 'install, enable, and start'}")
+    if args.dry_run:
+        print("Dry run: no files or services changed.")
+        return 0
+    if not args.yes:
+        answer = input("Install GPUBK with this configuration? [y/N]: ").strip().lower()
+        if answer not in {"y", "yes"}:
+            print("No changes made.")
+            return 1
+
+    systemctl = None if args.no_start else shutil.which("systemctl")
+    if not args.no_start and systemctl is None:
+        raise BookingError("systemctl is unavailable; use --no-start and supervise services manually")
+
+    apply_admin_init(plan, force=args.force)
+    service_plan, service_inspection = inspect_admin_system_services(
+        plan.config_file,
+        operation="install",
+        python_executable=args.python_executable or Path(sys.executable),
+        force=args.force,
+        expected_owner=0,
+    )
+    if service_inspection["blockers"]:
+        raise BookingError("; ".join(service_inspection["blockers"]))
+    apply_admin_system_services_install(
+        plan.config_file,
+        service_plan=service_plan,
+    )
+    if login_hook:
+        from .login_hook import apply_login_hook_install
+
+        apply_login_hook_install()
+    if systemctl is not None:
+        _run_systemctl(systemctl, "daemon-reload")
+        _run_systemctl(
+            systemctl,
+            "enable",
+            "--now",
+            "gpubk-broker.service",
+            "gpubk-monitor.service",
+        )
+    print("installed: GPUBK configuration and tracked system services")
+    if systemctl is not None:
+        print("started: gpubk-broker.service and gpubk-monitor.service")
+    else:
+        print("next: start the broker and monitor using your service supervisor")
+    print("verify as an ordinary user: bk doctor --probe --require-monitor --strict")
+    return 0
+
+
+def _run_systemctl(executable: str, *arguments: str) -> None:
+    result = subprocess.run(
+        [executable, *arguments],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        suffix = f": {detail[-1]}" if detail else ""
+        raise BookingError(f"systemctl {' '.join(arguments)} failed{suffix}")
 
 
 def _run_admin_gpu_policy(args: argparse.Namespace) -> int:
@@ -3856,15 +4332,35 @@ def _build_plan(
         maximum=MAX_GPU_COUNT,
         enabled=interactive and args.gpu_count is None,
     )
-    try:
-        disabled_gpus = validate_gpu_list(
-            args.disabled_gpus,
-            gpu_count,
-            "disabled_gpus",
-        )
-        gpu_priority = validate_gpu_priority(args.gpu_priority, gpu_count)
-    except ValueError as exc:
-        raise BookingError(str(exc)) from exc
+    disabled_value = args.disabled_gpus
+    if interactive and disabled_value is None:
+        disabled_value = _ask("Disabled GPUs (comma separated; blank for none)", "", enabled=True)
+    priority_value = args.gpu_priority
+    if interactive and priority_value is None:
+        priority_value = _ask("Lower-priority GPUs (GPU=LEVEL; blank for none)", "", enabled=True)
+    while True:
+        try:
+            disabled_gpus = validate_gpu_list(
+                disabled_value or None,
+                gpu_count,
+                "disabled_gpus",
+            )
+            gpu_priority = validate_gpu_priority(priority_value or None, gpu_count)
+            break
+        except ValueError as exc:
+            if not interactive:
+                raise BookingError(str(exc)) from exc
+            print(f"Invalid GPU policy: {exc}")
+            disabled_value = _ask(
+                "Disabled GPUs (comma separated; blank for none)",
+                "",
+                enabled=True,
+            )
+            priority_value = _ask(
+                "Lower-priority GPUs (GPU=LEVEL; blank for none)",
+                "",
+                enabled=True,
+            )
     slot_minutes = _ask_slot_minutes(
         args.slot_minutes if args.slot_minutes is not None else DEFAULT_SLOT_MINUTES,
         enabled=interactive and args.slot_minutes is None,

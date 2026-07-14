@@ -39,7 +39,14 @@ from .storage import LedgerStore
 from .timeparse import format_local_range, parse_iso, parse_memory_mb, utc_now
 from .tutorial import TUI_TOUR, mark_onboarding_seen, onboarding_seen
 from .usage import ProcessUsage, classify_process_usage, summarize_process_command
+from .usage_api import UsageQueryService
 from .usage_store import UsageAuditStore
+from .usage_view import (
+    activity_bar_cells,
+    build_activity_trends,
+    format_usage_duration,
+    format_usage_memory,
+)
 from .worker_status import inspect_worker_status, reservations_need_worker
 
 
@@ -116,6 +123,7 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
             ("Tab", "Switch between reservation and GPU focus"),
             ("Enter", "Inspect the selected reservation or GPU"),
             ("a / e / d", "Add, edit, or delete a reservation"),
+            ("u", "Open your sampled GPU-use dashboard"),
             ("i", "Show the administrator account and contact"),
             ("?", "Open this help"),
             ("q / Esc", "Quit GPUBK"),
@@ -158,7 +166,7 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
             ("Reservation", "Select a row to blink its exact interval"),
             ("Monitor", "Header shows collector health; details: bk doctor"),
             ("Worker", "Header shows your scheduled-command worker"),
-            ("Util history", "Run: bk u me, users, samples, or events"),
+            ("Util history", "Press u for your dashboard; bk u offers detail"),
             ("Live context", "Run: bk agent context --compact"),
             ("Theme", "Auto-detect; set BK_TUI_THEME=dark or light"),
             ("", "PAST RESERVATIONS ARE READ-ONLY"),
@@ -178,6 +186,7 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
             ("Tab", "Inspect a GPU's sharers and processes"),
             ("e", "Edit a selected future reservation"),
             ("bk u", "Show this UID's historical GPU summary"),
+            ("u in TUI", "Open your personal summary without leaving TUI"),
             ("bk agent context", "Give an Agent safe allocation context"),
             ("bk doctor", "Read-only policy and ledger diagnostics"),
         ),
@@ -492,6 +501,13 @@ def _handle_key(stdscr, key: int, config: Config, store: LedgerStore, state: Tui
                 "GPUBK administrator",
                 administrator_display_lines(info),
             )
+        return
+    if key in (ord("u"), ord("U")):
+        if stdscr is None:
+            state.message = "usage: sampled history for your UID; run bk u for CLI detail"
+            state.error = False
+        else:
+            _show_usage_summary(stdscr, config)
         return
     if key in (ord("?"), ord("p"), ord("P")):
         if stdscr is None:
@@ -1583,20 +1599,20 @@ def _footer_label(state: TuiState, preview: Optional[AddPreview], width: int) ->
         )
         return _first_fitting_footer((long, medium, short, compact), width)
     elif state.focus == FOCUS_GPUS:
-        short = " GPU | arrows | Enter details | Tab RSV | a add | n NOW | i admin | ? | q quit"
-        compact = " GPU | arrows | Enter | Tab RSV | a add | n NOW | ? | q quit"
+        short = " GPU | arrows | Enter details | Tab RSV | a add | u usage | n NOW | ? | q quit"
+        compact = " GPU | arrows | Enter | Tab RSV | a add | u | n NOW | ? | q quit"
         long = (
             " GPU FOCUS | up/down select GPU | Tab reservations | a add here "
             "| Enter details | -/= zoom | <-/-> history/future | Shift faster "
-            "| v speed | z style | n NOW | r refresh | i admin | ? help | q quit "
+            "| v speed | z style | u usage | n NOW | r refresh | i admin | ? help | q quit "
         )
     else:
-        short = " RSV | arrows | Enter details | Tab GPU | a/e/d | n NOW | i admin | ? | q quit"
-        compact = " RSV | arrows | Enter | Tab GPU | a/e/d | n NOW | ? | q quit"
+        short = " RSV | arrows | Enter details | Tab GPU | a/e/d | u usage | n NOW | ? | q quit"
+        compact = " RSV | arrows | Enter | Tab GPU | a/e/d | u | n NOW | ? | q quit"
         long = (
             " RESERVATIONS | up/down select | Enter details | Tab GPUs | a add | e edit | d delete "
             f"| -/= zoom {state.slot_minutes}m/col | <-/-> history/future | Shift faster "
-            "| v speed | z style | n NOW | r refresh | i admin | ? help | q quit "
+            "| v speed | z style | u usage | n NOW | r refresh | i admin | ? help | q quit "
         )
     return _first_fitting_footer((long, short, compact), width)
 
@@ -2436,6 +2452,105 @@ def _message_dialog(stdscr, title: str, lines: Sequence[str]) -> None:
     win.getch()
 
 
+def _show_usage_summary(stdscr, config: Config) -> None:
+    now = utc_now()
+    actor = _current_actor()
+    audit_store = UsageAuditStore(
+        config.data_dir,
+        config.lock_timeout_seconds,
+        config.file_mode,
+        config.dir_mode,
+        config.storage_gid,
+    )
+    api = UsageQueryService(config, audit_store)
+    users = api.users(
+        start=now - timedelta(hours=24),
+        end=now,
+        resolution="auto",
+        uid=actor.uid,
+        limit=1,
+    )
+    samples = api.samples(
+        start=now - timedelta(days=28),
+        end=now,
+        resolution="1d",
+        uid=actor.uid,
+        limit=1000,
+    )
+    lines = _usage_summary_lines(users, samples, now, width=72)
+    _scroll_dialog(stdscr, "GPUBK my GPU use", lines)
+
+
+def _usage_summary_lines(
+    users_payload: dict,
+    samples_payload: dict,
+    end: datetime,
+    *,
+    width: int,
+) -> List[str]:
+    collector = users_payload.get("collector", {})
+    collector_state = str(collector.get("state", "unknown"))
+    lines = [
+        "LAST 24 HOURS",
+        f"Monitor {collector_state} | sampled history only; future reservations excluded",
+    ]
+    users = users_payload.get("users", [])
+    if users:
+        item = users[0]
+        active = max(0, int(item.get("active_gpu_seconds", 0)))
+        reserved = max(0, int(item.get("reserved_gpu_seconds", 0)))
+        idle = max(0, int(item.get("idle_reserved_gpu_seconds", 0)))
+        violations = max(0, int(item.get("violation_gpu_seconds", 0)))
+        ratio = 0.0 if reserved <= 0 else min(1.0, active / reserved)
+        bar_width = max(12, min(36, width - 35))
+        active_cells = round(bar_width * ratio)
+        idle_cells = max(0, bar_width - active_cells)
+        lines.extend(
+            (
+                f"Active {format_usage_duration(active):>7}   "
+                f"Reserved {format_usage_duration(reserved):>7}   Use {ratio * 100:5.1f}%",
+                f"  {'█' * active_cells}{'░' * idle_cells}  active / reserved-idle",
+                f"Peak VRAM {format_usage_memory(int(item.get('max_gpu_memory_mb', 0))):>7}   "
+                f"Avg SM {_usage_sm_text(item.get('avg_sm_percent')):>6}   "
+                f"Violation {format_usage_duration(violations)}",
+                f"Reserved idle {format_usage_duration(idle)}",
+            )
+        )
+    else:
+        lines.append("No sampled usage for your UID in the last 24 hours.")
+
+    daily_rows, weekly_rows = build_activity_trends(
+        samples_payload.get("records", []),
+        end,
+    )
+    lines.extend(("", "LAST 7 DAYS  active/reserved GPU-hours"))
+    lines.extend(_usage_trend_lines(daily_rows, width=width, weekly=False))
+    lines.extend(("", "LAST 4 WEEKS  active/reserved GPU-hours"))
+    lines.extend(_usage_trend_lines(weekly_rows, width=width, weekly=True))
+    lines.extend(("", "Legend: █ active   ░ reserved but idle", "CLI detail: bk u   JSON/API: bk u -j"))
+    return lines
+
+
+def _usage_trend_lines(rows, *, width: int, weekly: bool) -> List[str]:
+    active_hours = [values[0] / 3600 for _, values in rows]
+    reserved_hours = [values[1] / 3600 for _, values in rows]
+    peak = max(reserved_hours, default=0.0)
+    bar_width = max(10, min(28, width - 35))
+    lines = []
+    for (period, _values), active, reserved in zip(rows, active_hours, reserved_hours):
+        active_cells, idle_cells = activity_bar_cells(active, reserved, peak, bar_width)
+        label = period.strftime("week %m-%d" if weekly else "%a %m-%d")
+        bar = "█" * active_cells + "░" * idle_cells
+        lines.append(
+            f"{label:<11} {bar:<{bar_width}} {active:>6.1f}/{reserved:<6.1f}"
+        )
+    return lines
+
+
+def _usage_sm_text(value: object) -> str:
+    return "-" if value is None else f"{float(value):.1f}%"
+
+
 def _show_gpu_details(
     stdscr,
     config: Config,
@@ -2559,7 +2674,14 @@ def _scroll_dialog(stdscr, title: str, lines: Sequence[str]) -> None:
         win.box()
         _win_addstr(win, 0, 2, f" {title} ", COLOR_HEADER, curses.A_BOLD)
         for row, line in enumerate(lines[offset : offset + page_rows], 1):
-            color = COLOR_SELECTED if line in {"RESERVATIONS", "PROCESSES"} else 0
+            section = line in {
+                "RESERVATIONS",
+                "PROCESSES",
+                "LAST 24 HOURS",
+                "LAST 7 DAYS  active/reserved GPU-hours",
+                "LAST 4 WEEKS  active/reserved GPU-hours",
+            }
+            color = COLOR_SELECTED if section else COLOR_MINE if "█" in line else 0
             attr = curses.A_BOLD if color else 0
             _win_addstr(win, row, 2, line[: max(0, win_width - 4)], color, attr)
         footer = " Up/Down scroll  PgUp/PgDn page  Home/End  q/Esc close "

@@ -23,6 +23,7 @@ from .gpu import (
     snapshot,
 )
 from .models import BookingError
+from .node_identity import node_record_extension, stable_node_identity
 from .policy import DaemonPolicyError, PolicyGuardedLedgerStore
 from .scheduler import list_active
 from .storage import LedgerStore
@@ -134,6 +135,7 @@ class UsageMonitor:
         )
         self._monitor_id = uuid.uuid4().hex
         self._hostname = safe_hostname(socket.gethostname())
+        self._node_identity = stable_node_identity(hostname=self._hostname)
         self._started_at = utc_now()
         self._last_sampled_at = self._started_at
         self._last_devices: Sequence[GpuSnapshot] = ()
@@ -181,11 +183,13 @@ class UsageMonitor:
             current_state, self.previous_state, process_gap
         )
         events = _state_events(self.previous_state, current_state, sampled_at)
+        _attach_node_extensions(events, self._node_identity, devices, rekey_events=True)
         if current_state != self.previous_state:
             self.audit_store.commit_state_transition(events, current_state)
         self.previous_state = current_state
 
         groups = _usage_groups(devices, usage_by_gpu, reservations, sampled_at, workload_ids)
+        _attach_node_extensions(groups, self._node_identity, devices)
         self._record_groups(groups, sampled_at)
         self._record_device_load(devices, sampled_at)
         flushed = self.flush_rollups(sampled_at)
@@ -486,6 +490,7 @@ class UsageMonitor:
                     "max_device_util_percent": None,
                     "_workloads": set(),
                     "_workload_samples": {},
+                    "extensions": dict(group.get("extensions", {})),
                 },
             )
             aggregate["sample_count"] += 1
@@ -1011,7 +1016,33 @@ def _finalize_rollup(aggregate: dict, flushed_at: datetime, partial: bool) -> di
             str(workload_id): round(count * aggregate.get("_interval_seconds", 0), 3)
             for workload_id, count in sorted(aggregate["_workload_samples"].items())
         },
+        "extensions": aggregate.get("extensions", {}),
     }
+
+
+def _attach_node_extensions(
+    records: Sequence[dict],
+    identity: dict,
+    devices: Sequence[GpuSnapshot],
+    *,
+    rekey_events: bool = False,
+) -> None:
+    device_by_gpu = {device.index: device for device in devices}
+    for record in records:
+        device = device_by_gpu.get(int(record.get("gpu", -1)))
+        record["extensions"] = node_record_extension(
+            identity,
+            device_uuid=device.device_uuid if device is not None else "",
+        )
+        if rekey_events:
+            event_identity = {
+                "event_id": record.get("event_id"),
+                "node_id": identity["id"],
+            }
+            record["event_id"] = _short_hash(
+                json.dumps(event_identity, sort_keys=True, ensure_ascii=True),
+                length=20,
+            )
 
 
 def _finalize_device_load(aggregate: dict, flushed_at: datetime, partial: bool) -> dict:

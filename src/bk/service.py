@@ -20,6 +20,7 @@ from .models import (
     BookingResult,
     EditRequest,
 )
+from .node_identity import stable_node_identity
 from .policy import DAEMON_POLICY_EXIT_CODE, validate_ledger_policy
 from .scheduler import (
     add_booking,
@@ -529,6 +530,7 @@ def build_agent_context(
         "schema_version": AGENT_SCHEMA_VERSION,
         "kind": "context",
         "generated_at": to_iso(generated_at),
+        "node": stable_node_identity(),
         "actor": {"uid": actor.uid, "username": actor.username},
         "administrator": administrator_info(config).as_dict(),
         "policy": {
@@ -624,6 +626,7 @@ def build_agent_context(
             "external_allocator_configured": bool(config.allocator_command),
             "request_gpu_exclusions": True,
             "administrator_gpu_eligibility_policy": True,
+            "federated_node_identity": True,
         },
     }
 
@@ -731,6 +734,7 @@ def recommend_booking(
         "schema_version": AGENT_SCHEMA_VERSION,
         "kind": "recommendation",
         "generated_at": to_iso(generated_at),
+        "node": stable_node_identity(),
         "request": {
             "count": count,
             "duration_seconds": duration_seconds,
@@ -978,6 +982,7 @@ def booking_result_payload(
     return {
         "schema_version": AGENT_SCHEMA_VERSION,
         "kind": "booking_result",
+        "node": stable_node_identity(),
         "status": status,
         "reservation": public_reservation(
             reservation, actor, submission.share_capacity_units
@@ -998,12 +1003,12 @@ def scheduled_job_worker_warning(status: Optional[dict]) -> Optional[str]:
     state = str(status.get("state", "invalid"))
     if state in {"not-seen", "stopped"}:
         return (
-            f"scheduled command worker is {state}; start `bk w` now or enable "
+            f"scheduled command worker is {state}; start `bk w start` now or enable "
             "bk-worker.service, otherwise the command cannot launch"
         )
     if state == "invalid":
         return (
-            "scheduled command worker status is invalid; run `bk w --status --json` "
+            "scheduled command worker status is invalid; run `bk worker --status --json` "
             "and repair the private job directory before relying on automatic launch"
         )
     if state == "other-instance":
@@ -1017,7 +1022,7 @@ def scheduled_job_worker_warning(status: Optional[dict]) -> Optional[str]:
             "GPUBK version before relying on automatic launch"
         )
     return (
-        f"scheduled command worker status is {state}; verify `bk w --status --json` "
+        f"scheduled command worker status is {state}; verify `bk worker --status --json` "
         "before relying on automatic launch"
     )
 

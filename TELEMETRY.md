@@ -92,6 +92,10 @@ bk u storage --json
 The capabilities response exposes `writer_policy` so external visualizers and
 administration tools can discover the configured writer UID without parsing
 the private configuration file.
+It also exposes `topology`: the current stable node identity, the
+`gpubk.node` record extension, the local API's single-node scheduling boundary,
+and availability of the optional federated cluster client. Consumers must not
+infer any capability from a shared filesystem path.
 
 MCP exposes `get_my_gpu_usage` and `bk://usage/me/recent`. Both are bound to the
 MCP process UID and cannot request another UID.
@@ -149,6 +153,21 @@ an append as durable when the filesystem could not persist its directory entry.
 Per-record and per-file safety limits prevent the writer from creating data that
 the bounded reader would later refuse.
 
+New event and rollup records carry a `gpubk.node` extension. Its `id` is a
+truncated SHA-256 derived from the local machine ID (or sanitized hostname as a
+fallback), so the raw machine ID is never persisted. The extension also keeps a
+display hostname and the stable GPU UUID when the collector has one. Rollup IDs,
+deduplication keys, and aggregation keys include this node identity. Legacy
+records without the extension are assigned to the synthetic node `legacy` and
+remain readable without an in-place migration.
+
+This is an export and migration boundary, not a cluster writer protocol. Exactly
+one host owns each ledger and telemetry writer. Independent brokers or monitors
+must not share one NFS-backed data directory. Optional federation queries the
+public JSON API on each owning host, while a root-owned catalog maps
+`(node_id, uid)` to a global principal; it never merges users by mutable username.
+Future NFS export uses disjoint immutable node namespaces and the same public API.
+
 Chronological queries stream open partitions and stop as soon as their record
 limit is satisfied. A closed gzip partition is scanned against its SHA-256 and
 record-count metadata, then rewound and parsed through the same open file
@@ -175,6 +194,8 @@ bk u migrate --yes        # copy legacy data; originals remain untouched
 - Consumers check `collector.fresh` before treating recent telemetry as current.
 - Unknown additive collector fields are accepted; incompatible schema versions
   remain visible and are never rewritten by readers.
+- Node identity is additive metadata; old node-less records remain queryable as
+  `legacy`, and imports must preserve `gpubk.node` rather than renumber GPUs.
 
 The legacy `usage-events.jsonl`, `usage-rollups.jsonl`, `usage-state.json`, and
 `usage-load.json` files remain readable. They are not automatically deleted.

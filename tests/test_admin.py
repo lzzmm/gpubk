@@ -87,6 +87,31 @@ class AdminInitTests(unittest.TestCase):
         (root / "var" / "lib").mkdir(mode=0o755)
         (root / "run").mkdir(mode=0o755)
 
+    def test_cluster_init_builds_local_catalog_without_manual_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cluster.json"
+            output = StringIO()
+            with (
+                mock.patch("bk.admin.os.geteuid", return_value=0),
+                mock.patch("bk.cluster.write_cluster_config") as write_config,
+                redirect_stdout(output),
+            ):
+                status = run_admin_cli(
+                    [
+                        "cluster",
+                        "init",
+                        "gpu-a",
+                        "--cluster-file",
+                        str(path),
+                        "--yes",
+                    ]
+                )
+            self.assertEqual(status, 0)
+            configured = write_config.call_args.args[0]
+            self.assertEqual(configured.nodes[0].name, "gpu-a")
+            self.assertEqual(configured.nodes[0].transport, "local")
+            self.assertIn("cluster catalog updated", output.getvalue())
+
     def test_all_user_initialization_is_atomic_idempotent_and_service_owned(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -610,13 +635,16 @@ class AdminInitTests(unittest.TestCase):
                 "many\n"
                 "0\n"
                 "8\n"
+                "9\n"
+                "\n"
+                "7\n"
+                "6=10\n"
                 "7\n"
                 "5\n"
                 "0\n"
                 "4\n"
                 "maybe\n"
                 "yes\n"
-                "\n"
             )
             output = StringIO()
             argv = [
@@ -645,6 +673,75 @@ class AdminInitTests(unittest.TestCase):
             self.assertIn("Please answer y or n", text)
             self.assertIn("sharing:    max 4 slots per GPU", text)
             self.assertFalse((root / "shared").exists())
+
+    def test_guided_install_dry_run_previews_services_without_writing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "run").mkdir(mode=0o755)
+            identity = non_root_identity()
+            output = StringIO()
+            argv = [
+                "install",
+                "--dry-run",
+                "--yes",
+                "--no-start",
+                "--gpu-count",
+                "8",
+                "--service-user",
+                str(identity.uid),
+                "--broker-socket",
+                str(root / "run" / "gpubk" / "broker.sock"),
+                "--data-dir",
+                str(root / "shared"),
+                "--config-file",
+                str(root / "config" / "config.json"),
+            ]
+            with redirect_stdout(output):
+                status = run_admin_cli(argv)
+
+            self.assertEqual(status, 0)
+            self.assertIn("services: install only", output.getvalue())
+            self.assertIn("Dry run: no files or services changed", output.getvalue())
+            self.assertFalse((root / "config").exists())
+
+    def test_one_command_install_applies_tracked_state_and_starts_services(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = self.plan(Path(tmp))
+            completed = mock.Mock(returncode=0, stdout="", stderr="")
+            with (
+                mock.patch("bk.admin.os.geteuid", return_value=0),
+                mock.patch("bk.admin._detected_gpu_count", return_value=8),
+                mock.patch("bk.admin._default_service_identity", return_value=plan.service),
+                mock.patch("bk.admin._build_plan", return_value=plan),
+                mock.patch("bk.admin._validate_plan"),
+                mock.patch("bk.admin.inspect_admin_init", return_value=mock.Mock()),
+                mock.patch("bk.admin._print_plan"),
+                mock.patch("bk.admin.apply_admin_init") as apply_init,
+                mock.patch(
+                    "bk.admin.inspect_admin_system_services",
+                    return_value=(mock.Mock(), {"blockers": []}),
+                ),
+                mock.patch("bk.admin.apply_admin_system_services_install") as apply_services,
+                mock.patch("bk.admin.shutil.which", return_value="/usr/bin/systemctl"),
+                mock.patch("bk.admin.subprocess.run", return_value=completed) as run,
+                redirect_stdout(StringIO()),
+            ):
+                status = run_admin_cli(["install", "--yes", "--gpu-count", "8"])
+
+            self.assertEqual(status, 0)
+            apply_init.assert_called_once()
+            apply_services.assert_called_once()
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(
+                run.call_args_list[1].args[0],
+                [
+                    "/usr/bin/systemctl",
+                    "enable",
+                    "--now",
+                    "gpubk-broker.service",
+                    "gpubk-monitor.service",
+                ],
+            )
 
     def test_gpu_detection_requires_real_telemetry_unless_count_is_explicit(self):
         self.assertEqual(_detected_gpu_count(8), 8)

@@ -320,6 +320,31 @@ jobs:
           test "$installed" = true
           test "$(/tmp/gpubk-index-smoke/bin/bk --version)" = "bk ${{ needs.build.outputs.version }}"
 
+  github-release:
+    if: >-
+      github.event_name == 'push' &&
+      github.ref_type == 'tag'
+    needs: [build, verify-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-package-distributions
+      - name: Publish the verified GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        shell: bash
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          dist/* SHA256SUMS
+          --repo "$GITHUB_REPOSITORY"
+          --verify-tag
+          --title "GPUBK $VERSION"
+          --generate-notes
+
   promote-pypi:
     if: >-
       github.event_name == 'workflow_dispatch' &&

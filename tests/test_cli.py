@@ -1237,7 +1237,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("gaps=identity:0", usage.stdout)
             self.assertIn("sampled past only; future reservations excluded", usage.stdout)
             self.assertIn("Last 7 days", usage.stdout)
-            self.assertIn("Last 8 weeks", usage.stdout)
+            self.assertIn("Last 4 weeks", usage.stdout)
             issue = next(
                 item
                 for item in payload["policy_issues"]
@@ -2194,6 +2194,22 @@ class CliTests(unittest.TestCase):
             self.assertIn("28.0GiB free", result.stdout)
             self.assertIn("run: bk run -- COMMAND", result.stdout)
 
+    def test_common_booking_flags_have_short_forms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            result = self.run_bk(
+                ["1", "30m", "-g", "0", "-m", "4g", "-s", "1"],
+                data_dir,
+            )
+            help_result = self.run_bk(["1", "30m", "-h"], data_dir)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("gpu=0", result.stdout)
+            self.assertEqual(help_result.returncode, 0, help_result.stderr)
+            self.assertIn("-g GPU", help_result.stdout)
+            self.assertIn("-m MEM", help_result.stdout)
+            self.assertIn("-s SLOTS", help_result.stdout)
+
     def test_immediate_run_stops_at_the_booking_deadline(self):
         deadline = datetime.now(timezone.utc) + timedelta(seconds=0.1)
 
@@ -2461,10 +2477,13 @@ class CliTests(unittest.TestCase):
             env = {"BK_JOB_LOG_DIR": str(job_dir)}
 
             unseen = self.run_bk(["worker", "--status", "--json"], data_dir, env)
+            shorthand = self.run_bk(["w"], data_dir, env)
             required = self.run_bk(["w", "--require-running", "--json"], data_dir, env)
 
             self.assertEqual(unseen.returncode, 0, unseen.stderr)
             self.assertEqual(json.loads(unseen.stdout)["state"], "not-seen")
+            self.assertEqual(shorthand.returncode, 0, shorthand.stderr)
+            self.assertIn("bk w start", shorthand.stdout)
             self.assertEqual(required.returncode, 2, required.stderr)
             self.assertFalse(job_dir.exists())
 
@@ -2784,7 +2803,7 @@ class CliTests(unittest.TestCase):
             payload = json.loads(result.stdout)
             self.assertEqual(payload["worker"]["state"], "not-seen")
             self.assertTrue(
-                any("start `bk w`" in warning for warning in payload["warnings"])
+                any("start `bk w start`" in warning for warning in payload["warnings"])
             )
 
     def test_cli_cancellation_removes_a_pending_private_job_spec(self):

@@ -96,7 +96,7 @@ def tutorial_pages(config) -> tuple[TutorialPage, ...]:
             "A command after -- can run at reservation time on assigned devices.",
             (
                 ("bk 1 1h -- python train.py", "book and schedule a command"),
-                ("bk w --status", "check your private scheduled-command worker"),
+                ("bk w", "check your private scheduled-command worker"),
                 ("bk j", "list your scheduled jobs"),
                 ("bk u", "summarize your recent GPU use"),
                 ("bk doctor", "run read-only deployment and ledger checks"),
