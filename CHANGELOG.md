@@ -4,6 +4,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Limit the system monitor's writable systemd paths to its telemetry/ledger data directory; the
+  broker socket directory remains writable only by the broker service.
 - Keep the monitor compatible with NVIDIA NVML under systemd by avoiding `ProtectClock` and its
   implicit device cgroup allowlist. The service remains non-root and retains its other filesystem,
   privilege, kernel, and namespace protections; normal Unix device permissions still apply.

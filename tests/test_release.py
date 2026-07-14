@@ -244,6 +244,8 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertNotIn("DevicePolicy=", monitor)
         self.assertNotIn("DeviceAllow=", monitor)
         self.assertIn("ProtectClock=true", broker)
+        self.assertIn("ReadWritePaths=@DATA_DIRECTORY@\n", monitor)
+        self.assertNotIn("@SOCKET_DIRECTORY@", monitor)
 
     def test_prerelease_targets_a_documented_final_version(self):
         init = (ROOT / "src" / "bk" / "__init__.py").read_text(encoding="utf-8")
