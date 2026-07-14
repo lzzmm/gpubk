@@ -635,6 +635,34 @@ bk l
 bk t
 ```
 
+### One-command remote acceptance
+
+From a trusted local checkout, one command downloads the exact public PyPI
+release, verifies every wheel against PyPI, uploads a private bundle over SSH,
+runs isolated scheduler checks against the real GPU topology, inspects the
+deployed services, and downloads a SHA-256-verified report:
+
+```bash
+python3 tools/remote_acceptance.py USER@GPU-HOST \
+  --remote-python /opt/gpubk/bin/python \
+  --system-bk /usr/local/bin/bk \
+  --sudo
+```
+
+The GPU host does not need internet access. `--sudo` opens a remote password
+prompt only for read-only service-account, ownership, and systemd checks. The
+runner never restarts services, writes the production ledger, or launches a GPU
+workload. Candidate scheduling uses a private directory under
+`~/.cache/gpubk/acceptance/`, which is removed after the report is retrieved.
+
+Reports are written below `acceptance-reports/` and include the JSON result,
+human-readable summary, bundle manifest, original archive, and checksum. A
+failed automated check still downloads its report and returns a nonzero status.
+Use `--keep-remote` only while debugging. `--include-journal` explicitly opts in
+to the last 80 lines from the two GPUBK units. TUI appearance, cross-user
+authorization, a maintenance-approved tiny workload, and reboot persistence
+remain manual checks.
+
 To hand operation to another existing local account, stop the broker and monitor,
 preview the transaction, apply it, then reload and restart the tracked units:
 

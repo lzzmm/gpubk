@@ -95,6 +95,20 @@ for final versions and their immutable release assets.
    confirm `collector.stable_device_identifier_gap=[]` and
    `collector.process_identity_gap=[]`. Do not start workloads or services during release
    validation.
+
+   Prefer the local SSH orchestrator. It downloads and verifies the exact PyPI wheelhouse,
+   leaves production state untouched, and retrieves a digest-verified report even when an
+   acceptance check fails:
+
+   ```bash
+   python3 tools/remote_acceptance.py USER@GPU-HOST \
+     --remote-python /opt/gpubk/bin/python \
+     --system-bk /usr/local/bin/bk \
+     --sudo
+   ```
+
+   Archive the resulting `acceptance-reports/` directory with the release evidence. Complete
+   its four listed manual checks before promoting a release candidate to a final version.
 9. Commit and push the release metadata through a pull request, wait for `CI` to pass, and merge it to `main`. Create the annotated tag from that exact `main` commit:
 
    ```bash
