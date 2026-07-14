@@ -37,6 +37,14 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Add a no-production-state multi-host acceptance runner that installs the candidate wheel in
   private temporary SSH directories, uses simulated GPUs and isolated ledgers, exercises routing,
   replay, and cancellation, writes a private report, and cleans every remote stage.
+- Keep all cluster and subcommand help available before a catalog exists, provide an actionable
+  first-setup error, add short structured-output flags, and make edit/cancel return versioned
+  cluster JSON with caller-supplied retry-safe cancellation operation IDs.
+- Isolate cluster catalog and history administration from the shared administrator module, keep
+  its root and telemetry-owner boundaries intact, list identity members in human status, add a
+  safe `unmap` correction path, and package-test the new module explicitly.
+- Normalize cluster booking intent once for recommendation and commit, and ignore a malformed
+  recommendation from one node when another node still has a valid legal placement.
 - Repair the GPU-focused TUI reservation and process tables: align every column, put the row
   number and booking ID first, show expected VRAM and scheduled job summaries, and distinguish
   reservation IDs from live process commands.

@@ -1408,7 +1408,12 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             compact = args.compact
             exit_code = 0
         elif args.action in {"cancel", "del"}:
-            reservation_id = _resolve_own_reservation_id(store, args.reservation_id, actor)
+            reservation_id = _resolve_agent_cancellation_id(
+                store,
+                args.reservation_id,
+                actor,
+                args.op_id,
+            )
             cancellation = submit_cancellation(
                 config,
                 store,
@@ -3480,11 +3485,21 @@ def _resolve_own_reservation_id(store: LedgerStore, token: str, actor: Actor) ->
 
 
 def _resolve_own_retained_reservation_id(store: LedgerStore, token: str, actor: Actor) -> str:
+    ledger = store.load()
     mine = [
         item
-        for item in store.load().get("reservations", [])
+        for item in ledger.get("reservations", [])
         if int(item.get("uid", -1)) == actor.uid
     ]
+    if token.isdigit():
+        active = [
+            item
+            for item in list_active(ledger)
+            if int(item.get("uid", -1)) == actor.uid
+        ]
+        index = int(token)
+        if 1 <= index <= len(active):
+            return str(active[index - 1]["id"])
     matches = [item for item in mine if str(item.get("id", "")).startswith(token)]
     if not matches:
         raise BookingError(f"reservation not found for current user: {token}")
@@ -3492,6 +3507,26 @@ def _resolve_own_retained_reservation_id(store: LedgerStore, token: str, actor: 
         choices = ", ".join(_short_id(item) for item in matches)
         raise BookingError(f"ambiguous reservation id {token}; matches: {choices}")
     return str(matches[0]["id"])
+
+
+def _resolve_agent_cancellation_id(
+    store: LedgerStore,
+    token: str,
+    actor: Actor,
+    operation_id: Optional[str],
+) -> str:
+    if operation_id is None:
+        return _resolve_own_reservation_id(store, token, actor)
+    applied = find_applied_operation(store.load(), actor, operation_id)
+    if applied is not None:
+        action, reservation = applied
+        reservation_id = str(reservation.get("id", ""))
+        if action != "cancel" or (
+            not token.isdigit() and not reservation_id.startswith(token)
+        ):
+            raise BookingError("operation ID was already used for a different write")
+        return reservation_id
+    return _resolve_own_retained_reservation_id(store, token, actor)
 
 
 def _get_reservation(store: LedgerStore, reservation_id: str) -> dict:

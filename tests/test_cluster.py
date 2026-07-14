@@ -61,6 +61,39 @@ class ClusterTests(unittest.TestCase):
             self.assertEqual([node.name for node in config.nodes], ["here", "gpu-b"])
             self.assertEqual(config.node("gpu-b").priority, 10)
 
+    def test_help_does_not_require_an_installed_cluster_catalog(self):
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config") as load,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(run_cluster_cli(["--help"]), 0)
+        load.assert_not_called()
+        self.assertIn("GPUBK cluster federation", output.getvalue())
+
+        for command in ("status", "recommend", "usage", "history", "edit", "cancel", "tui"):
+            with self.subTest(command=command):
+                with (
+                    mock.patch("bk.cluster.load_cluster_config") as load,
+                    redirect_stdout(StringIO()),
+                    self.assertRaises(SystemExit) as raised,
+                ):
+                    run_cluster_cli([command, "--help"])
+                self.assertEqual(raised.exception.code, 0)
+                load.assert_not_called()
+
+    def test_missing_catalog_explains_the_first_setup_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "missing.json"
+            with (
+                mock.patch.dict(os.environ, {"BK_CLUSTER_CONFIG": str(path)}),
+                self.assertRaisesRegex(
+                    BookingError,
+                    "sudo bk admin cluster init NODE --yes",
+                ),
+            ):
+                run_cluster_cli(["status"])
+
     def test_catalog_write_round_trips_principal_mapping(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "cluster.json"
@@ -351,6 +384,43 @@ class ClusterTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertIn("healthy", output.getvalue())
 
+    def test_malformed_node_does_not_block_a_healthy_recommendation(self):
+        malformed = ClusterNode("malformed", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        healthy = ClusterNode("healthy", "b" * 20, "ssh", "b", "/usr/bin/bk", 1, 8)
+        config = ClusterConfig(Path("/cluster.json"), (malformed, healthy))
+        generated = to_iso(utc_now())
+        replies = [
+            NodeReply(
+                malformed,
+                {
+                    "generated_at": generated,
+                    "recommendation": {"end_at": "2030-01-01T00:30:00Z"},
+                },
+                None,
+            ),
+            NodeReply(
+                healthy,
+                {
+                    "generated_at": generated,
+                    "recommendation": {
+                        "gpus": [0],
+                        "start_at": "2030-01-01T00:00:00Z",
+                        "end_at": "2030-01-01T00:30:00Z",
+                    },
+                },
+                None,
+            ),
+        ]
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._parallel", return_value=replies),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(run_cluster_cli(["recommend", "1", "30m"]), 0)
+        self.assertIn("healthy", output.getvalue())
+        self.assertNotIn("malformed", output.getvalue())
+
     def test_stale_preflight_rejection_never_fails_over_to_another_node(self):
         first = ClusterNode("first", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
         second = ClusterNode("second", "b" * 20, "ssh", "b", "/usr/bin/bk", 1, 8)
@@ -491,6 +561,60 @@ class ClusterTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertIs(write.call_args.args[0], current)
         self.assertIn("created on current", output.getvalue())
+
+    def test_cluster_request_options_are_normalized_once_for_read_and_write(self):
+        node = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        reply = NodeReply(
+            node,
+            {
+                "generated_at": to_iso(utc_now()),
+                "capabilities": {
+                    "federated_node_identity": True,
+                    "idempotent_booking": True,
+                    "operation_status": True,
+                    "preflight_idempotent_replay": True,
+                },
+                "recommendation": {
+                    "gpus": [0],
+                    "start_at": "2030-01-01T00:00:00Z",
+                    "end_at": "2030-01-01T00:30:00Z",
+                },
+            },
+            None,
+        )
+        result = NodeReply(
+            node,
+            {
+                "status": "created",
+                "reservation": {
+                    "short_id": "12345678",
+                    "gpus": [0],
+                    "start_at": "2030-01-01T00:00:00Z",
+                    "end_at": "2030-01-01T00:30:00Z",
+                },
+            },
+            None,
+        )
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._parallel", return_value=[reply]) as parallel,
+            mock.patch("bk.cluster._invoke_idempotent_write", return_value=result) as write,
+            redirect_stdout(StringIO()),
+        ):
+            self.assertEqual(
+                run_cluster_cli(
+                    ["book", "1", "30m", "5g", "--mem", "6g", "--share", "2"]
+                ),
+                0,
+            )
+        recommendation_argv = parallel.call_args.args[1]
+        booking_argv = write.call_args.args[1]
+        for command in (recommendation_argv, booking_argv):
+            self.assertEqual(command.count("--mem"), 1)
+            self.assertEqual(command[command.index("--mem") + 1], "6g")
+            self.assertNotIn("5g", command)
+            self.assertEqual(command[command.index("--share") + 1], "2")
 
     def test_idempotent_write_probes_operation_after_timeout(self):
         node = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
@@ -648,6 +772,108 @@ class ClusterTests(unittest.TestCase):
         unmapped = [item for item in groups if not item["mapped"]]
         self.assertEqual(len(unmapped), 2)
 
+    def test_usage_short_json_flags_are_local_and_forward_query_options(self):
+        node = ClusterNode("gpu-a", "a" * 20, "ssh", "gpu-a", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        reply = NodeReply(node, {"users": []}, None)
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._parallel", return_value=[reply]) as parallel,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(run_cluster_cli(["usage", "-s", "7d", "-j", "-c"]), 0)
+        self.assertEqual(
+            parallel.call_args.args[1],
+            ["usage", "me", "-s", "7d", "--json", "--compact"],
+        )
+        self.assertEqual(json.loads(output.getvalue())["kind"], "cluster-usage")
+        self.assertEqual(len(output.getvalue().splitlines()), 1)
+
+    def test_cancel_accepts_stable_operation_id_and_returns_cluster_json(self):
+        node = ClusterNode("gpu-a", "a" * 20, "ssh", "gpu-a", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        context = NodeReply(
+            node,
+            {
+                "capabilities": {
+                    "federated_node_identity": True,
+                    "idempotent_cancel": True,
+                    "operation_status": True,
+                }
+            },
+            None,
+        )
+        result = NodeReply(
+            node,
+            {"status": "canceled", "reservation": {"short_id": "12345678"}},
+            None,
+        )
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._invoke", return_value=context),
+            mock.patch(
+                "bk.cluster._invoke_idempotent_write",
+                return_value=result,
+            ) as write,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                run_cluster_cli(
+                    ["cancel", "gpu-a/12345678", "--op-id", "cancel-1", "-j"]
+                ),
+                0,
+            )
+        self.assertEqual(write.call_args.args[2], "cancel-1")
+        self.assertEqual(write.call_args.kwargs["expected_action"], "cancel")
+        self.assertIn("cancel-1", write.call_args.args[1])
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["kind"], "cluster-mutation-result")
+        self.assertEqual(payload["node"], "gpu-a")
+        self.assertEqual(payload["operation_id"], "cancel-1")
+
+    def test_uncertain_cancel_reports_the_exact_retry_operation_id(self):
+        node = ClusterNode("gpu-a", "a" * 20, "ssh", "gpu-a", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        context = NodeReply(
+            node,
+            {
+                "capabilities": {
+                    "federated_node_identity": True,
+                    "idempotent_cancel": True,
+                    "operation_status": True,
+                }
+            },
+            None,
+        )
+        uncertain = NodeReply(
+            node,
+            None,
+            "operation cancel-1 status is unknown",
+            error_code="uncertain",
+        )
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._invoke", return_value=context),
+            mock.patch(
+                "bk.cluster._invoke_idempotent_write",
+                return_value=uncertain,
+            ),
+            self.assertRaisesRegex(BookingError, "retry.*--op-id cancel-1"),
+        ):
+            run_cluster_cli(
+                ["cancel", "gpu-a/12345678", "--op-id", "cancel-1"]
+            )
+
+    def test_usage_rejects_invalid_limit_before_loading_cluster_state(self):
+        with (
+            mock.patch("bk.cluster.load_cluster_config") as load,
+            self.assertRaisesRegex(BookingError, "--limit must be >= 1"),
+        ):
+            run_cluster_cli(["usage", "--limit", "0"])
+        load.assert_not_called()
+
     def test_status_json_is_versioned_and_node_qualified(self):
         node = ClusterNode("gpu-a", "a" * 20, "ssh", "gpu-a", "/usr/bin/bk", 0, 8)
         config = ClusterConfig(Path("/cluster.json"), (node,))
@@ -668,7 +894,7 @@ class ClusterTests(unittest.TestCase):
             mock.patch("bk.cluster._parallel", return_value=[reply]),
             redirect_stdout(output),
         ):
-            status = run_cluster_cli(["status", "--json"])
+            status = run_cluster_cli(["status", "-j"])
         payload = json.loads(output.getvalue())
         self.assertEqual(status, 0)
         self.assertEqual(payload["schema_version"], CLUSTER_SCHEMA_VERSION)

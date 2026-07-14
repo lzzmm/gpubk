@@ -146,6 +146,8 @@ closed. `cluster-context` returns each node's ordinary `bk.agent.v1` context wit
 flattening node-local GPU indexes. `cluster-recommendation` ranks by start, node
 priority, and node name. `cluster-booking-result` contains one destination node, one
 stable operation ID, and the unchanged destination `bk.agent.v1` result.
+Cluster edit and cancel accept caller-supplied stable operation IDs and return a
+`cluster-mutation-result` containing the owning node and unchanged destination result.
 
 Reservation references outside their owning node use `NODE/SHORT_ID`. Automatic
 booking never splits a request across nodes. Edit and cancel route back to the node

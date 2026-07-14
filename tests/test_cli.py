@@ -3011,6 +3011,17 @@ class CliTests(unittest.TestCase):
                 ],
                 data_dir,
             )
+            cancelled_retry = self.run_bk(
+                [
+                    "agent",
+                    "cancel",
+                    short_id,
+                    "--op-id",
+                    "cli-agent-cancel-1",
+                    "--compact",
+                ],
+                data_dir,
+            )
             cancellation_status = self.run_bk(
                 ["agent", "operation", "cli-agent-cancel-1", "--compact"],
                 data_dir,
@@ -3023,6 +3034,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(missing_operation_id.returncode, 2, missing_operation_id.stderr)
             self.assertEqual(mismatched.returncode, 2, mismatched.stderr)
             self.assertEqual(cancelled.returncode, 0, cancelled.stderr)
+            self.assertEqual(cancelled_retry.returncode, 0, cancelled_retry.stderr)
             self.assertEqual(
                 cancellation_status.returncode,
                 0,
@@ -3034,6 +3046,7 @@ class CliTests(unittest.TestCase):
             missing_operation_payload = json.loads(missing_operation_id.stdout)
             mismatch_payload = json.loads(mismatched.stdout)
             cancelled_payload = json.loads(cancelled.stdout)
+            cancelled_retry_payload = json.loads(cancelled_retry.stdout)
             cancellation_status_payload = json.loads(cancellation_status.stdout)
             retry_after_cancel_payload = json.loads(retry_after_cancel.stdout)
             self.assertEqual(edited_payload["status"], "updated")
@@ -3044,6 +3057,10 @@ class CliTests(unittest.TestCase):
             self.assertIn("different write", mismatch_payload["error"]["message"])
             self.assertEqual(cancelled_payload["kind"], "cancellation_result")
             self.assertEqual(cancelled_payload["reservation"]["status"], "cancelled")
+            self.assertEqual(
+                cancelled_retry_payload["reservation"]["id"],
+                cancelled_payload["reservation"]["id"],
+            )
             self.assertTrue(cancellation_status_payload["found"])
             self.assertEqual(cancellation_status_payload["action"], "cancel")
             self.assertTrue(

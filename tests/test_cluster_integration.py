@@ -6,6 +6,7 @@ import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
+from datetime import timedelta
 from io import StringIO
 from pathlib import Path
 from unittest import mock
@@ -16,8 +17,9 @@ from bk.cluster import (
     _invoke_idempotent_write,
     run_cluster_cli,
 )
+from bk.granularity import ceil_to_slot
 from bk.models import BookingError
-from bk.timeparse import parse_iso
+from bk.timeparse import parse_iso, to_iso, utc_now
 
 
 NODE_RUNNER = """\
@@ -230,6 +232,110 @@ class ClusterProcessIntegrationTests(unittest.TestCase):
             (self.root / self.first.name / "ledger.json").read_text(encoding="utf-8")
         )
         self.assertEqual(len(first_ledger["reservations"]), 1)
+
+    def test_node_qualified_edit_and_cancel_are_retry_safe_end_to_end(self):
+        future_start = to_iso(ceil_to_slot(utc_now() + timedelta(minutes=15)))
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=self.config),
+            mock.patch(
+                "bk.cluster_transport.node_command",
+                side_effect=self.node_command,
+            ),
+        ):
+            created_output = StringIO()
+            with redirect_stdout(created_output):
+                self.assertEqual(
+                    run_cluster_cli(
+                        [
+                            "book",
+                            "1",
+                            "30m",
+                            "--mode",
+                            "x",
+                            "--start",
+                            future_start,
+                            "--op-id",
+                            "lifecycle-create",
+                            "-j",
+                        ]
+                    ),
+                    0,
+                )
+            created = json.loads(created_output.getvalue())
+            node_name = created["node"]["name"]
+            short_id = created["result"]["reservation"]["short_id"]
+            qualified = f"{node_name}/{short_id}"
+
+            edit_results = []
+            for _attempt in range(2):
+                output = StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(
+                        run_cluster_cli(
+                            [
+                                "edit",
+                                qualified,
+                                "--duration",
+                                "35m",
+                                "--op-id",
+                                "lifecycle-edit",
+                                "-j",
+                            ]
+                        ),
+                        0,
+                    )
+                edit_results.append(json.loads(output.getvalue()))
+
+            cancel_results = []
+            for _attempt in range(2):
+                output = StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(
+                        run_cluster_cli(
+                            [
+                                "cancel",
+                                qualified,
+                                "--op-id",
+                                "lifecycle-cancel",
+                                "-j",
+                            ]
+                        ),
+                        0,
+                    )
+                cancel_results.append(json.loads(output.getvalue()))
+
+            with self.assertRaisesRegex(BookingError, "different write"):
+                run_cluster_cli(
+                    [
+                        "cancel",
+                        f"{node_name}/deadbeef",
+                        "--op-id",
+                        "lifecycle-cancel",
+                        "-j",
+                    ]
+                )
+
+        self.assertEqual(
+            [item["node"] for item in edit_results + cancel_results],
+            [node_name] * 4,
+        )
+        self.assertEqual(
+            [item["operation_id"] for item in edit_results],
+            ["lifecycle-edit"] * 2,
+        )
+        self.assertEqual(
+            [item["operation_id"] for item in cancel_results],
+            ["lifecycle-cancel"] * 2,
+        )
+        self.assertEqual(
+            edit_results[0]["result"]["reservation"]["id"],
+            edit_results[1]["result"]["reservation"]["id"],
+        )
+        self.assertEqual(
+            cancel_results[0]["result"]["reservation"]["id"],
+            cancel_results[1]["result"]["reservation"]["id"],
+        )
+        self.assertEqual(cancel_results[1]["result"]["kind"], "cancellation_result")
 
 
 if __name__ == "__main__":

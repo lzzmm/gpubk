@@ -94,8 +94,8 @@ class AdminInitTests(unittest.TestCase):
             path = Path(tmp) / "cluster.json"
             output = StringIO()
             with (
-                mock.patch("bk.admin.os.geteuid", return_value=0),
-                mock.patch("bk.cluster.write_cluster_config") as write_config,
+                mock.patch("bk.admin_cluster.os.geteuid", return_value=0),
+                mock.patch("bk.admin_cluster.write_cluster_config") as write_config,
                 redirect_stdout(output),
             ):
                 status = run_admin_cli(
@@ -133,9 +133,9 @@ class AdminInitTests(unittest.TestCase):
             archive = root / "archive"
             output = StringIO()
             with (
-                mock.patch("bk.admin.os.geteuid", return_value=0),
-                mock.patch("bk.cluster.load_cluster_config", return_value=current),
-                mock.patch("bk.cluster.write_cluster_config") as write_config,
+                mock.patch("bk.admin_cluster.os.geteuid", return_value=0),
+                mock.patch("bk.admin_cluster.load_cluster_config", return_value=current),
+                mock.patch("bk.admin_cluster.write_cluster_config") as write_config,
                 redirect_stdout(output),
             ):
                 status = run_admin_cli(
@@ -158,9 +158,9 @@ class AdminInitTests(unittest.TestCase):
             fake_runtime = Config(data_dir=root / "data", gpu_count=1, monitor_uid=1003)
             output = StringIO()
             with (
-                mock.patch("bk.admin.os.geteuid", return_value=0),
-                mock.patch("bk.cluster.load_cluster_config", return_value=configured),
-                mock.patch("bk.admin.load_config", return_value=fake_runtime),
+                mock.patch("bk.admin_cluster.os.geteuid", return_value=0),
+                mock.patch("bk.admin_cluster.load_cluster_config", return_value=configured),
+                mock.patch("bk.admin_cluster.load_config", return_value=fake_runtime),
                 mock.patch(
                     "bk.cluster_history.resolve_history_window",
                     return_value=(start, start + timedelta(days=1)),

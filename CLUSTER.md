@@ -24,10 +24,30 @@ The supported first deployment is:
 4. Map node-local numeric UIDs to a global principal only when aggregate reporting
    is desired.
 
+The help is available before a catalog exists. A minimal two-node client setup is:
+
+```bash
+bk cluster -h
+sudo bk admin cluster init gpu-a --yes
+ssh -T user@gpu-b /usr/local/bin/bk agent context --compact
+sudo bk admin cluster add gpu-b user@gpu-b NODE_ID_FROM_CONTEXT --yes
+sudo bk admin cluster status
+bk cluster
+bk cluster recommend 1 30m
+```
+
+Run the catalog commands on each machine from which users need a cluster view. The
+local entry is created from that host's stable identity; SSH entries use the stable
+`node.id` returned by the remote Agent context. The catalog contains no credentials.
+Each ordinary user still needs non-interactive SSH access with a previously verified
+host key. `bk cluster status` reports one unreachable account without disabling other
+healthy nodes.
+
 ## User model
 
 - With no cluster catalog, GPUBK stays in single-host mode. Node selectors, node
-  columns, cluster help, and cluster TUI controls are hidden.
+  columns, cluster commands in general help, and cluster TUI controls are hidden;
+  explicit `bk cluster -h` remains available for setup.
 - `bk cluster` shows reachable nodes, current reservations, and GPU availability.
 - `bk cluster recommend 2 1h` compares legal placements on every enabled node.
 - `bk cluster book 2 1h` submits to the node with the earliest legal start. A
@@ -36,6 +56,11 @@ The supported first deployment is:
 - Node-qualified IDs use `NODE/SHORT_ID`; the stored booking UUID is unchanged.
 - Ties are resolved by start time, configured node priority, live-load confidence,
   then node name. A remote broker performs the final locked validation.
+
+`recommend`, `book`, `status`, `usage`, `history`, `edit`, and `cancel` accept
+`-h` without requiring an installed catalog. Structured commands accept `-j`; cluster
+edit and cancel wrap the destination response in `gpubk.cluster.v1`. Automation should
+reuse `--op-id` for an exact retry of book, edit, or cancel.
 
 ## Transport
 
@@ -60,6 +85,14 @@ separate administrator-owned identity map:
 
 ```text
 global principal -> (node_id, numeric UID), ...
+```
+
+Inspect and correct mappings without editing JSON directly:
+
+```bash
+sudo bk admin cluster status
+sudo bk admin cluster map lab-user gpu-b 2042 --yes
+sudo bk admin cluster unmap gpu-b 2042 --yes
 ```
 
 Numeric UIDs are node-local and usernames are display labels only. The client checks

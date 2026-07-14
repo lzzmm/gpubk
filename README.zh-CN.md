@@ -558,9 +558,15 @@ ssh -T gpu-b /usr/local/bin/bk agent context --compact
 sudo bk admin cluster add gpu-b gpu-b NODE_ID_FROM_ABOVE --yes
 sudo bk admin cluster map lab-user gpu-a 1003 --yes
 sudo bk admin cluster map lab-user gpu-b 2042 --yes
+# 映射有误时撤销：sudo bk admin cluster unmap gpu-b 2042 --yes
 sudo bk admin cluster status
 bk c
+bk c recommend 1 30m
+bk c book 1 30m -j
 ```
+
+目录尚未创建时也可以使用 `bk cluster -h` 及各子命令的 `-h`。自动化重试完全相同的
+集群预约、修改或取消请求时，应复用同一个 `--op-id`。
 
 正式启用共享目录前，可以先从本仓库执行一次端到端候选版本验收：
 

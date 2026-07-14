@@ -661,9 +661,16 @@ ssh -T gpu-b /usr/local/bin/bk agent context --compact
 sudo bk admin cluster add gpu-b gpu-b NODE_ID_FROM_ABOVE --yes
 sudo bk admin cluster map lab-user gpu-a 1003 --yes
 sudo bk admin cluster map lab-user gpu-b 2042 --yes
+# Undo a wrong mapping with: sudo bk admin cluster unmap gpu-b 2042 --yes
 sudo bk admin cluster status
 bk c
+bk c recommend 1 30m
+bk c book 1 30m -j
 ```
+
+`bk cluster -h` and every subcommand's `-h` work before this catalog exists. For
+retry-safe automation, keep the same `--op-id` when repeating an exact cluster book,
+edit, or cancel request.
 
 Before enabling a real shared catalog, the repository includes one end-to-end candidate test:
 
