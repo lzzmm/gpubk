@@ -32,7 +32,7 @@ ProtectKernelLogs=true
 # activates a device cgroup allowlist that can prevent NVML initialization.
 RestrictSUIDSGID=true
 LockPersonality=true
-ReadWritePaths=@DATA_DIRECTORY@ @SOCKET_DIRECTORY@
+ReadWritePaths=@DATA_DIRECTORY@
 
 [Install]
 WantedBy=multi-user.target

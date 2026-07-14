@@ -42,7 +42,7 @@ class BundledSystemdTests(unittest.TestCase):
             self.assertIn("Group=1002", rendered)
             self.assertIn('Environment="BK_CONFIG_FILE=/etc/gpubk/config.json"', rendered)
             self.assertIn("WorkingDirectory=/var/lib/gpubk", rendered)
-            self.assertIn("ReadWritePaths=/var/lib/gpubk /run/gpubk", rendered)
+            self.assertIn("ReadWritePaths=/var/lib/gpubk", rendered)
             self.assertIn("NoNewPrivileges=true", rendered)
             self.assertIn("ProtectSystem=strict", rendered)
             self.assertIn("WantedBy=multi-user.target", rendered)
@@ -53,11 +53,14 @@ class BundledSystemdTests(unittest.TestCase):
         )
         self.assertIn('ExecStart="/opt/gpubk/bin/python" -m bk broker', broker)
         self.assertIn("RuntimeDirectory=gpubk", broker)
+        self.assertIn("ReadWritePaths=/var/lib/gpubk /run/gpubk", broker)
         self.assertIn('ExecStart="/opt/gpubk/bin/python" -m bk monitor', monitor)
         self.assertNotIn("ProtectClock=", monitor)
         self.assertNotIn("DevicePolicy=", monitor)
         self.assertNotIn("DeviceAllow=", monitor)
         self.assertIn("ProtectClock=true", broker)
+        self.assertIn("ReadWritePaths=/var/lib/gpubk\n", monitor)
+        self.assertNotIn("ReadWritePaths=/var/lib/gpubk /run/gpubk", monitor)
         self.assertNotIn("RuntimeDirectory=", monitor)
 
     def test_system_broker_creates_nested_run_directory_but_not_persistent_path(self):
@@ -94,9 +97,10 @@ class BundledSystemdTests(unittest.TestCase):
             "WorkingDirectory=/srv/GPU\\x20lab/percent%%/quote\\x22", rendered
         )
         self.assertIn(
-            "ReadWritePaths=/srv/GPU\\x20lab/percent%%/quote\\x22 /run/GPU\\x20lab",
+            "ReadWritePaths=/srv/GPU\\x20lab/percent%%/quote\\x22",
             rendered,
         )
+        self.assertNotIn("/run/GPU\\x20lab", rendered)
 
     def test_system_unit_rejects_root_identity_and_relative_paths(self):
         common = {
