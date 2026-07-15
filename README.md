@@ -679,30 +679,37 @@ can update these local account fields with `sudo chfn USER`; changes and
 put contact information there that may be shown to every local GPUBK user.
 
 To federate several working GPUBK hosts, initialize a catalog on the machine where
-users will run cluster commands. Read each remote stable node ID from
-`bk agent context --compact`, verify non-interactive SSH and its host key, then add it:
+users will run cluster commands. Probe each remote as the ordinary user who will use
+it. The probe uses non-interactive SSH with strict host-key checking, validates the
+stable identity, version, clock, GPU count, and retry-safe write capabilities, then
+prints the root command to review and run:
 
 ```bash
 sudo bk admin cluster init gpu-a --yes
-ssh -T gpu-b /usr/local/bin/bk agent context --compact
-sudo bk admin cluster add gpu-b gpu-b NODE_ID_FROM_ABOVE --yes
+bk c probe gpu-b gpu-b
+# Run the exact sudo bk admin cluster add ... command printed above.
 sudo bk admin cluster map lab-user gpu-a 1003 --yes
 sudo bk admin cluster map lab-user gpu-b 2042 --yes
 # Undo a wrong mapping with: sudo bk admin cluster unmap gpu-b 2042 --yes
 sudo bk admin cluster status
 bk c
 bk c check
+bk c check --jobs       # additionally require this user's worker on every node
 bk c rec 1 30m
 bk c 1 30m -j
 bk c x 1 30m          # exclusive, earliest node
 bk c 1 2h -- python /absolute/path/train.py
 ```
 
-`bk cluster -h` and every subcommand's `-h` work before this catalog exists. For
+`bk c -h`, `bk c probe -h`, and every long-form subcommand's `-h` work before this
+catalog exists. The probe is read-only and does not bypass SSH authentication; verify
+the host key before trusting the discovered stable ID. For
 retry-safe automation, keep the same `--op-id` when repeating an exact cluster book,
 edit, or cancel request. Every user should run `bk c check` once: it verifies that
 their own SSH identity can reach each enabled node, that stable identities and clocks
-are valid, and that the remote version supports retry-safe writes.
+are valid, and that the remote version supports retry-safe writes. Use `--jobs` before
+depending on automatic command launch; ordinary checks also warn when a pending command
+already exists on a node whose worker is not running.
 
 Put a host into maintenance without deleting its endpoint, UID mappings, or archived
 history. Disabled hosts are not contacted and never participate in placement:
@@ -722,9 +729,10 @@ python3 tools/cluster_acceptance.py user@gpu-a user@gpu-b
 ```
 
 It builds the current checkout as a wheel, installs that exact wheel under each SSH account's
-private temporary cache, uses one simulated GPU and an isolated ledger per host, then exercises
-cluster status, recommendation, placement on two independent nodes, operation replay, and
-cancellation. It needs key-based non-interactive SSH with known host keys, uses no `sudo`, never
+private temporary cache, uses one simulated GPU and an isolated ledger per host, then
+exercises pre-catalog discovery, cluster status, recommendation, placement on two
+independent nodes, operation replay, and cancellation. It needs key-based non-interactive
+SSH with known host keys, uses no `sudo`, never
 contacts the production broker or NVML, and removes its remote files. Pass `--wheel DIST.whl` to
 test an already-built artifact. The command writes a mode-`0600` JSON report under
 `acceptance-reports/`.

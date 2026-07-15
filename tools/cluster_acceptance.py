@@ -471,6 +471,44 @@ def run_client(bk: Path, catalog: Path, *arguments: str) -> dict[str, Any] | str
     )
 
 
+def probe_cluster_nodes(
+    bk: Path,
+    catalog: Path,
+    nodes: Sequence[RemoteNode],
+) -> list[dict[str, Any]]:
+    probes = []
+    for node in nodes:
+        payload = run_client(
+            bk,
+            catalog,
+            "c",
+            "probe",
+            node.name,
+            node.target.value,
+            "--executable",
+            node.wrapper,
+            "--timeout",
+            "15",
+            "--json",
+        )
+        if not isinstance(payload, dict) or payload.get("ready") is not True:
+            raise ClusterAcceptanceError(
+                f"cluster client probe did not accept {node.target.value}"
+            )
+        discovered = payload.get("node")
+        if (
+            not isinstance(discovered, dict)
+            or discovered.get("id") != node.node_id
+            or discovered.get("target") != node.target.value
+            or discovered.get("executable") != node.wrapper
+        ):
+            raise ClusterAcceptanceError(
+                f"cluster client probe returned the wrong identity for {node.target.value}"
+            )
+        probes.append(payload)
+    return probes
+
+
 def exercise_cluster(
     bk: Path, catalog: Path, nodes: Sequence[RemoteNode]
 ) -> dict[str, Any]:
@@ -681,6 +719,12 @@ def main(argv: list[str] | None = None) -> int:
                 raise ClusterAcceptanceError(
                     "remote candidate version does not match the supplied wheel"
                 )
+            print("Verifying pre-catalog node discovery...", flush=True)
+            probes = probe_cluster_nodes(
+                client,
+                work / "not-configured.json",
+                remote_nodes,
+            )
             catalog = work / "cluster.json"
             write_catalog(catalog, remote_nodes)
             print(
@@ -688,6 +732,7 @@ def main(argv: list[str] | None = None) -> int:
                 flush=True,
             )
             result_payload = exercise_cluster(client, catalog, remote_nodes)
+            result_payload["probes"] = probes
         except Exception as exc:
             failure = exc
         finally:

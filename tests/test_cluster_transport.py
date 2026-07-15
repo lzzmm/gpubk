@@ -6,7 +6,7 @@ from threading import Event
 from unittest import mock
 
 from bk import cluster_transport
-from bk.cluster_transport import ClusterNode, invoke_node
+from bk.cluster_transport import ClusterNode, invoke_node, probe_ssh_node
 
 
 class ClusterTransportTests(unittest.TestCase):
@@ -62,6 +62,47 @@ class ClusterTransportTests(unittest.TestCase):
             reply = invoke_node(node, ["agent", "context", "--compact"])
         self.assertEqual(reply.error, "capacity full")
         self.assertFalse(reply.timed_out)
+
+    def test_probe_discovers_and_returns_valid_stable_identity(self):
+        node = ClusterNode(
+            "gpu-b",
+            "0" * 20,
+            "ssh",
+            "user@gpu-b",
+            "/usr/local/bin/bk",
+            0,
+            8,
+        )
+        response = {
+            "node": {"id": "b" * 20},
+            "kind": "context",
+        }
+        with mock.patch(
+            "bk.cluster_transport._run_node_process",
+            return_value=(0, json.dumps(response).encode(), b""),
+        ):
+            reply = probe_ssh_node(node, ["agent", "context", "--compact"])
+        self.assertIsNone(reply.error)
+        self.assertEqual(reply.node.node_id, "b" * 20)
+
+    def test_probe_rejects_malformed_stable_identity(self):
+        node = ClusterNode(
+            "gpu-b",
+            "0" * 20,
+            "ssh",
+            "user@gpu-b",
+            "/usr/local/bin/bk",
+            0,
+            8,
+        )
+        response = {"node": {"id": "not-stable"}, "kind": "context"}
+        with mock.patch(
+            "bk.cluster_transport._run_node_process",
+            return_value=(0, json.dumps(response).encode(), b""),
+        ):
+            reply = probe_ssh_node(node, ["agent", "context", "--compact"])
+        self.assertEqual(reply.error_code, "identity")
+        self.assertIn("invalid stable node identity", reply.error)
 
 
 if __name__ == "__main__":

@@ -29,17 +29,20 @@ The help is available before a catalog exists. A minimal two-node client setup i
 ```bash
 bk cluster -h
 sudo bk admin cluster init gpu-a --yes
-ssh -T user@gpu-b /usr/local/bin/bk agent context --compact
-sudo bk admin cluster add gpu-b user@gpu-b NODE_ID_FROM_CONTEXT --yes
+bk c probe gpu-b user@gpu-b
+# Review and run the printed sudo bk admin cluster add ... command.
 sudo bk admin cluster status
 bk cluster
 bk cluster check
+bk cluster check --jobs
 bk c rec 1 30m
 ```
 
 Run the catalog commands on each machine from which users need a cluster view. The
-local entry is created from that host's stable identity; SSH entries use the stable
-`node.id` returned by the remote Agent context. The catalog contains no credentials.
+local entry is created from that host's stable identity; `bk c probe` validates the
+remote Agent context and prints the stable `node.id` in an exact add command. It is
+read-only, runs as the ordinary caller, and keeps strict SSH host-key checking enabled.
+The catalog contains no credentials.
 Each ordinary user still needs non-interactive SSH access with a previously verified
 host key. `bk cluster status` reports one unreachable account without disabling other
 healthy nodes.
@@ -49,6 +52,12 @@ check`. It checks endpoint reachability, stable identity, actor attribution, clo
 skew, schedulable GPUs, and the capabilities needed for retry-safe book/edit/cancel
 operations. Telemetry degradation is reported as a warning because the scheduler can
 still operate conservatively.
+
+Use `bk cluster check --jobs` when scheduled commands are part of the deployment.
+It additionally requires the scheduled-job capabilities and that the current SSH
+identity's worker holds its lease on every enabled node. The ordinary check remains
+valid for reservation-only users and warns if that user already has a pending command
+on a node whose worker is stopped or unseen.
 
 For maintenance, disable a node instead of deleting it:
 
@@ -226,8 +235,8 @@ python3 tools/cluster_acceptance.py user@gpu-a user@gpu-b
 
 The runner installs the wheel below each account's private temporary cache and points
 every candidate process at a simulated GPU file, a private data directory, and a private
-job directory. It verifies distinct stable node identities, parallel context, legal
-recommendation, routing two exclusive reservations to separate hosts, cross-node-safe
+job directory. It verifies pre-catalog discovery, distinct stable node identities,
+parallel context, legal recommendation, routing two exclusive reservations to separate hosts, cross-node-safe
 operation replay, and cancellation. It then removes the stages and writes a private local
 JSON report. It never connects to a production broker, ledger, monitor, NVML library, or
 GPU device. Use SSH aliases for non-default ports, jump hosts, or identity files; the

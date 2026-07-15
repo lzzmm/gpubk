@@ -356,9 +356,16 @@ def _cluster_tui_main(screen, config: ClusterConfig) -> None:
 
 
 def _fit(value: str, width: int) -> str:
-    if len(value) <= width:
-        return value
-    return value[: max(0, width - 1)] + "~"
+    safe = _safe_display(value)
+    if len(safe) <= width:
+        return safe
+    return safe[: max(0, width - 1)] + "~"
+
+
+def _safe_display(value: str) -> str:
+    return "".join(
+        character if character.isprintable() else " " for character in value
+    )
 
 
 def _window_start(total: int, rows: int, selected: int) -> int:
@@ -459,7 +466,12 @@ def _show_dialog(screen, title: str, lines: Sequence[str]) -> None:
         try:
             win.addnstr(0, 2, f" {title} ", max(0, win_width - 4), curses.A_BOLD)
             for row, line in enumerate(lines[offset : offset + page_rows], 1):
-                win.addnstr(row, 2, line, max(0, win_width - 4))
+                win.addnstr(
+                    row,
+                    2,
+                    _safe_display(line),
+                    max(0, win_width - 4),
+                )
             footer = "Up/Down scroll  q/Esc/Enter close"
             win.addnstr(
                 win_height - 2,

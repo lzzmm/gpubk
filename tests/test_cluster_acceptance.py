@@ -112,6 +112,50 @@ class ClusterAcceptanceTests(unittest.TestCase):
             self.assertEqual(document["nodes"][0]["node_id"], "a" * 20)
             self.assertNotIn("actor", str(document))
 
+    def test_probe_cluster_nodes_verifies_discovered_identity(self):
+        nodes = [
+            ACCEPTANCE.RemoteNode(
+                f"node-{index}",
+                ACCEPTANCE.SshTarget(f"user@gpu-{index}", ()),
+                f"/tmp/stage-{index}",
+                f"/tmp/stage-{index}/bk-node",
+                character * 20,
+                "1.2.3",
+                {"uid": 1000 + index, "username": "user"},
+            )
+            for index, character in ((1, "a"), (2, "b"))
+        ]
+        replies = [
+            {
+                "kind": "cluster-node-probe",
+                "ready": True,
+                "node": {
+                    "id": node.node_id,
+                    "target": node.target.value,
+                    "executable": node.wrapper,
+                },
+            }
+            for node in nodes
+        ]
+        with mock.patch.object(
+            ACCEPTANCE,
+            "run_client",
+            side_effect=replies,
+        ) as client:
+            result = ACCEPTANCE.probe_cluster_nodes(
+                Path("/tmp/bk"),
+                Path("/tmp/missing-cluster.json"),
+                nodes,
+            )
+        self.assertEqual(result, replies)
+        self.assertEqual(client.call_count, 2)
+        first = client.call_args_list[0].args
+        self.assertEqual(
+            first[:4],
+            (Path("/tmp/bk"), Path("/tmp/missing-cluster.json"), "c", "probe"),
+        )
+        self.assertIn("--json", first)
+
     def test_cluster_exercise_checks_two_nodes_and_idempotent_replay(self):
         status = {
             "nodes": [

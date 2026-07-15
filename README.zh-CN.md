@@ -569,29 +569,33 @@ TUI 中按 `i` 即可查看。管理员可以用 `sudo chfn 用户名` 更新这
 这些字段会展示给所有本机 GPUBK 用户，因此只应填写适合公开的联系方式。
 
 若要把多台正常工作的 GPUBK 主机组成联邦，在用户执行集群命令的机器上初始化目录。
-先从每台远端的 `bk agent context --compact` 读取稳定节点 ID，并确认普通用户可通过已验证
-主机密钥的非交互 SSH 登录，再添加节点：
+由实际使用集群的普通用户先探测每台远端。probe 使用严格主机密钥校验的非交互 SSH，
+校验稳定节点 ID、版本、时钟、GPU 数量和安全重试能力，然后打印一条供管理员核对执行的
+root 命令：
 
 ```bash
 sudo bk admin cluster init gpu-a --yes
-ssh -T gpu-b /usr/local/bin/bk agent context --compact
-sudo bk admin cluster add gpu-b gpu-b NODE_ID_FROM_ABOVE --yes
+bk c probe gpu-b gpu-b
+# 核对并执行上一步打印的 sudo bk admin cluster add ... 命令
 sudo bk admin cluster map lab-user gpu-a 1003 --yes
 sudo bk admin cluster map lab-user gpu-b 2042 --yes
 # 映射有误时撤销：sudo bk admin cluster unmap gpu-b 2042 --yes
 sudo bk admin cluster status
 bk c
 bk c check
+bk c check --jobs       # 额外要求该用户在每个节点的命令 worker 正常
 bk c rec 1 30m
 bk c 1 30m -j
 bk c x 1 30m          # 排他模式，选择最早节点
 bk c 1 2h -- python /absolute/path/train.py
 ```
 
-目录尚未创建时也可以使用 `bk cluster -h` 及各子命令的 `-h`。自动化重试完全相同的
+目录尚未创建时也可以使用 `bk c -h`、`bk c probe -h` 以及长命令各子命令的 `-h`。
+probe 只读，不会绕过 SSH 鉴权；信任探测出的稳定 ID 前仍须核对主机密钥。自动化重试完全相同的
 集群预约、修改或取消请求时，应复用同一个 `--op-id`。每个用户都应至少运行一次
 `bk c check`：它会检查该用户自己的 SSH 身份能否访问每个启用节点，并校验稳定节点
-身份、时钟以及远端版本是否支持可安全重试的写操作。
+身份、时钟以及远端版本是否支持可安全重试的写操作。依赖预约自动启动脚本前再运行
+`bk c check --jobs`；普通 check 也会在已有待运行脚本但该节点 worker 未运行时发出警告。
 
 节点维护时不需要删除端点、UID 映射或历史归档。停用节点不会被访问，也不会参与选址：
 
@@ -609,8 +613,8 @@ python3 tools/cluster_acceptance.py user@gpu-a user@gpu-b
 ```
 
 它会把当前代码构建成 wheel，在每个 SSH 账号的私有临时缓存中安装同一个 wheel，并为每台
-主机使用一张模拟 GPU 和独立测试台账；随后依次验证集群状态、推荐、两节点独立落单、相同
-操作 ID 重试和取消，最后自动删除远端临时目录。它要求主机密钥已确认且密钥 SSH 可非交互
+主机使用一张模拟 GPU 和独立测试台账；随后依次验证未配置目录时的节点发现、集群状态、
+推荐、两节点独立落单、相同操作 ID 重试和取消，最后自动删除远端临时目录。它要求主机密钥已确认且密钥 SSH 可非交互
 登录，不需要 `sudo`，不会连接正式 broker、读取 NVML 或改写 `/var/lib/gpubk`。已有 wheel
 可用 `--wheel DIST.whl` 指定。私有 JSON 报告以 `0600` 写入 `acceptance-reports/`。
 

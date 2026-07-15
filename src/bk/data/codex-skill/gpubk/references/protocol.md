@@ -22,6 +22,8 @@ bk usage me --since 24h --json --compact
 bk usage samples --since 2d --resolution 5m --json --compact
 bk c status --json
 bk c check --json
+bk c check --jobs --json
+bk c probe NAME SSH_TARGET --json
 bk c rec COUNT DURATION --json
 bk c COUNT DURATION --op-id ID --json
 bk c COUNT DURATION --op-id ID --json -- COMMAND ARG...
@@ -155,8 +157,15 @@ destination node name, while structured output does not duplicate them on stderr
 Cluster edit and cancel accept caller-supplied stable operation IDs and return a
 `cluster-mutation-result` containing the owning node and unchanged destination result.
 `cluster-check` reports per-node reachability, stable identity, actor attribution,
-clock skew, schedulable GPU count, and required write capabilities. Its `ready` field
-is false when no enabled node is usable. Catalog nodes omit `enabled` for the default
+clock skew, schedulable GPU count, required write capabilities, and the current remote
+actor's worker state. With `--jobs`, scheduled-job capabilities and a running worker are
+required on every enabled node. Without it, a pending scheduled command and stopped worker
+is a warning rather than a reservation-readiness failure. Its `ready` field is false when
+no enabled node is usable. `cluster-node-probe` is a pre-catalog, read-only SSH discovery
+document with the validated node ID, endpoint metadata, issues, and a tokenized `add_argv`;
+`add_argv` is null unless clocks, actor identity, GPUs, and retry-safe booking capabilities
+all pass. Catalog nodes
+omit `enabled` for the default
 true state and use `enabled=false` for maintenance; disabled nodes remain visible in
 context/history but are not contacted or considered for placement.
 

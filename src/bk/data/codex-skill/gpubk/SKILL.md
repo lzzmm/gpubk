@@ -33,6 +33,9 @@ bk log --limit 100 --json
 When `bk c status --json` succeeds, the client has a federated node catalog.
 Run `bk c check --json` before the first cross-node write in a session; do not route
 to a node whose catalog entry has `enabled=false` or whose check status is not `ready`.
+Before relying on scheduled launch across the cluster, run `bk c check --jobs --json`
+and require every enabled node's worker check to pass. A normal check may remain ready
+for reservation-only use while warning that an existing pending job lacks a running worker.
 Use `bk c rec COUNT DURATION --json` before a cross-node write and keep the
 returned node name attached to every reservation ID. Use `bk c COUNT DURATION --json`
 for automatic single-node placement or `bk @NODE ... --json` for an explicit node.

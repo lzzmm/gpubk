@@ -138,9 +138,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 from .mcp_server import main as mcp_main
 
                 return mcp_main(argv[1:], prog="bk mcp")
-            if head == "cluster" or (
-                head == "c" and _cluster_configured()
-            ):
+            if head in {"cluster", "c"}:
                 from .cluster import run_cluster_cli
 
                 return run_cluster_cli(argv[1:])
@@ -3582,6 +3580,7 @@ ADMINISTRATION (current administrator only)
 CLUSTER (shown only when a catalog is configured)
   bk c                           all configured GPU nodes
   bk c check                     verify access, identity, clocks, and writes
+  bk c check --jobs              also require your worker on every node
   bk c recommend 2 1h           compare earliest single-node slots
   bk c book 2 1h                book the best node
   bk c tui                       full-screen node browser

@@ -73,6 +73,7 @@ class ClusterTests(unittest.TestCase):
         self.assertIn("GPUBK cluster federation", output.getvalue())
 
         for command in (
+            "probe",
             "status",
             "check",
             "recommend",
@@ -91,6 +92,133 @@ class ClusterTests(unittest.TestCase):
                     run_cluster_cli([command, "--help"])
                 self.assertEqual(raised.exception.code, 0)
                 load.assert_not_called()
+
+    def test_probe_validates_node_and_prints_reviewed_add_command(self):
+        discovered = ClusterNode(
+            "gpu-b",
+            "b" * 20,
+            "ssh",
+            "alice@gpu-b",
+            "/opt/gpubk/bin/bk",
+            0,
+            12,
+        )
+        payload = {
+            "kind": "context",
+            "generated_at": to_iso(utc_now()),
+            "software": {"version": "\x1b[31m0.2.1"},
+            "node": {"id": discovered.node_id},
+            "actor": {"uid": 1001, "username": "alice"},
+            "policy": {"gpu_count": 8},
+            "capabilities": {
+                "federated_node_identity": True,
+                "idempotent_booking": True,
+                "operation_status": True,
+                "preflight_idempotent_replay": True,
+            },
+        }
+        output = StringIO()
+        with (
+            mock.patch(
+                "bk.cluster.probe_ssh_node",
+                return_value=NodeReply(discovered, payload, None),
+            ) as probe,
+            redirect_stdout(output),
+        ):
+            status = run_cluster_cli(
+                [
+                    "probe",
+                    "gpu-b",
+                    "alice@gpu-b",
+                    "--executable",
+                    "/opt/gpubk/bin/bk",
+                    "--timeout",
+                    "12",
+                ]
+            )
+        self.assertEqual(status, 0)
+        probe.assert_called_once()
+        text = output.getvalue()
+        self.assertNotIn("\x1b", text)
+        self.assertIn("Cluster node probe: ready", text)
+        self.assertIn("id=" + "b" * 20, text)
+        self.assertIn(
+            "sudo bk admin cluster add gpu-b alice@gpu-b " + "b" * 20,
+            text,
+        )
+        self.assertIn("--executable /opt/gpubk/bin/bk", text)
+        self.assertIn("--timeout 12", text)
+
+        output = StringIO()
+        with (
+            mock.patch(
+                "bk.cluster.probe_ssh_node",
+                return_value=NodeReply(discovered, payload, None),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                run_cluster_cli(
+                    [
+                        "probe",
+                        "gpu-b",
+                        "alice@gpu-b",
+                        "--executable",
+                        "/opt/gpubk/bin/bk",
+                        "--timeout",
+                        "12",
+                        "--json",
+                    ]
+                ),
+                0,
+            )
+        document = json.loads(output.getvalue())
+        self.assertTrue(document["ready"])
+        self.assertEqual(document["node"]["id"], "b" * 20)
+        self.assertEqual(
+            document["add_argv"][:5],
+            ["sudo", "bk", "admin", "cluster", "add"],
+        )
+
+    def test_probe_fails_closed_before_transport_for_unsafe_target(self):
+        with (
+            mock.patch("bk.cluster.probe_ssh_node") as probe,
+            self.assertRaisesRegex(BookingError, "invalid SSH target"),
+        ):
+            run_cluster_cli(["probe", "gpu-b", "--", "-oProxyCommand=bad"])
+        probe.assert_not_called()
+
+    def test_probe_reports_read_only_legacy_node_without_add_command(self):
+        discovered = ClusterNode(
+            "legacy",
+            "a" * 20,
+            "ssh",
+            "legacy",
+            "/usr/local/bin/bk",
+            0,
+            8,
+        )
+        payload = {
+            "kind": "context",
+            "generated_at": to_iso(utc_now()),
+            "software": {"version": "0.1.0"},
+            "actor": {"uid": 1001, "username": "alice"},
+            "policy": {"gpu_count": 1},
+            "capabilities": {"federated_node_identity": True},
+        }
+        output = StringIO()
+        with (
+            mock.patch(
+                "bk.cluster.probe_ssh_node",
+                return_value=NodeReply(discovered, payload, None),
+            ),
+            redirect_stdout(output),
+        ):
+            status = run_cluster_cli(["p", "legacy", "legacy"])
+        self.assertEqual(status, 3)
+        self.assertIn("Cluster node probe: not ready", output.getvalue())
+        self.assertIn("missing write capabilities", output.getvalue())
+        self.assertNotIn("admin cluster add", output.getvalue())
 
     def test_missing_catalog_explains_the_first_setup_command(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -849,6 +977,95 @@ class ClusterTests(unittest.TestCase):
         ):
             self.assertEqual(run_cluster_cli(["check"]), 3)
         self.assertIn("missing write capabilities", output.getvalue())
+
+    def test_cluster_check_jobs_requires_capabilities_and_running_worker(self):
+        node = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        capabilities = {
+            "federated_node_identity": True,
+            "idempotent_booking": True,
+            "preflight_idempotent_replay": True,
+            "idempotent_edit": True,
+            "idempotent_cancel": True,
+            "operation_status": True,
+            "scheduled_jobs": True,
+            "scheduled_job_path_snapshot": True,
+            "private_job_specs": True,
+        }
+        payload = {
+            "generated_at": to_iso(utc_now()),
+            "software": {"version": "0.2.1"},
+            "actor": {"uid": 1001, "username": "alice"},
+            "policy": {
+                "gpu_count": 1,
+                "monitoring": {"collector": {"state": "running"}},
+            },
+            "capabilities": capabilities,
+            "worker": {"state": "not-seen", "running": False},
+        }
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch(
+                "bk.cluster.query_cluster_contexts",
+                return_value=[NodeReply(node, payload, None)],
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(run_cluster_cli(["check", "--jobs"]), 3)
+        self.assertIn("scheduled-command worker is not running", output.getvalue())
+
+        payload["worker"] = {"state": "running", "running": True}
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch(
+                "bk.cluster.query_cluster_contexts",
+                return_value=[NodeReply(node, payload, None)],
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(run_cluster_cli(["check", "--jobs"]), 0)
+        self.assertIn("scheduled commands required", output.getvalue())
+
+    def test_cluster_check_warns_for_pending_job_without_worker(self):
+        node = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        payload = {
+            "generated_at": to_iso(utc_now()),
+            "software": {"version": "0.2.1"},
+            "actor": {"uid": 1001, "username": "alice"},
+            "policy": {
+                "gpu_count": 1,
+                "monitoring": {"collector": {"state": "running"}},
+            },
+            "capabilities": {
+                "federated_node_identity": True,
+                "idempotent_booking": True,
+                "preflight_idempotent_replay": True,
+                "idempotent_edit": True,
+                "idempotent_cancel": True,
+                "operation_status": True,
+            },
+            "worker": {"state": "stopped", "running": False},
+            "reservations": [
+                {
+                    "mine": True,
+                    "job": {"status": "pending"},
+                }
+            ],
+        }
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch(
+                "bk.cluster.query_cluster_contexts",
+                return_value=[NodeReply(node, payload, None)],
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(run_cluster_cli(["check"]), 0)
+        self.assertIn("scheduled command is pending", output.getvalue())
 
     def test_malformed_node_does_not_block_a_healthy_recommendation(self):
         malformed = ClusterNode("malformed", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)

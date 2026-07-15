@@ -2253,6 +2253,12 @@ class CliTests(unittest.TestCase):
                 (["mcp", "--help"], "usage: bk mcp", "MCP server requires"),
                 (["usage", "--help"], "usage: bk usage", "usage: bk usage me"),
                 (["book", "--help"], "usage: bk book", "Unknown command"),
+                (["c", "--help"], "GPUBK cluster federation", "Unknown command"),
+                (
+                    ["c", "probe", "--help"],
+                    "usage: bk cluster probe",
+                    "Unknown command",
+                ),
                 (["help", "add"], "usage: bk add", "mode [s shared"),
                 (["help", "usage"], "usage: bk usage", "usage: bk usage me"),
             )

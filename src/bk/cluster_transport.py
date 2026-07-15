@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import selectors
 import shlex
 import shutil
@@ -9,7 +10,7 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import Event
 from typing import Optional, Sequence
 
@@ -19,6 +20,7 @@ from .models import BookingError
 MAX_NODE_OUTPUT_BYTES = 8 * 1024 * 1024
 MAX_NODE_STDERR_BYTES = 64 * 1024
 NODE_IO_CHUNK_BYTES = 64 * 1024
+_STABLE_NODE_ID = re.compile(r"^[0-9a-f]{20}$")
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,39 @@ def invoke_node(
     argv: Sequence[str],
     *,
     cancel_event: Optional[Event] = None,
+) -> NodeReply:
+    return _invoke_node(
+        node,
+        argv,
+        cancel_event=cancel_event,
+        expected_node_id=node.node_id,
+    )
+
+
+def probe_ssh_node(
+    node: ClusterNode,
+    argv: Sequence[str],
+    *,
+    cancel_event: Optional[Event] = None,
+) -> NodeReply:
+    """Query one SSH endpoint before its stable node ID is cataloged."""
+
+    if node.transport != "ssh":
+        raise BookingError("node discovery is available only for SSH endpoints")
+    return _invoke_node(
+        node,
+        argv,
+        cancel_event=cancel_event,
+        expected_node_id=None,
+    )
+
+
+def _invoke_node(
+    node: ClusterNode,
+    argv: Sequence[str],
+    *,
+    cancel_event: Optional[Event],
+    expected_node_id: Optional[str],
 ) -> NodeReply:
     command, environment = node_command(node, argv)
     try:
@@ -116,18 +151,33 @@ def invoke_node(
             error_code="protocol",
         )
     identity = payload.get("node")
-    if not isinstance(identity, dict) or identity.get("id") != node.node_id:
+    remote_node_id = identity.get("id") if isinstance(identity, dict) else None
+    if not isinstance(remote_node_id, str) or not _STABLE_NODE_ID.fullmatch(
+        remote_node_id
+    ):
+        return NodeReply(
+            node,
+            None,
+            "returned an invalid stable node identity",
+            error_code="identity",
+        )
+    if expected_node_id is not None and remote_node_id != expected_node_id:
         return NodeReply(
             node,
             None,
             "stable node identity does not match the catalog",
             error_code="identity",
         )
+    reply_node = (
+        node
+        if expected_node_id is not None
+        else replace(node, node_id=remote_node_id)
+    )
     if payload.get("kind") == "error":
         error = payload.get("error")
         message = error.get("message") if isinstance(error, dict) else None
         return NodeReply(
-            node,
+            reply_node,
             None,
             str(message or "remote command failed"),
             error_code="remote",
@@ -135,12 +185,12 @@ def invoke_node(
     if returncode not in {0, 3}:
         detail = stderr.decode("utf-8", "replace").strip().splitlines()
         return NodeReply(
-            node,
+            reply_node,
             None,
             detail[-1] if detail else f"exit {returncode}",
             error_code="transport",
         )
-    return NodeReply(node, payload, None)
+    return NodeReply(reply_node, payload, None)
 
 
 def node_command(

@@ -15,7 +15,7 @@ class ClusterTuiTests(unittest.TestCase):
         second = ClusterNode("gpu-b", "b" * 20, "ssh", "gpu-b", "/usr/bin/bk", 10, 8)
         config = ClusterConfig(Path("/cluster.json"), (first, second))
         payload = {
-            "actor": {"uid": 1003, "username": "user"},
+            "actor": {"uid": 1003, "username": "user\x1b[2J"},
             "policy": {
                 "gpu_count": 1,
                 "monitoring": {"collector": {"state": "running"}},
@@ -50,6 +50,7 @@ class ClusterTuiTests(unittest.TestCase):
             24,
         )
         self.assertEqual(len(lines), 24)
+        self.assertTrue(all("\x1b" not in line for line in lines))
         self.assertTrue(all(len(line) <= 80 for line in lines))
         self.assertTrue(any(line.startswith(">gpu-a") for line in lines))
         self.assertTrue(any("123456" in line for line in lines))

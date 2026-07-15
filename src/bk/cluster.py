@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import shlex
 import stat
 import sys
 import tempfile
@@ -21,6 +22,7 @@ from .cluster_transport import (
     NodeReply,
     invoke_node as _invoke_once,
     node_command,
+    probe_ssh_node,
 )
 from .fileio import fsync_directory, open_existing_regular
 from .models import BookingError
@@ -32,6 +34,7 @@ from .timeparse import (
     parse_memory_mb,
     utc_now,
 )
+from .worker_status import WORKER_TERMINAL_JOB_STATES
 
 
 CLUSTER_SCHEMA_VERSION = "gpubk.cluster.v1"
@@ -292,12 +295,19 @@ def run_cluster_cli(argv: Sequence[str]) -> int:
     if action in {"-h", "--help", "help"}:
         _print_cluster_help()
         return 0
+    if action in {"probe", "p"}:
+        parsed = _cluster_probe_parser().parse_args(_cluster_help_args(args))
+        return _cluster_probe(parsed)
     if action in {"status", "st", "list", "ls", "context", "ctx"}:
         parsed = _cluster_status_parser(action).parse_args(_cluster_help_args(args))
         return _cluster_status(load_cluster_config(), json_output=parsed.json)
     if action in {"check", "health", "doctor"}:
         parsed = _cluster_status_parser("check").parse_args(_cluster_help_args(args))
-        return _cluster_check(load_cluster_config(), json_output=parsed.json)
+        return _cluster_check(
+            load_cluster_config(),
+            json_output=parsed.json,
+            require_jobs=parsed.jobs,
+        )
     if action in {"recommend", "rec"}:
         booking_args, command_argv = _split_cluster_job_command(args)
         if command_argv is not None:
@@ -456,7 +466,8 @@ def run_node_cli(node_name: str, argv: Sequence[str]) -> int:
         reservation = payload.get("reservation", {})
         short_id = reservation.get("short_id") or str(reservation.get("id", ""))[:8]
         print(
-            f"{payload.get('status', 'created')} on {node.name}: {short_id} "
+            f"{_clip(str(payload.get('status', 'created')), 16)} on {node.name}: "
+            f"{_clip(str(short_id), 64)} "
             f"GPU={_gpu_text(reservation.get('gpus'))} "
             f"{_local_time(reservation.get('start_at'))} -> "
             f"{_local_time(reservation.get('end_at'))}"
@@ -598,10 +609,132 @@ def _cluster_status(config: ClusterConfig, *, json_output: bool = False) -> int:
     return 3 if not enabled or failed == len(enabled) else 0
 
 
-def _cluster_check(config: ClusterConfig, *, json_output: bool = False) -> int:
+def _cluster_probe(args: argparse.Namespace) -> int:
+    candidate = _parse_node(
+        {
+            "name": args.name,
+            "node_id": "0" * 20,
+            "transport": "ssh",
+            "target": args.target,
+            "executable": args.executable,
+            "timeout_seconds": args.timeout,
+        }
+    )
+    reply = probe_ssh_node(
+        candidate,
+        ["agent", "context", "--compact"],
+    )
+    if reply.error:
+        raise BookingError(f"cluster node probe failed: {reply.error}")
+    payload = reply.payload or {}
+    if payload.get("kind") != "context":
+        raise BookingError("cluster node probe returned an unexpected response")
+    skew = _clock_skew_seconds(payload)
+    missing = _missing_capabilities(payload, _BOOK_CAPABILITIES)
+    policy = payload.get("policy")
+    gpu_count = policy.get("gpu_count") if isinstance(policy, dict) else None
+    issues = []
+    if skew is None or skew > MAX_CLOCK_SKEW_SECONDS:
+        issues.append("clock is unavailable or outside the 30s limit")
+    if missing:
+        issues.append(f"missing write capabilities: {','.join(missing)}")
+    if (
+        isinstance(gpu_count, bool)
+        or not isinstance(gpu_count, int)
+        or gpu_count < 1
+    ):
+        issues.append("node advertises no schedulable GPUs")
+    software = payload.get("software")
+    version = software.get("version") if isinstance(software, dict) else None
+    actor = payload.get("actor")
+    actor_value = actor if isinstance(actor, dict) else {}
+    actor_uid = actor_value.get("uid")
+    if (
+        isinstance(actor_uid, bool)
+        or not isinstance(actor_uid, int)
+        or actor_uid < 0
+    ):
+        issues.append("remote actor identity is unavailable")
+        actor_uid_text = "?"
+    else:
+        actor_uid_text = str(actor_uid)
+    add_argv = [
+        "sudo",
+        "bk",
+        "admin",
+        "cluster",
+        "add",
+        candidate.name,
+        str(candidate.target),
+        reply.node.node_id,
+    ]
+    if candidate.executable != "/usr/local/bin/bk":
+        add_argv += ["--executable", candidate.executable]
+    if candidate.timeout_seconds != 8:
+        add_argv += ["--timeout", f"{candidate.timeout_seconds:g}"]
+    add_argv.append("--yes")
+    result = {
+        "schema_version": CLUSTER_SCHEMA_VERSION,
+        "kind": "cluster-node-probe",
+        "ready": not issues,
+        "node": {
+            "name": candidate.name,
+            "id": reply.node.node_id,
+            "target": candidate.target,
+            "executable": candidate.executable,
+            "version": version,
+            "gpu_count": gpu_count,
+            "clock_skew_seconds": None if skew is None else round(skew, 3),
+            "actor": {
+                "uid": actor_uid,
+                "username": actor_value.get("username"),
+            },
+        },
+        "missing_capabilities": missing,
+        "issues": issues,
+        "add_argv": add_argv if not issues else None,
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    else:
+        state = "ready" if not issues else "not ready"
+        clock = f"{skew:.1f}s" if isinstance(skew, (int, float)) else "unknown"
+        print(
+            f"Cluster node probe: {state} | {candidate.name} "
+            f"id={reply.node.node_id} v{_clip(str(version or 'unknown'), 32)} "
+            f"GPUs={gpu_count or '-'}"
+        )
+        print(
+            f"endpoint={candidate.target} actor="
+            f"{_clip(str(actor_value.get('username', '?')), 64)}:"
+            f"{actor_uid_text} "
+            f"clock={clock}"
+        )
+        for issue in issues:
+            print(f"fail: {issue}")
+        if not issues:
+            print("Reviewed add command:")
+            print(f"  {shlex.join(add_argv)}")
+            print("Then verify this SSH identity with: bk c check")
+    return 0 if not issues else 3
+
+
+def _cluster_check(
+    config: ClusterConfig,
+    *,
+    json_output: bool = False,
+    require_jobs: bool = False,
+) -> int:
     replies = query_cluster_contexts(config)
     required = tuple(
-        dict.fromkeys((*_BOOK_CAPABILITIES, *_EDIT_CAPABILITIES, *_CANCEL_CAPABILITIES))
+        dict.fromkeys(
+            (
+                *_BOOK_CAPABILITIES,
+                *_EDIT_CAPABILITIES,
+                *_CANCEL_CAPABILITIES,
+                *(_SCHEDULED_BOOK_CAPABILITIES if require_jobs else ()),
+            )
+        )
     )
     checks = []
     for reply in replies:
@@ -613,6 +746,7 @@ def _cluster_check(config: ClusterConfig, *, json_output: bool = False) -> int:
             "version": None,
             "actor": None,
             "clock_skew_seconds": None,
+            "worker": None,
             "missing_capabilities": [],
             "warnings": [],
             "error": None,
@@ -672,6 +806,28 @@ def _cluster_check(config: ClusterConfig, *, json_output: bool = False) -> int:
             check["warnings"].append(
                 f"telemetry collector state is {collector_state or 'unknown'}"
             )
+        worker = payload.get("worker")
+        worker_value = worker if isinstance(worker, dict) else {}
+        check["worker"] = {
+            "state": worker_value.get("state"),
+            "running": worker_value.get("running"),
+        }
+        pending_job = _context_has_pending_job(payload)
+        if require_jobs and worker_value.get("running") is not True:
+            worker_error = (
+                "scheduled-command worker is not running "
+                f"(state={worker_value.get('state') or 'unknown'})"
+            )
+            if check["status"] == "failed" and check["error"]:
+                check["error"] = f"{check['error']}; {worker_error}"
+            else:
+                check["status"] = "failed"
+                check["error"] = worker_error
+        elif pending_job and worker_value.get("running") is not True:
+            check["warnings"].append(
+                "a scheduled command is pending but this SSH identity's worker "
+                f"is {worker_value.get('state') or 'unknown'}"
+            )
         checks.append(check)
 
     enabled = [item for item in checks if item["enabled"]]
@@ -698,27 +854,42 @@ def _cluster_check(config: ClusterConfig, *, json_output: bool = False) -> int:
     print(
         f"Cluster check: {state} | {len(enabled)} enabled, "
         f"{len(checks) - len(enabled)} disabled, {warnings} warning(s)"
+        + (" | scheduled commands required" if require_jobs else "")
     )
     for item in checks:
         if item["status"] == "disabled":
             print(f"skip {item['name']}: disabled by administrator")
             continue
         if item["status"] == "failed":
-            print(f"fail {item['name']}: {item['error']}")
+            print(f"fail {item['name']}: {_clip(str(item['error']), 240)}")
             continue
         actor = item["actor"] or {}
         version = item["version"] or "unknown"
         skew = item["clock_skew_seconds"]
         clock = f"{skew:.1f}s" if isinstance(skew, (int, float)) else "unknown"
         print(
-            f"pass {item['name']}: v{version} actor="
-            f"{actor.get('username', '?')}:{actor.get('uid', '?')} clock={clock}"
+            f"pass {item['name']}: v{_clip(str(version), 32)} actor="
+            f"{_clip(str(actor.get('username', '?')), 64)}:"
+            f"{actor.get('uid', '?')} clock={clock}"
         )
         for warning in item["warnings"]:
-            print(f"warn {item['name']}: {warning}")
+            print(f"warn {item['name']}: {_clip(str(warning), 240)}")
     if not enabled:
         print("fail cluster: no enabled nodes; ask an administrator to enable one")
     return 0 if ready else 3
+
+
+def _context_has_pending_job(payload: dict) -> bool:
+    reservations = payload.get("reservations")
+    if not isinstance(reservations, list):
+        return False
+    for reservation in reservations:
+        if not isinstance(reservation, dict) or reservation.get("mine") is not True:
+            continue
+        job = reservation.get("job")
+        if isinstance(job, dict) and job.get("status") not in WORKER_TERMINAL_JOB_STATES:
+            return True
+    return False
 
 
 def _cluster_recommend(
@@ -1064,8 +1235,9 @@ def _submit_cluster_booking(
         )
         return 0
     print(
-        f"{payload.get('status', 'created')} on {selected.node.name}: "
-        f"{reservation.get('short_id', reservation.get('id', '?'))} "
+        f"{_clip(str(payload.get('status', 'created')), 16)} on "
+        f"{selected.node.name}: "
+        f"{_clip(str(reservation.get('short_id', reservation.get('id', '?'))), 64)} "
         f"GPU={_gpu_text(reservation.get('gpus'))} "
         f"{_local_time(reservation.get('start_at'))} -> "
         f"{_local_time(reservation.get('end_at'))}"
@@ -1145,7 +1317,10 @@ def _cluster_usage(
             )
         for reply in replies:
             if reply.error and reply.node.enabled:
-                print(f"warning: {reply.node.name}: {reply.error}")
+                print(
+                    f"warning: {reply.node.name}: "
+                    f"{_clip(str(reply.error), 240)}"
+                )
     enabled_replies = [reply for reply in replies if reply.node.enabled]
     return (
         3 if not enabled_replies or all(reply.error for reply in enabled_replies) else 0
@@ -1448,7 +1623,8 @@ def _print_cluster_mutation(
     reservation = payload.get("reservation", {})
     short_id = reservation.get("short_id") or str(reservation.get("id", ""))[:8]
     print(
-        f"{payload.get('status', payload.get('kind', 'updated'))}: {reply.node.name}/{short_id}"
+        f"{_clip(str(payload.get('status', payload.get('kind', 'updated'))), 16)}: "
+        f"{reply.node.name}/{_clip(str(short_id), 64)}"
     )
     return 0
 
@@ -1844,9 +2020,40 @@ def _cluster_booking_parser(prog: str) -> argparse.ArgumentParser:
     return parser
 
 
+def _cluster_probe_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="bk cluster probe",
+        description=(
+            "Read and validate one SSH node before adding its stable identity to "
+            "the root-owned catalog."
+        ),
+    )
+    parser.add_argument("name", help="short catalog name, such as gpu-b")
+    parser.add_argument("target", help="OpenSSH target or alias, such as user@gpu-b")
+    parser.add_argument(
+        "--executable",
+        default="/usr/local/bin/bk",
+        help="absolute path to bk on the remote node",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=8,
+        help="SSH deadline in seconds (default: 8)",
+    )
+    parser.add_argument("-j", "--json", action="store_true")
+    return parser
+
+
 def _cluster_status_parser(action: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=f"bk cluster {action}")
     parser.add_argument("-j", "--json", action="store_true")
+    if action == "check":
+        parser.add_argument(
+            "--jobs",
+            action="store_true",
+            help="also require this SSH identity's scheduled-command worker",
+        )
     return parser
 
 
@@ -1972,11 +2179,13 @@ def _print_cluster_help() -> None:
 
 First setup (administrator):
   sudo bk admin cluster init THIS-NODE --yes
+  bk c probe NODE SSH_TARGET
   sudo bk admin cluster add NODE SSH_TARGET STABLE_NODE_ID --yes
 
 Everyday commands:
   bk c                       show all configured nodes and reservations
   bk c check                 verify access, identity, clocks, and safe writes
+  bk c check --jobs          also require your worker on every enabled node
   bk c rec 2 1h              compare earliest legal placements without writing
   bk c 2 1h                  book the best single node in shared mode
   bk c x 2 1h                book the best single node exclusively
@@ -1995,7 +2204,10 @@ Run any subcommand with -h for its complete options.
 
 
 def _clip(value: str, width: int) -> str:
-    return value if len(value) <= width else value[: max(0, width - 1)] + "~"
+    safe = "".join(
+        character if character.isprintable() else " " for character in value
+    )
+    return safe if len(safe) <= width else safe[: max(0, width - 1)] + "~"
 
 
 def _duration(seconds: object) -> str:
@@ -2011,7 +2223,7 @@ def _local_time(value: object) -> str:
     try:
         return format_local(value)
     except (TypeError, ValueError):
-        return value
+        return _clip(value, 64)
 
 
 def _gpu_indices(value: object) -> Optional[list[int]]:

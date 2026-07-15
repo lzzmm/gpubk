@@ -4,6 +4,11 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.1 - 2026-07-15
 
+- Add a read-only `bk c probe NAME SSH_TARGET` onboarding check that works before a
+  catalog exists, validates the SSH endpoint's stable identity and write readiness,
+  and prints a reviewed root-owned catalog command. Add `bk c check --jobs` for
+  per-identity scheduled-command capability and worker readiness, while ordinary
+  checks warn about pending commands whose remote worker is not running.
 - Surface destination booking warnings in human cluster output, including a missing
   scheduled-command worker, live-GPU uncertainty, storage recovery, and allocator fallback.
   Structured output keeps warnings in JSON only; human warnings are bounded, deduplicated,
