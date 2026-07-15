@@ -5,11 +5,6 @@ on:
     tags:
       - "v[0-9]*.[0-9]*.[0-9]*"
   workflow_dispatch:
-    inputs:
-      promote_run_id:
-        description: "Successful TestPyPI Release run ID to promote to PyPI; leave empty to build"
-        required: false
-        type: string
 
 concurrency:
   group: release-${{ github.ref }}
@@ -20,20 +15,10 @@ permissions:
 
 jobs:
   build:
-    if: github.event_name != 'workflow_dispatch' || inputs.promote_run_id == ''
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.package.outputs.version }}
     steps:
-      - name: Require TestPyPI publishing to be enabled
-        env:
-          ENABLED: ${{ vars.TESTPYPI_RELEASE_ENABLED }}
-        shell: bash
-        run: |
-          if [[ "$ENABLED" != "true" ]]; then
-            echo "TESTPYPI_RELEASE_ENABLED must be true for a release build" >&2
-            exit 1
-          fi
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
@@ -164,82 +149,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  preflight-testpypi:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require an unused TestPyPI version
-        env:
-          VERSION: ${{ needs.build.outputs.version }}
-        shell: bash
-        run: |
-          status=$(curl --retry 3 --retry-all-errors --silent --show-error \
-            --output /dev/null --write-out '%{http_code}' \
-            "https://test.pypi.org/pypi/gpubk/$VERSION/json")
-          case "$status" in
-            404) ;;
-            200)
-              echo "gpubk $VERSION already exists on TestPyPI" >&2
-              exit 1
-              ;;
-            *)
-              echo "TestPyPI version check returned HTTP $status" >&2
-              exit 1
-              ;;
-          esac
-
-  publish-testpypi:
-    needs: [build, preflight-testpypi]
-    runs-on: ubuntu-latest
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/p/gpubk
-    permissions:
-      id-token: write
-    steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: python-package-distributions
-      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
-        with:
-          packages-dir: dist/
-          repository-url: https://test.pypi.org/legacy/
-
-  verify-testpypi:
-    needs: [build, publish-testpypi]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: python-package-distributions
-      - name: Verify uploaded artifact hashes
-        run: >-
-          python tools/verify_index_artifacts.py
-          --index testpypi
-          --project gpubk
-          --version '${{ needs.build.outputs.version }}'
-          --checksums SHA256SUMS
-      - name: Install the uploaded package
-        shell: bash
-        run: |
-          python -m venv /tmp/gpubk-index-smoke
-          installed=false
-          for attempt in {1..12}; do
-            if /tmp/gpubk-index-smoke/bin/python -m pip install --no-cache-dir --no-deps \
-              --index-url https://test.pypi.org/simple/ "gpubk==${{ needs.build.outputs.version }}"; then
-              installed=true
-              break
-            fi
-            sleep 10
-          done
-          test "$installed" = true
-          test "$(/tmp/gpubk-index-smoke/bin/bk --version)" = "bk ${{ needs.build.outputs.version }}"
-
   preflight-pypi:
     if: >-
       github.event_name == 'push' &&
       github.ref_type == 'tag'
-    needs: [build, verify-testpypi]
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - name: Require PyPI publishing to be enabled
@@ -275,7 +189,7 @@ jobs:
     if: >-
       github.event_name == 'push' &&
       github.ref_type == 'tag'
-    needs: [build, verify-testpypi, preflight-pypi]
+    needs: [build, preflight-pypi]
     runs-on: ubuntu-latest
     environment:
       name: pypi
