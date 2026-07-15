@@ -92,6 +92,7 @@ CONFIG_ENV_MAP = {
     "dir_mode": "BK_DIR_MODE",
     "disabled_gpus": "BK_DISABLED_GPUS",
     "gpu_priority": "BK_GPU_PRIORITY",
+    "container_attribution_groups": "BK_CONTAINER_ATTRIBUTION_GROUPS",
 }
 CONFIG_FILE_KEYS = frozenset(
     {
@@ -162,8 +163,14 @@ class Config:
     broker_socket_mode: int = 0o600
     disabled_gpus: Tuple[int, ...] = ()
     gpu_priority: Tuple[Tuple[int, int], ...] = ()
+    container_attribution_groups: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "container_attribution_groups",
+            _group_names_value(self.container_attribution_groups),
+        )
         if (
             isinstance(self.booking_horizon_days, bool)
             or not isinstance(self.booking_horizon_days, int)
@@ -983,7 +990,35 @@ def load_config() -> Config:
             raw.get("disabled_gpus"), gpu_count, "disabled_gpus"
         ),
         gpu_priority=validate_gpu_priority(raw.get("gpu_priority"), gpu_count),
+        container_attribution_groups=_group_names_value(
+            raw.get("container_attribution_groups")
+        ),
     )
+
+
+def _group_names_value(value: Any) -> Tuple[str, ...]:
+    if value in (None, ""):
+        return ()
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("["):
+            try:
+                value = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError("container_attribution_groups must be a JSON array or comma-separated names") from exc
+        else:
+            value = [item.strip() for item in text.split(",") if item.strip()]
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("container_attribution_groups must be a list of group names")
+    result = []
+    for item in value:
+        if not isinstance(item, str) or not item or len(item) > 128:
+            raise ValueError("container attribution group names must be non-empty strings")
+        if any(character.isspace() or character in ":/\x00" for character in item):
+            raise ValueError(f"invalid container attribution group name: {item!r}")
+        if item not in result:
+            result.append(item)
+    return tuple(result)
 
 
 def _bounded_detected_gpu_count(value: int) -> int:

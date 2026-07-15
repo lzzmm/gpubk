@@ -29,7 +29,7 @@ GPU_BUSY_MEMORY_MIN_MB = 1024
 CONTAINER_IDENTITY_HOST = "host"
 CONTAINER_IDENTITY_INFERRED = "container-reservation"
 CONTAINER_IDENTITY_AMBIGUOUS = "container-ambiguous"
-_CONTAINER_ACCESS_CACHE: Dict[Tuple[str, int], Tuple[float, bool]] = {}
+_CONTAINER_ACCESS_CACHE: Dict[Tuple[str, int, Tuple[str, ...]], Tuple[float, bool]] = {}
 _CONTAINER_ACCESS_CACHE_SECONDS = 60.0
 
 SYSTEM_GPU_PROCESS_NAMES = {
@@ -81,6 +81,7 @@ def classify_process_usage(
     reservations: Sequence[dict],
     at: Optional[datetime] = None,
     container_uid_allowed: Optional[Callable[[str, int], bool]] = None,
+    container_groups: Sequence[str] = (),
 ) -> Dict[int, List[ProcessUsage]]:
     at = at or utc_now()
     current = [
@@ -91,7 +92,9 @@ def classify_process_usage(
         and at < parse_iso(item["end_at"])
     ]
     result: Dict[int, List[ProcessUsage]] = {}
-    access_check = container_uid_allowed or _uid_can_use_container_runtime
+    access_check = container_uid_allowed or (
+        lambda runtime, uid: _uid_can_use_container_runtime(runtime, uid, container_groups)
+    )
     for gpu in snapshots:
         rows = [
             _classify_process(gpu.index, process, current, access_check)
@@ -344,21 +347,43 @@ def _infer_container_owner(
     return ProcessUsage(gpu, attributed, USAGE_AUTHORIZED, ids)
 
 
-def _uid_can_use_container_runtime(runtime: str, uid: int) -> bool:
+def _uid_can_use_container_runtime(
+    runtime: str, uid: int, extra_groups: Sequence[str] = ()
+) -> bool:
     if runtime != "docker" or uid <= 0:
         return False
-    key = (runtime, uid)
+    normalized_groups = tuple(sorted(set(extra_groups)))
+    key = (runtime, uid, normalized_groups)
     now = time.monotonic()
     cached = _CONTAINER_ACCESS_CACHE.get(key)
     if cached is not None and cached[0] > now:
         return cached[1]
-    allowed = _uid_can_access_docker_socket(uid)
+    allowed = _uid_can_access_docker_socket(uid) or _uid_in_named_groups(
+        uid, normalized_groups
+    )
     _CONTAINER_ACCESS_CACHE[key] = (now + _CONTAINER_ACCESS_CACHE_SECONDS, allowed)
     if len(_CONTAINER_ACCESS_CACHE) > 4096:
         expired = [item for item, value in _CONTAINER_ACCESS_CACHE.items() if value[0] <= now]
         for item in expired:
             _CONTAINER_ACCESS_CACHE.pop(item, None)
     return allowed
+
+
+def _uid_in_named_groups(uid: int, group_names: Sequence[str]) -> bool:
+    if not group_names:
+        return False
+    try:
+        account = pwd.getpwuid(uid)
+    except (KeyError, OSError):
+        return False
+    for name in group_names:
+        try:
+            group = grp.getgrnam(name)
+        except (KeyError, OSError):
+            continue
+        if account.pw_gid == group.gr_gid or account.pw_name in group.gr_mem:
+            return True
+    return False
 
 
 def _uid_can_access_docker_socket(

@@ -508,7 +508,7 @@ parameters are not collected.
 History is stored in checksummed daily partitions with 1-minute, 5-minute,
 10-minute, hourly, and daily levels. The public `gpubk.usage.v1` query model is
 available through Python, JSON CLI, and MCP; visualizers should not parse storage
-files. See [Telemetry](https://github.com/lzzmm/gpubk/blob/main/TELEMETRY.md).
+files. See [Telemetry](https://github.com/lzzmm/gpubk/blob/main/docs/TELEMETRY.md).
 `usage_load_window_minutes` controls how much recent device history is retained
 and considered by automatic GPU placement.
 
@@ -544,7 +544,7 @@ In the browser, `Tab` changes focus and `Enter` opens complete reservation detai
 Older nodes remain visible during
 rolling upgrades but are read-only until they advertise the required safe-write
 capabilities.
-See [CLUSTER.md](https://github.com/lzzmm/gpubk/blob/main/CLUSTER.md) for transport,
+See [CLUSTER.md](https://github.com/lzzmm/gpubk/blob/main/docs/CLUSTER.md) for transport,
 failure, NFS export, and rollout boundaries.
 
 The monitor also has a user service:
@@ -846,7 +846,7 @@ untouched.
 Only versioned public usage summaries and samples are exported, never a ledger, command
 arguments, job specs, secrets, or logs. Booking remains available when the archive is
 offline. NFS `root_squash`, multi-owner roots, daily operation, and recovery rules are
-covered in [CLUSTER.md](../CLUSTER.md).
+covered in [CLUSTER.md](CLUSTER.md).
 
 Useful non-interactive forms:
 
@@ -1026,7 +1026,7 @@ bk broker --check
 bk doctor --probe --require-monitor --strict
 ```
 
-See [UPGRADING.md](https://github.com/lzzmm/gpubk/blob/main/UPGRADING.md) for service restart, rollback, and release-specific
+See [UPGRADING.md](https://github.com/lzzmm/gpubk/blob/main/docs/UPGRADING.md) for service restart, rollback, and release-specific
 checks.
 
 ### Backup, clear, and restore
@@ -1126,6 +1126,7 @@ socket policy in addition to scheduling settings:
   "max_shared_users": 4,
   "disabled_gpus": [7],
   "gpu_priority": {"6": 10},
+  "container_attribution_groups": [],
   "queue_search_hours": 168,
   "timeline_hours": 2,
   "lock_timeout_seconds": 10,
@@ -1160,6 +1161,13 @@ socket policy in addition to scheduling settings:
   "dir_mode": "0755"
 }
 ```
+
+Container processes often appear as `root` on the host. GPUBK first trusts the
+Docker socket's real access policy. Administrators may additionally list groups
+whose members are allowed to be reservation-based attribution candidates, for
+example `"container_attribution_groups": ["sudo"]`. Keep this list narrow:
+inference is used only when exactly one eligible reservation owner overlaps the
+container; ambiguous containers remain uncharged and are shown as `container?`.
 
 When neither `BK_DATA_DIR` nor `BK_CONFIG_FILE` is set, GPUBK automatically
 discovers `/etc/gpubk/config.json`. A system configuration must contain an
@@ -1326,7 +1334,7 @@ PYTHONPATH=src python3 benchmarks/usage_store.py
 ```
 
 Project documents: [Security](https://github.com/lzzmm/gpubk/blob/main/SECURITY.md) ·
-[Upgrading](https://github.com/lzzmm/gpubk/blob/main/UPGRADING.md) ·
-[Release process](https://github.com/lzzmm/gpubk/blob/main/RELEASING.md) ·
+[Upgrading](https://github.com/lzzmm/gpubk/blob/main/docs/UPGRADING.md) ·
+[Release process](https://github.com/lzzmm/gpubk/blob/main/docs/RELEASING.md) ·
 [Changelog](https://github.com/lzzmm/gpubk/blob/main/CHANGELOG.md) ·
 [Apache-2.0 license](https://github.com/lzzmm/gpubk/blob/main/LICENSE)

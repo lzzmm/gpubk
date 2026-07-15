@@ -15,6 +15,7 @@ from bk.usage import (
     classify_process_usage,
     summarize_process_command,
     _uid_can_access_docker_socket,
+    _uid_in_named_groups,
 )
 
 
@@ -36,6 +37,14 @@ def reservation(rid, uid, gpu, start, end):
 
 
 class UsageClassificationTests(unittest.TestCase):
+    def test_configured_group_membership_allows_container_candidate(self):
+        account = SimpleNamespace(pw_gid=1001, pw_name="alice")
+        sudo_group = SimpleNamespace(gr_gid=27, gr_mem=["alice"])
+        with patch("bk.usage.pwd.getpwuid", return_value=account), patch(
+            "bk.usage.grp.getgrnam", return_value=sudo_group
+        ):
+            self.assertTrue(_uid_in_named_groups(1001, ("sudo",)))
+
     def setUp(self):
         self.now = datetime(2030, 1, 1, 12, 0, tzinfo=timezone.utc)
 

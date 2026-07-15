@@ -55,8 +55,9 @@ class DeploymentDiagnosticsTests(unittest.TestCase):
                     "atomic-replace",
                     "process-lock",
                     "disk-space",
-                    "process-identity",
-                    "gpu-telemetry",
+                "process-identity",
+                "container-attribution",
+                "gpu-telemetry",
                 ],
             )
             self.assertEqual(list(data_dir.glob(".gpubk-probe-*")), [])

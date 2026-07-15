@@ -368,6 +368,9 @@ def _summarize_users(records: Sequence[dict], workloads: Dict[int, dict], redact
                 "idle_reserved_gpu_seconds": 0.0,
                 "violation_gpu_seconds": 0.0,
                 "sampled_gpu_seconds": 0.0,
+                "verified_gpu_seconds": 0.0,
+                "inferred_gpu_seconds": 0.0,
+                "ambiguous_gpu_seconds": 0.0,
                 "_sm_total": 0.0,
                 "_sm_samples": 0,
                 "max_sm_percent": None,
@@ -384,6 +387,17 @@ def _summarize_users(records: Sequence[dict], workloads: Dict[int, dict], redact
         status = str(record.get("status", "unknown"))
         group["sampled_gpu_seconds"] += observed
         group["active_gpu_seconds"] += active
+        identity_sources = set(
+            record.get("extensions", {})
+            .get("gpubk.container-summary", {})
+            .get("identity_sources", [])
+        )
+        if "container-ambiguous" in identity_sources:
+            group["ambiguous_gpu_seconds"] += active
+        elif "container-reservation" in identity_sources:
+            group["inferred_gpu_seconds"] += active
+        else:
+            group["verified_gpu_seconds"] += active
         if status == "ok":
             group["reserved_gpu_seconds"] += observed
             group["idle_reserved_gpu_seconds"] += max(0.0, observed - active)
@@ -427,6 +441,9 @@ def _summarize_users(records: Sequence[dict], workloads: Dict[int, dict], redact
             "idle_reserved_gpu_seconds",
             "violation_gpu_seconds",
             "sampled_gpu_seconds",
+            "verified_gpu_seconds",
+            "inferred_gpu_seconds",
+            "ambiguous_gpu_seconds",
         ):
             group[key] = round(group[key], 3)
         group["statuses"] = {key: round(value, 3) for key, value in sorted(group["statuses"].items())}

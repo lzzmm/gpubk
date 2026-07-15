@@ -128,17 +128,17 @@ bk c 2 1h
 ```
 
 On a login node, omit `cluster init` and add each GPU host with `bk c probe`.
-See [CLUSTER.md](CLUSTER.md) before production use; it covers per-node identity,
+See [CLUSTER.md](docs/CLUSTER.md) before production use; it covers per-node identity,
 UID mapping, failure behavior, NFS history export, and scheduled jobs.
 
 ## Documentation
 
 - [Complete administrator and user guide](https://github.com/lzzmm/gpubk/blob/main/docs/GUIDE.md)
 - [中文完整手册](https://github.com/lzzmm/gpubk/blob/main/docs/GUIDE.zh-CN.md)
-- [Upgrading](UPGRADING.md)
+- [Upgrading](docs/UPGRADING.md)
 - [Security model](SECURITY.md)
-- [Cluster deployment](CLUSTER.md)
-- [Telemetry format](TELEMETRY.md)
-- [Release process](RELEASING.md)
+- [Cluster deployment](docs/CLUSTER.md)
+- [Telemetry format](docs/TELEMETRY.md)
+- [Release process](docs/RELEASING.md)
 
 Licensed under [Apache-2.0](LICENSE).

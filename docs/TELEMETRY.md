@@ -175,7 +175,7 @@ Optional NFS export uses disjoint immutable node namespaces and the same public 
 `bk admin cluster verify-history` validates their bounded manifests, file modes, sizes,
 record counts, and SHA-256 digests. `bk c history` reads those payloads without importing
 them into this store. The archive is therefore a portable read model, not another
-collector, broker, or telemetry writer. See `CLUSTER.md` for permissions and commands.
+collector, broker, or telemetry writer. See [CLUSTER.md](CLUSTER.md) for permissions and commands.
 
 Chronological queries stream open partitions and stop as soon as their record
 limit is satisfied. A closed gzip partition is scanned against its SHA-256 and

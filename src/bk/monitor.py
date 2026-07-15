@@ -171,7 +171,12 @@ class UsageMonitor:
             )
         )
         reservations = list_active(ledger, sampled_at)
-        usage_by_gpu = classify_process_usage(devices, reservations, sampled_at)
+        usage_by_gpu = classify_process_usage(
+            devices,
+            reservations,
+            sampled_at,
+            container_groups=self.config.container_attribution_groups,
+        )
         workload_ids = _register_sample_workloads(
             self.audit_store,
             usage_by_gpu,
