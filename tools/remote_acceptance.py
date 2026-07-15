@@ -33,6 +33,8 @@ MANIFEST_SCHEMA = "gpubk.acceptance-bundle.v1"
 REPORT_MEMBER_ROOT = "gpubk-acceptance/"
 SAFE_RUN_ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}")
 SAFE_SSH_TARGET = re.compile(r"(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9._-]+")
+SAFE_GIT_REVISION = re.compile(r"[0-9a-f]{40}")
+DEFAULT_REPOSITORY = "https://github.com/lzzmm/gpubk.git"
 
 
 class AcceptanceError(RuntimeError):
@@ -317,75 +319,6 @@ def prepare_wheelhouse(
     return verify_wheelhouse(destination, version, verify_index=verify_index)
 
 
-def prepare_source_wheelhouse(destination: Path, version: str) -> list[Path]:
-    """Build this checkout and resolve its GPU extra into one private wheelhouse."""
-    destination.mkdir(mode=0o700)
-    build_output = destination.parent / "source-dist"
-    builders = (ROOT / ".venv" / "bin" / "python", Path(sys.executable))
-    builder = next(
-        (
-            path
-            for path in builders
-            if path.is_file()
-            and subprocess.run(
-                [str(path), "-c", "import build"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            ).returncode
-            == 0
-        ),
-        None,
-    )
-    if builder is None:
-        raise AcceptanceError(
-            "Python build frontend is unavailable; run "
-            "`.venv/bin/python -m pip install build`"
-        )
-    print(f"Building local GPUBK {version} candidate...", flush=True)
-    run_checked(
-        [
-            str(builder),
-            "-m",
-            "build",
-            "--wheel",
-            "--outdir",
-            str(build_output),
-            str(ROOT),
-        ],
-        timeout=180,
-    )
-    candidates = list(build_output.glob("gpubk-*.whl"))
-    if len(candidates) != 1:
-        raise AcceptanceError("source build did not produce exactly one GPUBK wheel")
-    _, built_version = wheel_metadata(candidates[0])
-    if built_version != version:
-        raise AcceptanceError(
-            f"source wheel version {built_version} does not match {version}"
-        )
-    run_checked(
-        [
-            str(builder),
-            "-m",
-            "pip",
-            "download",
-            "--disable-pip-version-check",
-            "--only-binary=:all:",
-            "--timeout",
-            "20",
-            "--retries",
-            "2",
-            "--progress-bar",
-            "off",
-            "--dest",
-            str(destination),
-            f"{candidates[0]}[gpu]",
-        ],
-        timeout=180,
-    )
-    return verify_wheelhouse(destination, version, verify_index=False)
-
-
 def build_manifest(
     run_id: str,
     version: str,
@@ -443,6 +376,40 @@ def remote_setup_command(run_id: str) -> str:
         'mkdir -p "$root"; chmod 700 "$root"; '
         f'stage="$root"/{stage_name}; '
         'test ! -e "$stage"; mkdir "$stage"; chmod 700 "$stage"'
+    )
+
+
+def source_revision() -> str:
+    status = run_checked(
+        ["git", "status", "--porcelain", "--untracked-files=no"], timeout=15
+    ).stdout.strip()
+    if status:
+        raise AcceptanceError(
+            "tracked files are modified; commit them before using --source"
+        )
+    revision = run_checked(["git", "rev-parse", "HEAD"], timeout=15).stdout.strip()
+    if SAFE_GIT_REVISION.fullmatch(revision) is None:
+        raise AcceptanceError("current Git revision is invalid")
+    return revision
+
+
+def remote_source_command(
+    relative_stage: str, *, repository: str, revision: str
+) -> str:
+    if SAFE_GIT_REVISION.fullmatch(revision) is None:
+        raise AcceptanceError("source revision is unsafe")
+    return (
+        'set -eu; stage="$HOME/'
+        + relative_stage
+        + '"; source="$stage/source"; '
+        + 'command -v git >/dev/null; git init -q "$source"; '
+        + 'git -C "$source" remote add origin '
+        + shlex.quote(repository)
+        + "; git -C \"$source\" fetch -q --depth=1 origin "
+        + shlex.quote(revision)
+        + '; git -C "$source" checkout -q --detach FETCH_HEAD; '
+        + 'test "$(git -C "$source" rev-parse HEAD)" = '
+        + shlex.quote(revision)
     )
 
 
@@ -556,7 +523,7 @@ def runner_command(
     system_bk: str,
     sudo: bool,
     include_journal: bool,
-    source_candidate: bool = False,
+    source_revision: str | None = None,
     live_gpu: bool = False,
     live_seconds: int = 65,
     live_python: str = "python3",
@@ -577,8 +544,8 @@ def runner_command(
         options.append("--sudo")
     if include_journal:
         options.append("--include-journal")
-    if source_candidate:
-        options.append("--source-candidate")
+    if source_revision is not None:
+        options.extend(("--build-source", "--source-revision", source_revision))
     if live_gpu:
         options.extend(
             (
@@ -597,7 +564,11 @@ def runner_command(
         + relative_stage
         + '"; exec '
         + shlex.quote(launcher_python)
-        + ' "$stage/acceptance_remote.py" --stage "$stage" '
+        + (
+            ' "$stage/source/tools/acceptance_remote.py" --stage "$stage" '
+            if source_revision is not None
+            else ' "$stage/acceptance_remote.py" --stage "$stage" '
+        )
         + quoted_options
     )
 
@@ -751,7 +722,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--source",
         action="store_true",
-        help="build and test the current checkout instead of downloading GPUBK from PyPI",
+        help="fetch and test the current committed checkout from GitHub",
+    )
+    result.add_argument(
+        "--repository",
+        default=DEFAULT_REPOSITORY,
+        help="HTTPS Git repository used by --source",
     )
     result.add_argument("--wheelhouse", type=Path, help="use a prepared wheelhouse")
     result.add_argument(
@@ -816,6 +792,7 @@ def main(argv: list[str] | None = None) -> int:
     if not version or any(character.isspace() for character in version):
         parser().error("--version must be one exact package version")
 
+    revision = source_revision() if args.source else None
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + secrets.token_hex(
         6
     )
@@ -835,7 +812,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"target: {args.target}")
         print(f"remote stage: ~/{relative_stage}")
         print(
-            "candidate source: current checkout"
+            f"candidate source: {args.repository}@{revision}"
             if args.source
             else "download source: local, with automatic remote fallback"
         )
@@ -863,18 +840,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             remote_download = False
             bundle: Path | None = None
-            if args.source:
-                wheels = prepare_source_wheelhouse(wheelhouse, version)
-                manifest = build_manifest(
-                    run_id,
-                    version,
-                    REMOTE_RUNNER,
-                    wheels,
-                    source="local-checkout",
-                )
-                bundle = build_bundle(work, manifest, REMOTE_RUNNER, wheels)
-                print(f"Bundle SHA256: {sha256_file(bundle)}", flush=True)
-            else:
+            if not args.source:
                 try:
                     wheels = prepare_wheelhouse(
                         wheelhouse,
@@ -898,7 +864,22 @@ def main(argv: list[str] | None = None) -> int:
             setup = run_ssh(settings, remote_setup_command(run_id), capture=True)
             require_ssh_success(setup, "remote stage creation")
             stage_created = True
-            if remote_download:
+            if args.source:
+                print(
+                    f"Fetching exact candidate {revision[:12]} on {args.target}...",
+                    flush=True,
+                )
+                source_fetch = run_ssh(
+                    settings,
+                    remote_source_command(
+                        relative_stage,
+                        repository=args.repository,
+                        revision=revision,
+                    ),
+                    capture=True,
+                )
+                require_ssh_success(source_fetch, "remote source fetch")
+            elif remote_download:
                 print(
                     f"Uploading runner; {args.target} will download verified wheels...",
                     flush=True,
@@ -930,7 +911,7 @@ def main(argv: list[str] | None = None) -> int:
                     system_bk=args.system_bk,
                     sudo=args.sudo,
                     include_journal=args.include_journal,
-                    source_candidate=args.source,
+                    source_revision=revision,
                     live_gpu=args.live_gpu,
                     live_seconds=args.live_seconds,
                     live_python=args.live_python,

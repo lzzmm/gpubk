@@ -922,10 +922,11 @@ python3 tools/remote_acceptance.py USER@GPU-HOST \
   --live-python /home/USER/miniconda3/envs/torch/bin/python
 ```
 
-Before publishing a release, add `--source` to build the current checkout and
-upload that exact candidate instead of downloading GPUBK from PyPI. The
-candidate runs from a private remote stage and exercises the deployed broker and
-monitor without replacing or restarting them:
+Before publishing a release, add `--source`. The GPU host fetches the current
+committed revision from GitHub, verifies the exact commit SHA, and builds it in a
+private remote stage instead of downloading GPUBK from PyPI. No source or wheel
+is uploaded from the local machine. The candidate exercises the deployed broker
+and monitor without replacing or restarting them:
 
 ```bash
 python3 tools/remote_acceptance.py USER@GPU-HOST \

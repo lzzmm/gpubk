@@ -68,14 +68,16 @@ class LocalAcceptanceRunnerTests(unittest.TestCase):
             system_bk="/usr/local/bin/bk",
             sudo=True,
             include_journal=False,
-            source_candidate=True,
+            source_revision="a" * 40,
             live_gpu=True,
             live_seconds=65,
             live_python="/home/user/torch env/bin/python",
         )
 
         self.assertIn("--live-gpu", command)
-        self.assertIn("--source-candidate", command)
+        self.assertIn("--build-source", command)
+        self.assertIn("--source-revision " + "a" * 40, command)
+        self.assertIn("$stage/source/tools/acceptance_remote.py", command)
         self.assertIn("--live-seconds 65", command)
         self.assertIn("'/home/user/torch env/bin/python'", command)
 
@@ -292,6 +294,43 @@ class LocalAcceptanceRunnerTests(unittest.TestCase):
             self.assertEqual(result, 0)
             upload.assert_called_once()
             self.assertIn("--download-wheelhouse", run_ssh.call_args_list[1].args[1])
+
+    def test_source_mode_fetches_git_without_uploading_a_bundle(self):
+        completed = LOCAL.subprocess.CompletedProcess(["ssh"], 0)
+        payload = {
+            "schema_version": "gpubk.acceptance.v1",
+            "result": "pass",
+            "counts": {"pass": 1, "warn": 0, "fail": 0, "skip": 0},
+        }
+        revision = "a" * 40
+        with tempfile.TemporaryDirectory() as raw_directory:
+            output = Path(raw_directory) / "reports"
+            with (
+                mock.patch.object(LOCAL, "require_local_commands"),
+                mock.patch.object(LOCAL, "source_revision", return_value=revision),
+                mock.patch.object(
+                    LOCAL,
+                    "run_ssh",
+                    side_effect=[completed, completed, completed, completed],
+                ) as run_ssh,
+                mock.patch.object(LOCAL, "upload_bundle") as upload_bundle,
+                mock.patch.object(LOCAL, "upload_bootstrap") as upload_bootstrap,
+                mock.patch.object(
+                    LOCAL,
+                    "download_report",
+                    return_value=(output / "report.tar.gz", payload),
+                ),
+            ):
+                result = LOCAL.main(
+                    ["host", "--source", "--output-dir", str(output)]
+                )
+
+        self.assertEqual(result, 0)
+        upload_bundle.assert_not_called()
+        upload_bootstrap.assert_not_called()
+        self.assertIn("git -C", run_ssh.call_args_list[1].args[1])
+        self.assertIn("--build-source", run_ssh.call_args_list[2].args[1])
+        self.assertIn(revision, run_ssh.call_args_list[2].args[1])
 
     def test_orchestrator_cleans_stage_after_upload_failure(self):
         completed = LOCAL.subprocess.CompletedProcess(["ssh"], 0)

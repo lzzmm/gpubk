@@ -783,9 +783,9 @@ python3 tools/remote_acceptance.py USER@GPU-HOST \
   --live-python /home/USER/miniconda3/envs/torch/bin/python
 ```
 
-正式发布前可增加 `--source`：脚本会自动构建并上传当前工作区，不再要求该版本已经存在
-于 PyPI。候选程序只在远端私有目录运行，并通过当前正式 broker/monitor 验证兼容性，
-不会替换或重启服务：
+正式发布前可增加 `--source`：GPU 服务器会从 GitHub 拉取当前已提交版本，核对精确
+commit SHA，并在远端私有目录构建；本机不再上传源码或 wheel，也不要求该版本已经存在
+于 PyPI。候选程序通过当前正式 broker/monitor 验证兼容性，不会替换或重启服务：
 
 ```bash
 python3 tools/remote_acceptance.py USER@GPU-HOST \

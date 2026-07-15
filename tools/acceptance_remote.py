@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import socket
@@ -431,6 +432,105 @@ def download_verified_wheelhouse(
     finally:
         sys.modules.pop(spec.name, None)
         downloader_path.unlink(missing_ok=True)
+
+
+def build_source_wheelhouse(
+    report: AcceptanceReport,
+    stage: Path,
+    *,
+    version: str,
+    revision: str,
+    remote_python: str,
+) -> None:
+    """Build the exact Git checkout inside the private remote stage."""
+    if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        raise ValueError("source revision is invalid")
+    source = stage / "source"
+    if source.is_symlink() or not source.is_dir():
+        raise ValueError("source checkout is missing or unsafe")
+    head = execute(["git", "-C", str(source), "rev-parse", "HEAD"], timeout=30)
+    if head.returncode != 0 or head.stdout.strip() != revision:
+        raise ValueError("source checkout does not match the requested revision")
+    wheelhouse = stage / "wheelhouse"
+    wheelhouse.mkdir(mode=0o700)
+    source_dist = stage / "source-dist"
+    source_dist.mkdir(mode=0o700)
+    build = report.command(
+        "bundle.source-build",
+        [
+            remote_python,
+            "-m",
+            "pip",
+            "wheel",
+            "--disable-pip-version-check",
+            "--no-deps",
+            "--wheel-dir",
+            str(source_dist),
+            str(source),
+        ],
+        timeout=240,
+        success=f"Git candidate {revision[:12]} built on the GPU host",
+        failure="GPU host could not build the Git candidate",
+    )
+    if build.returncode != 0:
+        raise ValueError("source candidate build failed")
+    candidates = list(source_dist.glob("gpubk-*.whl"))
+    if len(candidates) != 1:
+        raise ValueError("source build did not produce exactly one GPUBK wheel")
+    dependencies = report.command(
+        "bundle.source-dependencies",
+        [
+            remote_python,
+            "-m",
+            "pip",
+            "download",
+            "--disable-pip-version-check",
+            "--only-binary=:all:",
+            "--timeout",
+            "20",
+            "--retries",
+            "2",
+            "--progress-bar",
+            "off",
+            "--dest",
+            str(wheelhouse),
+            f"{candidates[0]}[gpu]",
+        ],
+        timeout=180,
+        success="candidate wheel and GPU dependency resolved on the GPU host",
+        failure="GPU host could not resolve the candidate GPU dependency",
+    )
+    if dependencies.returncode != 0:
+        raise ValueError("source candidate dependency resolution failed")
+    runner_source = source / "tools" / "acceptance_remote.py"
+    runner_copy = stage / "acceptance_remote.py"
+    shutil.copyfile(runner_source, runner_copy)
+    runner_copy.chmod(0o700)
+    files: dict[str, dict[str, Any]] = {
+        "acceptance_remote.py": {
+            "sha256": sha256_file(runner_copy),
+            "size": runner_copy.stat().st_size,
+        }
+    }
+    for wheel in sorted(wheelhouse.iterdir()):
+        files[f"wheelhouse/{wheel.name}"] = {
+            "sha256": sha256_file(wheel),
+            "size": wheel.stat().st_size,
+        }
+    manifest = {
+        "schema_version": MANIFEST_SCHEMA,
+        "run_id": report.run_id,
+        "version": version,
+        "created_at": utc_now(),
+        "source": "github-checkout",
+        "revision": revision,
+        "files": files,
+    }
+    manifest_path = stage / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    manifest_path.chmod(0o600)
 
 
 def find_command(value: str) -> str | None:
@@ -1127,7 +1227,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--live-gpu", action="store_true")
     result.add_argument("--live-seconds", type=int, default=65)
     result.add_argument("--live-python", default="python3")
-    result.add_argument("--source-candidate", action="store_true")
+    result.add_argument("--build-source", action="store_true")
+    result.add_argument("--source-revision")
     result.add_argument("--download-wheelhouse", action="store_true")
     return result
 
@@ -1145,7 +1246,17 @@ def main(argv: list[str] | None = None) -> int:
         remote_python = find_command(args.remote_python)
         if remote_python is None:
             raise ValueError(f"remote Python is not executable: {args.remote_python}")
-        if args.download_wheelhouse:
+        if args.build_source:
+            if not args.source_revision:
+                raise ValueError("--build-source requires --source-revision")
+            build_source_wheelhouse(
+                report,
+                stage,
+                version=args.version,
+                revision=args.source_revision,
+                remote_python=remote_python,
+            )
+        elif args.download_wheelhouse:
             download_verified_wheelhouse(
                 report,
                 stage,
@@ -1179,7 +1290,7 @@ def main(argv: list[str] | None = None) -> int:
             version=args.version,
             sudo_ready=sudo_ready,
             include_journal=args.include_journal,
-            require_version_match=not args.source_candidate,
+            require_version_match=not args.build_source,
         )
         if args.live_gpu:
             run_live_gpu_workload(
