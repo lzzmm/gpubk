@@ -4,6 +4,13 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.1 - 2026-07-15
 
+- Let the first reviewed `bk admin cluster add` atomically bootstrap a remote-only
+  catalog, so login nodes and clients without local GPUs can federate servers without
+  inventing a local schedulable node. Initial catalog writes are create-only and never
+  replace a concurrently created catalog.
+- Require the standard system cluster catalog and its parent to remain root-owned and
+  non-writable by ordinary users, and sanitize and bound remote SSH error text at the
+  transport boundary before it reaches terminal output.
 - Prevent a shared root-owned cluster catalog from pinning `user@host`, which would
   make every local caller act as one remote UID. System catalogs now require a
   username-free host or per-user SSH alias; administrator status and set operations

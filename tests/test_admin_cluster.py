@@ -114,6 +114,7 @@ class AdminClusterTests(unittest.TestCase):
         current = ClusterConfig(path, (self.local_node(),))
         with (
             mock.patch("bk.admin_cluster.os.geteuid", return_value=0),
+            mock.patch("bk.admin_cluster.os.path.lexists", return_value=True),
             mock.patch("bk.admin_cluster.load_cluster_config", return_value=current),
             mock.patch("bk.admin_cluster.write_cluster_config") as write,
             redirect_stdout(StringIO()),
@@ -186,6 +187,36 @@ class AdminClusterTests(unittest.TestCase):
         removed = write.call_args.args[0]
         self.assertEqual(removed.nodes, (self.local_node(),))
         self.assertEqual(removed.principals, ())
+
+    def test_add_bootstraps_a_remote_only_catalog_when_none_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cluster.json"
+            with (
+                mock.patch("bk.admin_cluster.os.geteuid", return_value=0),
+                mock.patch("bk.admin_cluster.write_cluster_config") as write,
+                redirect_stdout(StringIO()),
+            ):
+                self.assertEqual(
+                    run_admin_cli(
+                        [
+                            "cluster",
+                            "add",
+                            "gpu-a",
+                            "gpu-a",
+                            "a" * 20,
+                            "--cluster-file",
+                            str(path),
+                            "--yes",
+                        ]
+                    ),
+                    0,
+                )
+            configured = write.call_args.args[0]
+            self.assertEqual(len(configured.nodes), 1)
+            self.assertEqual(configured.nodes[0].name, "gpu-a")
+            self.assertEqual(configured.nodes[0].transport, "ssh")
+            self.assertEqual(configured.nodes[0].target, "gpu-a")
+            self.assertTrue(write.call_args.kwargs["create_only"])
 
     def test_disable_and_enable_preserve_node_identity_mappings_and_history(self):
         path = Path("/etc/gpubk/cluster.json")

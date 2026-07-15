@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 from dataclasses import replace
 from datetime import datetime
@@ -18,6 +19,7 @@ from .cluster import (
     write_cluster_config,
 )
 from .config import load_config
+from .fileio import fsync_directory
 from .models import BookingError
 from .node_identity import stable_node_identity
 
@@ -48,7 +50,7 @@ def add_admin_cluster_parser(commands) -> None:
 
     cluster_add = cluster_commands.add_parser(
         "add",
-        help="add one SSH-reachable GPU node",
+        help="add one SSH GPU node, or create a remote-only catalog",
     )
     cluster_add.add_argument("name")
     cluster_add.add_argument(
@@ -182,8 +184,13 @@ def run_admin_cluster(args: argparse.Namespace) -> int:
     if os.geteuid() != 0:
         raise BookingError("cluster catalog administration must run as root; use sudo")
 
+    create_only = False
     if args.cluster_action == "init":
         desired = _initial_cluster_config(args, path)
+        create_only = True
+    elif args.cluster_action == "add" and not os.path.lexists(path):
+        desired = _initial_remote_cluster_config(args, path)
+        create_only = True
     else:
         current = load_cluster_config(
             path,
@@ -192,7 +199,7 @@ def run_admin_cluster(args: argparse.Namespace) -> int:
         if args.cluster_action == "status":
             return print_admin_cluster(current, json_output=args.json)
         desired = _updated_cluster_config(current, args)
-    return _confirm_and_write(desired, args.yes)
+    return _confirm_and_write(desired, args.yes, create_only=create_only)
 
 
 def _run_history_action(args: argparse.Namespace, path: Path) -> int:
@@ -345,6 +352,26 @@ def _initial_cluster_config(args: argparse.Namespace, path: Path) -> ClusterConf
                 "/usr/local/bin/bk",
                 0,
                 8,
+            ),
+        ),
+    )
+
+
+def _initial_remote_cluster_config(
+    args: argparse.Namespace,
+    path: Path,
+) -> ClusterConfig:
+    return ClusterConfig(
+        path,
+        (
+            ClusterNode(
+                args.name,
+                args.node_id,
+                "ssh",
+                args.target,
+                args.executable,
+                args.priority,
+                args.timeout,
             ),
         ),
     )
@@ -531,7 +558,12 @@ def _history_root(value: str) -> Path | None:
     return path
 
 
-def _confirm_and_write(desired: ClusterConfig, confirmed: bool) -> int:
+def _confirm_and_write(
+    desired: ClusterConfig,
+    confirmed: bool,
+    *,
+    create_only: bool = False,
+) -> int:
     print_admin_cluster(desired, json_output=False)
     if not confirmed:
         if not sys.stdin.isatty():
@@ -543,9 +575,36 @@ def _confirm_and_write(desired: ClusterConfig, confirmed: bool) -> int:
         }:
             print("No changes made.")
             return 1
-    write_cluster_config(desired)
+    if create_only:
+        _ensure_cluster_catalog_parent(desired.path)
+    write_cluster_config(desired, create_only=create_only)
     print(f"cluster catalog updated: {desired.path}")
     return 0
+
+
+def _ensure_cluster_catalog_parent(path: Path) -> None:
+    parent = path.parent
+    if os.path.lexists(parent):
+        return
+    ancestor = parent.parent
+    try:
+        metadata = ancestor.lstat()
+    except FileNotFoundError as exc:
+        raise BookingError(f"cluster catalog parent does not exist: {ancestor}") from exc
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise BookingError(
+            f"cluster catalog parent is not a real directory: {ancestor}"
+        )
+    if path == cluster_config_path() and metadata.st_uid != 0:
+        raise BookingError(
+            f"cluster catalog parent must be root-owned: {ancestor}"
+        )
+    if path == cluster_config_path() and stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise BookingError(
+            f"cluster catalog parent must not be writable by group or others: {ancestor}"
+        )
+    os.mkdir(parent, 0o755)
+    fsync_directory(ancestor)
 
 
 def print_admin_cluster(config: ClusterConfig, *, json_output: bool) -> int:

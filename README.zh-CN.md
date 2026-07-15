@@ -568,10 +568,12 @@ TUI 中按 `i` 即可查看。管理员可以用 `sudo chfn 用户名` 更新这
 立即生效，执行 `sudo bk admin transfer` 后也会自动跟随新账号，不需要重写 GPUBK 数据。
 这些字段会展示给所有本机 GPUBK 用户，因此只应填写适合公开的联系方式。
 
-若要把多台正常工作的 GPUBK 主机组成联邦，在用户执行集群命令的机器上初始化目录。
-由实际使用集群的普通用户先探测每台远端。probe 使用严格主机密钥校验的非交互 SSH，
-校验稳定节点 ID、版本、时钟、GPU 数量和安全重试能力，然后打印一条供管理员核对执行的
-root 命令：
+若要把多台正常工作的 GPUBK 主机组成联邦，在用户执行集群命令的机器上创建 catalog。
+如果这台机器本身是 GPU 节点，可用 `cluster init` 把自己加入；如果它只是登录节点或
+无 GPU 管理客户端，应跳过 init，先 probe 第一台 GPU 主机，再执行 probe 打印的
+`cluster add`，第一次 add 会直接创建纯远端 catalog。由实际使用集群的普通用户探测；
+probe 使用严格主机密钥校验的非交互 SSH，校验稳定节点 ID、版本、时钟、GPU 数量和安全
+重试能力，然后打印一条供管理员核对执行的 root 命令：
 
 ```bash
 sudo bk admin cluster init gpu-a --yes
@@ -590,6 +592,9 @@ bk c x 1 30m          # 排他模式，选择最早节点
 bk c 1 30m -t "tomorrow 9"  # 本地自然时间，精确开始
 bk c 1 2h -- python /absolute/path/train.py
 ```
+
+纯远端客户端把前两行替换为 `bk c probe gpu-a gpu-a`，执行它打印的 add 命令后，再
+probe/add `gpu-b`。首次建档使用 create-only 原子发布；若并发出现 catalog，会拒绝覆盖。
 
 SSH 别名、远端可执行文件、超时或同时间候选的优先级发生变化时，可原地更新节点，稳定
 node ID 和 UID 映射不会丢失：

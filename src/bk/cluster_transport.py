@@ -20,6 +20,7 @@ from .models import BookingError
 MAX_NODE_OUTPUT_BYTES = 8 * 1024 * 1024
 MAX_NODE_STDERR_BYTES = 64 * 1024
 NODE_IO_CHUNK_BYTES = 64 * 1024
+MAX_NODE_ERROR_CHARS = 1000
 _STABLE_NODE_ID = re.compile(r"^[0-9a-f]{20}$")
 
 
@@ -127,7 +128,7 @@ def _invoke_node(
         return NodeReply(
             node,
             None,
-            f"transport failed: {exc}",
+            _node_error_text(f"transport failed: {exc}"),
             error_code="transport",
         )
 
@@ -136,7 +137,12 @@ def _invoke_node(
     except (UnicodeDecodeError, json.JSONDecodeError):
         detail = stderr.decode("utf-8", "replace").strip().splitlines()
         if returncode not in {0, 3} and detail:
-            return NodeReply(node, None, detail[-1], error_code="transport")
+            return NodeReply(
+                node,
+                None,
+                _node_error_text(detail[-1]),
+                error_code="transport",
+            )
         return NodeReply(
             node,
             None,
@@ -179,7 +185,7 @@ def _invoke_node(
         return NodeReply(
             reply_node,
             None,
-            str(message or "remote command failed"),
+            _node_error_text(message or "remote command failed"),
             error_code="remote",
         )
     if returncode not in {0, 3}:
@@ -187,7 +193,7 @@ def _invoke_node(
         return NodeReply(
             reply_node,
             None,
-            detail[-1] if detail else f"exit {returncode}",
+            _node_error_text(detail[-1] if detail else f"exit {returncode}"),
             error_code="transport",
         )
     return NodeReply(reply_node, payload, None)
@@ -308,6 +314,16 @@ def _append_bounded_tail(buffer: bytearray, chunk: bytes, limit: int) -> None:
     if overflow > 0:
         del buffer[:overflow]
     buffer.extend(chunk)
+
+
+def _node_error_text(value: object) -> str:
+    printable = "".join(
+        character if character.isprintable() else " " for character in str(value)
+    )
+    collapsed = " ".join(printable.split()) or "remote command failed"
+    if len(collapsed) <= MAX_NODE_ERROR_CHARS:
+        return collapsed
+    return collapsed[: MAX_NODE_ERROR_CHARS - 1] + "~"
 
 
 def _close_selector_stream(selector: selectors.BaseSelector, stream) -> None:

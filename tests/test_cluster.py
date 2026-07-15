@@ -623,6 +623,67 @@ class ClusterTests(unittest.TestCase):
             self.assertEqual(loaded.principals, config.principals)
             self.assertEqual(path.stat().st_mode & 0o777, 0o644)
 
+    def test_create_only_catalog_publish_never_replaces_an_existing_catalog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cluster.json"
+            first = ClusterNode(
+                "first",
+                "a" * 20,
+                "ssh",
+                "first",
+                "/usr/local/bin/bk",
+                0,
+                8,
+            )
+            second = ClusterNode(
+                "second",
+                "b" * 20,
+                "ssh",
+                "second",
+                "/usr/local/bin/bk",
+                0,
+                8,
+            )
+            write_cluster_config(
+                ClusterConfig(path, (first,)),
+                require_root=False,
+                create_only=True,
+            )
+            with self.assertRaisesRegex(BookingError, "already exists"):
+                write_cluster_config(
+                    ClusterConfig(path, (second,)),
+                    require_root=False,
+                    create_only=True,
+                )
+            self.assertEqual(load_cluster_config(path).nodes, (first,))
+
+    def test_system_catalog_rejects_a_caller_owned_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.catalog(
+                Path(tmp),
+                [
+                    {
+                        "name": "remote",
+                        "node_id": "d" * 20,
+                        "transport": "ssh",
+                        "target": "remote",
+                    }
+                ],
+            )
+            real_fstat = os.fstat
+
+            def caller_owned(fd: int) -> os.stat_result:
+                values = list(real_fstat(fd))
+                values[4] = 12345
+                return os.stat_result(values)
+
+            with (
+                mock.patch("bk.cluster.SYSTEM_CLUSTER_FILE", path),
+                mock.patch("bk.cluster.os.fstat", side_effect=caller_owned),
+                self.assertRaisesRegex(BookingError, "must be owned by root"),
+            ):
+                load_cluster_config(path)
+
     def test_root_catalog_write_rejects_a_username_pinned_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             node = ClusterNode(

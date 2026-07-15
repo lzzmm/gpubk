@@ -198,8 +198,9 @@ def load_cluster_config(
         fd = open_existing_regular(path)
     except FileNotFoundError as exc:
         raise BookingError(
-            f"cluster mode is not configured: {path}; initialize it with "
-            "'sudo bk admin cluster init NODE --yes'"
+            f"cluster mode is not configured: {path}; on a GPU host use "
+            "'sudo bk admin cluster init NODE --yes', or probe the first remote "
+            "host with 'bk c probe NODE HOST' and run its reviewed add command"
         ) from exc
     except OSError as exc:
         raise BookingError(
@@ -207,7 +208,9 @@ def load_cluster_config(
         ) from exc
     try:
         metadata = os.fstat(fd)
-        if metadata.st_uid not in {0, os.getuid()}:
+        if path == SYSTEM_CLUSTER_FILE and metadata.st_uid != 0:
+            raise BookingError("system cluster catalog must be owned by root")
+        if path != SYSTEM_CLUSTER_FILE and metadata.st_uid not in {0, os.getuid()}:
             raise BookingError(
                 "cluster catalog must be owned by root or the current UID"
             )
@@ -217,6 +220,20 @@ def load_cluster_config(
             )
         if metadata.st_size > MAX_CLUSTER_FILE_BYTES:
             raise BookingError("cluster catalog exceeds 1 MiB")
+        if path == SYSTEM_CLUSTER_FILE:
+            parent_metadata = path.parent.lstat()
+            if not stat.S_ISDIR(parent_metadata.st_mode):
+                raise BookingError(
+                    f"system cluster catalog parent is not a real directory: {path.parent}"
+                )
+            if parent_metadata.st_uid != 0:
+                raise BookingError(
+                    "system cluster catalog parent must be owned by root"
+                )
+            if stat.S_IMODE(parent_metadata.st_mode) & 0o022:
+                raise BookingError(
+                    "system cluster catalog parent must not be writable by group or other users"
+                )
         with os.fdopen(fd, "r", encoding="utf-8") as handle:
             fd = -1
             document = json.load(handle)
@@ -232,7 +249,12 @@ def load_cluster_config(
     return config
 
 
-def write_cluster_config(config: ClusterConfig, *, require_root: bool = True) -> None:
+def write_cluster_config(
+    config: ClusterConfig,
+    *,
+    require_root: bool = True,
+    create_only: bool = False,
+) -> None:
     if require_root and os.geteuid() != 0:
         raise BookingError("cluster catalog updates must run as root")
     path = config.path
@@ -240,6 +262,8 @@ def write_cluster_config(config: ClusterConfig, *, require_root: bool = True) ->
         raise BookingError("cluster catalog path must be absolute")
     previous = None
     if os.path.lexists(path):
+        if create_only:
+            raise BookingError(f"cluster catalog already exists: {path}")
         previous = load_cluster_config(
             path,
             allow_legacy_pinned_user_for_repair=True,
@@ -297,7 +321,14 @@ def write_cluster_config(config: ClusterConfig, *, require_root: bool = True) ->
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary_path, path)
+        if create_only:
+            try:
+                os.link(temporary_path, path, follow_symlinks=False)
+            except FileExistsError as exc:
+                raise BookingError(f"cluster catalog already exists: {path}") from exc
+            temporary_path.unlink()
+        else:
+            os.replace(temporary_path, path)
         fsync_directory(parent)
     finally:
         if fd >= 0:
@@ -2293,10 +2324,14 @@ def _print_cluster_help() -> None:
     print(
         """GPUBK cluster federation
 
-First setup (administrator):
+First setup on a GPU host (administrator):
   sudo bk admin cluster init THIS-NODE --yes
   bk c probe NODE SSH_TARGET
   sudo bk admin cluster add NODE SSH_TARGET STABLE_NODE_ID --yes
+
+First setup on a login-only client:
+  bk c probe NODE SSH_TARGET
+  # The reviewed add command creates a remote-only catalog when none exists.
 
 Node maintenance (administrator):
   bk c probe NODE NEW_SSH_TARGET

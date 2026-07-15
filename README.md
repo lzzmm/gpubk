@@ -678,11 +678,13 @@ can update these local account fields with `sudo chfn USER`; changes and
 `sudo bk admin transfer` take effect immediately without rewriting GPUBK data. Only
 put contact information there that may be shown to every local GPUBK user.
 
-To federate several working GPUBK hosts, initialize a catalog on the machine where
-users will run cluster commands. Probe each remote as the ordinary user who will use
-it. The probe uses non-interactive SSH with strict host-key checking, validates the
-stable identity, version, clock, GPU count, and retry-safe write capabilities, then
-prints the root command to review and run:
+To federate several working GPUBK hosts, create a catalog on the machine where users
+will run cluster commands. A GPU host can include itself with `cluster init`. A login
+node or other client without local GPUs should skip init, probe its first GPU host,
+and run the printed `cluster add` command; that first add creates a remote-only catalog.
+Probe as the ordinary user who will use the cluster. The probe uses non-interactive SSH
+with strict host-key checking, validates the stable identity, version, clock, GPU count,
+and retry-safe write capabilities, then prints the root command to review and run:
 
 ```bash
 sudo bk admin cluster init gpu-a --yes
@@ -701,6 +703,10 @@ bk c x 1 30m          # exclusive, earliest node
 bk c 1 30m -t "tomorrow 9"  # exact friendly local start
 bk c 1 2h -- python /absolute/path/train.py
 ```
+
+For a remote-only client, replace the first two lines with `bk c probe gpu-a gpu-a`
+and run its printed add command, then probe and add `gpu-b`. Catalog creation is
+create-only and refuses to replace a file that appears concurrently.
 
 If an SSH alias, remote executable, timeout, or tie-break priority changes, update the
 node in place so its stable identity and UID mappings remain intact:

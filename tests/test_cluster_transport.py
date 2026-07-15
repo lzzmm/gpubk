@@ -63,6 +63,31 @@ class ClusterTransportTests(unittest.TestCase):
         self.assertEqual(reply.error, "capacity full")
         self.assertFalse(reply.timed_out)
 
+    def test_remote_errors_are_safe_and_bounded_at_the_transport_boundary(self):
+        node = ClusterNode(
+            "gpu-a",
+            "a" * 20,
+            "local",
+            None,
+            "/usr/local/bin/bk",
+            0,
+            8,
+        )
+        response = {
+            "node": {"id": node.node_id},
+            "kind": "error",
+            "error": {"message": "\x1b[31mcapacity\nfull " + "x" * 2000},
+        }
+        with mock.patch(
+            "bk.cluster_transport._run_node_process",
+            return_value=(2, json.dumps(response).encode(), b""),
+        ):
+            reply = invoke_node(node, ["agent", "context", "--compact"])
+        self.assertNotIn("\x1b", reply.error)
+        self.assertNotIn("\n", reply.error)
+        self.assertLessEqual(len(reply.error), cluster_transport.MAX_NODE_ERROR_CHARS)
+        self.assertTrue(reply.error.endswith("~"))
+
     def test_probe_discovers_and_returns_valid_stable_identity(self):
         node = ClusterNode(
             "gpu-b",

@@ -24,7 +24,8 @@ The supported first deployment is:
 4. Map node-local numeric UIDs to a global principal only when aggregate reporting
    is desired.
 
-The help is available before a catalog exists. A minimal two-node client setup is:
+The help is available before a catalog exists. On a GPU host, include that host and
+then add the remote node:
 
 ```bash
 bk cluster -h
@@ -38,11 +39,24 @@ bk cluster check --jobs
 bk c rec 1 30m
 ```
 
-Run the catalog commands on each machine from which users need a cluster view. The
-local entry is created from that host's stable identity; `bk c probe` validates the
-remote Agent context and prints the stable `node.id` in an exact add command. It is
-read-only, runs as the ordinary caller, and keeps strict SSH host-key checking enabled.
-The catalog contains no credentials.
+On a login node, workstation, or other client that does not schedule local GPUs, skip
+`cluster init`. Probe the first GPU host and run the reviewed command it prints:
+
+```bash
+bk c probe gpu-a gpu-a
+sudo bk admin cluster add gpu-a gpu-a STABLE_NODE_ID --yes
+bk c probe gpu-b gpu-b
+sudo bk admin cluster add gpu-b gpu-b STABLE_NODE_ID --yes
+bk c check
+```
+
+The first `cluster add` atomically creates a remote-only catalog when none exists; it
+never overwrites a catalog that appears concurrently. Run the catalog commands on each
+machine from which users need a cluster view. A local entry is created from that host's
+stable identity only when `cluster init` is used. `bk c probe` validates the remote
+Agent context and prints the stable `node.id` in an exact add command. It is read-only,
+runs as the ordinary caller, and keeps strict SSH host-key checking enabled. The catalog
+contains no credentials.
 Each ordinary user still needs non-interactive SSH access with a previously verified
 host key. `bk cluster status` reports one unreachable account without disabling other
 healthy nodes.
@@ -137,7 +151,9 @@ The first production transport is non-interactive OpenSSH:
 - the destination `bk` obtains the real remote UID and talks to its local broker;
 - host-key checking remains enabled, password prompts and TTY allocation are disabled;
 - commands use versioned Agent JSON and never parse colored human output;
-- calls have bounded timeouts and run with forwarding disabled.
+- calls have bounded timeouts and run with forwarding disabled;
+- remote error text is stripped of terminal controls and bounded before it reaches
+  human output or retry diagnostics.
 
 An HTTPS/mTLS transport can implement the same client interface later without
 changing reservation or history schemas. It is useful for larger installations,
@@ -278,6 +294,8 @@ approved live workload, and restart/reboot checks.
 ## Security boundary
 
 - The system catalog and identity map are root-owned, non-group-writable files.
+- The standard system catalog also requires a root-owned, non-group-writable parent
+  directory; a caller-owned file cannot impersonate `/etc/gpubk/cluster.json`.
 - System catalog SSH targets never contain a username; OpenSSH resolves each caller's
   own account, and the destination broker authorizes that resulting numeric UID.
 - Per-user SSH configuration may choose credentials but cannot redefine node IDs,
