@@ -1227,39 +1227,50 @@ def _draw_gpu_focus_panel(
         title += f" | violations={violations}"
     _addstr(stdscr, top, 0, title.ljust(width), width, COLOR_HEADER)
     row = top + 1
-    if row >= height - 2:
-        return
-    _addstr(
-        stdscr,
-        row,
-        0,
-        _gpu_booking_header(width, id_width),
-        width,
-        COLOR_MUTED,
-    )
-    row += 1
-    remaining = max(0, height - row - 3)
-    booking_rows = min(4, len(related), remaining)
-    for number, reservation in enumerate(related[:booking_rows], start=1):
+    if related:
+        if row >= height - 2:
+            return
+        _addstr(stdscr, row, 0, "Reservations", width, COLOR_MUTED, curses.A_BOLD)
+        row += 1
+        if row >= height - 2:
+            return
         _addstr(
             stdscr,
             row,
             0,
-            _gpu_booking_line(
-                reservation,
-                width,
-                shared_limit,
-                id_width,
-                number=number,
-            ),
+            _gpu_booking_header(width, id_width),
             width,
-            _reservation_color(reservation),
+            COLOR_MUTED,
         )
         row += 1
+        remaining = max(0, height - row - 4)
+        booking_rows = min(4, len(related), remaining)
+        for number, reservation in enumerate(related[:booking_rows], start=1):
+            _addstr(
+                stdscr,
+                row,
+                0,
+                _gpu_booking_line(
+                    reservation,
+                    width,
+                    shared_limit,
+                    id_width,
+                    number=number,
+                ),
+                width,
+                _reservation_color(reservation),
+            )
+            row += 1
+        if len(related) > booking_rows and row < height - 2:
+            _addstr(stdscr, row, 2, f"+{len(related) - booking_rows} more (Enter expands)", width - 2, COLOR_MUTED)
+            row += 1
     if row >= height - 2:
         return
-    process_header = _process_table_header(width, id_width)
-    _addstr(stdscr, row, 0, f"Processes  {process_header}", width, COLOR_MUTED)
+    _addstr(stdscr, row, 0, "Processes", width, COLOR_MUTED, curses.A_BOLD)
+    row += 1
+    if row >= height - 2:
+        return
+    _addstr(stdscr, row, 0, _process_table_header(width, id_width), width, COLOR_MUTED)
     row += 1
     process_rows = min(6, len(usage), max(0, height - row - 2))
     for item in usage[:process_rows]:
@@ -1275,6 +1286,8 @@ def _draw_gpu_focus_panel(
             attr,
         )
         row += 1
+    if len(usage) > process_rows and row < height - 2:
+        _addstr(stdscr, row, 2, f"+{len(usage) - process_rows} more (Enter expands)", width - 2, COLOR_MUTED)
 
 
 def _gpu_booking_header(width: int, id_width: int) -> str:

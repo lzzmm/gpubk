@@ -10,6 +10,7 @@ import json
 import os
 import pwd
 import shutil
+import shlex
 import socket
 import stat
 import subprocess
@@ -68,8 +69,15 @@ from .config import (
 from .fileio import fsync_directory, open_existing_regular
 from .gpu import detect_gpu_count, snapshot
 from .granularity import DEFAULT_SLOT_MINUTES, validate_slot_minutes
-from .models import BookingError
+from .models import Actor, BookingError
 from .systemd import DEFAULT_SYSTEM_UNIT_DIR, system_unit_names
+from .worker_status import inspect_worker_persistence
+from .worker_guidance import (
+    WORKER_ENABLE_COMMAND,
+    WORKER_FOREGROUND_COMMAND,
+    WORKER_INSTALL_COMMAND,
+    WorkerGuidance,
+)
 
 
 ADMIN_SCHEMA_VERSION = "gpubk.admin.v1"
@@ -696,6 +704,14 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     login_hook_uninstall.add_argument("--yes", action="store_true")
     login_hook_uninstall.add_argument("--dry-run", action="store_true")
     login_hook_uninstall.add_argument("--json", action="store_true")
+    persistence_parser = commands.add_parser(
+        "worker-persistence",
+        help="inspect or manage logout/reboot persistence for one user's worker",
+    )
+    persistence_parser.add_argument("persistence_action", choices=("status", "enable", "disable"))
+    persistence_parser.add_argument("username")
+    persistence_parser.add_argument("--yes", action="store_true")
+    persistence_parser.add_argument("--json", action="store_true")
     add_admin_cluster_parser(commands)
     args = parser.parse_args(list(argv))
 
@@ -707,6 +723,8 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         return run_admin_cluster(args)
     if args.action == "login-hook":
         return _run_admin_login_hook(args)
+    if args.action == "worker-persistence":
+        return _run_admin_worker_persistence(args)
     if args.action == "services":
         return _run_admin_services(args)
     if args.action == "uninstall":
@@ -1016,12 +1034,103 @@ def _run_admin_login_hook(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_admin_worker_persistence(args: argparse.Namespace) -> int:
+    try:
+        account = pwd.getpwnam(args.username)
+    except KeyError as exc:
+        raise BookingError(f"Linux account does not exist: {args.username}") from exc
+    actor = Actor(account.pw_uid, account.pw_name)
+    guidance = WorkerGuidance(actor.username)
+    before = inspect_worker_persistence(actor)
+    action = args.persistence_action
+    if action == "status":
+        if args.json:
+            print(json.dumps(before, ensure_ascii=False, sort_keys=True))
+        else:
+            print(
+                f"worker persistence: user={actor.username} uid={actor.uid} "
+                f"state={before['state']}"
+            )
+            if before.get("logout_safe") is False:
+                print(f"enable: {guidance.admin_persistence_command}")
+        return 0 if before.get("state") != "unknown" else 2
+
+    if os.geteuid() != 0:
+        raise BookingError("worker persistence changes require sudo")
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise BookingError("pass --yes for a non-interactive persistence change")
+        verb = "Enable" if action == "enable" else "Disable"
+        answer = input(f"{verb} logout/reboot persistence for {actor.username}? [Y/n]: ").strip().lower()
+        if answer in {"n", "no"}:
+            print("No changes made.")
+            return 1
+    loginctl = shutil.which("loginctl")
+    if loginctl is None:
+        raise BookingError("loginctl is unavailable; this host may not use systemd-logind")
+    try:
+        result = subprocess.run(
+            [loginctl, f"{action}-linger", actor.username],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BookingError(f"loginctl {action}-linger timed out") from exc
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        raise BookingError(
+            f"loginctl {action}-linger failed"
+            + (f": {detail[-1]}" if detail else "")
+        )
+    after = inspect_worker_persistence(actor)
+    if args.json:
+        print(json.dumps(after, ensure_ascii=False, sort_keys=True))
+    else:
+        print(
+            f"worker persistence {action}d: user={actor.username} "
+            f"state={after['state']}"
+        )
+        if action == "enable":
+            print(
+                f"user next: {WORKER_INSTALL_COMMAND}; {WORKER_ENABLE_COMMAND}"
+            )
+    return 0
+
+
 def _run_admin_install(args: argparse.Namespace) -> int:
     if os.geteuid() != 0 and not args.dry_run:
         raise BookingError("administrator install must run as root; use sudo bk admin install")
     config_file = _absolute_path(args.config_file)
     if os.path.lexists(_manifest_path(config_file)):
         return _run_existing_admin_install(args, config_file)
+
+    python_executable = _absolute_path(args.python_executable or Path(sys.executable))
+    command_path = _absolute_path(args.command_path or DEFAULT_COMMAND_LINK)
+    command_target = _absolute_path(
+        args.command_target or python_executable.with_name("bk")
+    )
+    command_preview = None
+    if not args.no_command_link and (os.geteuid() == 0 or not args.dry_run):
+        try:
+            command_preview = plan_command_link_install(
+                existing=None,
+                destination=command_path,
+                target=command_target,
+                expected_owner=0,
+            )
+        except BookingError as exc:
+            if command_path == DEFAULT_COMMAND_LINK:
+                raise BookingError(
+                    f"{exc}; do not change that directory's ownership. "
+                    "After verifying /usr/bin/bk is absent, rerun with "
+                    "--command-path /usr/bin/bk, or use --no-command-link"
+                ) from exc
+            raise
+        if command_preview.blockers:
+            raise BookingError("; ".join(command_preview.blockers))
 
     interactive = sys.stdin.isatty() and not args.yes
     detected_gpu_count = _detected_gpu_count(args.gpu_count)
@@ -1038,22 +1147,6 @@ def _run_admin_install(args: argparse.Namespace) -> int:
     if interactive and not args.login_hook:
         login_hook = _ask_bool("Install the interactive login reminder", True, enabled=True)
 
-    python_executable = _absolute_path(args.python_executable or Path(sys.executable))
-    command_path = _absolute_path(args.command_path or DEFAULT_COMMAND_LINK)
-    command_target = _absolute_path(
-        args.command_target or python_executable.with_name("bk")
-    )
-    command_preview = None
-    if not args.no_command_link and (os.geteuid() == 0 or not args.dry_run):
-        command_preview = plan_command_link_install(
-            existing=None,
-            destination=command_path,
-            target=command_target,
-            expected_owner=0,
-        )
-        if command_preview.blockers:
-            raise BookingError("; ".join(command_preview.blockers))
-
     _print_plan(plan, inspection)
     print(f"  Python:  {python_executable}")
     if args.no_command_link:
@@ -1067,6 +1160,7 @@ def _run_admin_install(args: argparse.Namespace) -> int:
         print(f"  command: {command_path} -> {command_target}{suffix}")
     print(f"  login:   {'install reminder' if login_hook else 'leave unchanged'}")
     print(f"  services: {'install only' if args.no_start else 'install, enable, and start'}")
+    print("  jobs:    per-user workers; logout persistence is enabled only when needed")
     if args.dry_run:
         print("Dry run: no files or services changed.")
         return 0
@@ -1119,6 +1213,14 @@ def _run_admin_install(args: argparse.Namespace) -> int:
     else:
         print("next: start the broker and monitor using your service supervisor")
     print("verify as an ordinary user: bk doctor --probe --require-monitor --strict")
+    print(
+        "scheduled commands need one worker per user; users can run "
+        f"`{WORKER_FOREGROUND_COMMAND}` in tmux"
+    )
+    print(
+        "for logout/reboot launch, enable each actual user with: "
+        f"{WorkerGuidance().admin_persistence_command}"
+    )
     return 0
 
 
@@ -1986,10 +2088,23 @@ def _run_admin_uninstall(args: argparse.Namespace) -> int:
     else:
         print(f"removed server configuration: {config_file}")
         print("preserved: service account and Unix groups were never modified")
-        print(
-            "next: uninstall the Python package with 'python3 -m pip uninstall gpubk'"
-        )
+        print(_python_uninstall_hint())
     return 0
+
+
+def _python_uninstall_hint() -> str:
+    prefix = Path(sys.prefix).resolve()
+    base_prefix = Path(getattr(sys, "base_prefix", sys.prefix)).resolve()
+    executable = Path(sys.executable).resolve()
+    if prefix != base_prefix:
+        return (
+            "next: remove the isolated Python environment with "
+            f"'sudo rm -rf {shlex.quote(str(prefix))}'"
+        )
+    return (
+        "next: uninstall the Python package from this interpreter with "
+        f"'{shlex.quote(str(executable))} -m pip uninstall gpubk'"
+    )
 
 
 def _run_admin_transfer(args: argparse.Namespace) -> int:

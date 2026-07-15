@@ -18,6 +18,7 @@ from bk.admin import (
     AdminInitPlan,
     INSTALL_MANIFEST_MODE,
     _detected_gpu_count,
+    _python_uninstall_hint,
     _validate_plan,
     apply_admin_command_link_install,
     apply_admin_gpu_policy,
@@ -63,6 +64,49 @@ class TtyInput(StringIO):
 
 
 class AdminInitTests(unittest.TestCase):
+    def test_admin_can_enable_worker_logout_persistence_for_one_user(self):
+        account = mock.Mock(pw_uid=1003, pw_name="alice")
+        states = [
+            {"kind": "systemd-linger", "state": "disabled", "logout_safe": False},
+            {"kind": "systemd-linger", "state": "enabled", "logout_safe": True},
+        ]
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch("bk.admin.os.geteuid", return_value=0), \
+             mock.patch("bk.admin.pwd.getpwnam", return_value=account), \
+             mock.patch("bk.admin.inspect_worker_persistence", side_effect=states), \
+             mock.patch("bk.admin.shutil.which", return_value="/usr/bin/loginctl"), \
+             mock.patch("bk.admin.subprocess.run", return_value=completed) as run:
+            result = run_admin_cli(
+                ["worker-persistence", "enable", "alice", "--yes"]
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            run.call_args.args[0],
+            ["/usr/bin/loginctl", "enable-linger", "alice"],
+        )
+
+    def test_python_uninstall_hint_for_isolated_environment(self):
+        with mock.patch.object(admin_module.sys, "prefix", "/opt/gpubk"), mock.patch.object(
+            admin_module.sys, "base_prefix", "/usr"
+        ), mock.patch.object(
+            admin_module.sys, "executable", "/opt/gpubk/bin/python"
+        ):
+            hint = _python_uninstall_hint()
+
+        self.assertIn("sudo rm -rf /opt/gpubk", hint)
+        self.assertNotIn("pip uninstall", hint)
+
+    def test_python_uninstall_hint_for_system_interpreter(self):
+        executable = "/usr/bin/python3"
+        with mock.patch.object(admin_module.sys, "prefix", "/usr"), mock.patch.object(
+            admin_module.sys, "base_prefix", "/usr"
+        ), mock.patch.object(admin_module.sys, "executable", executable):
+            hint = _python_uninstall_hint()
+
+        resolved = Path(executable).resolve()
+        self.assertIn(f"{resolved} -m pip uninstall gpubk", hint)
+
     def plan(self, root: Path, **changes) -> AdminInitPlan:
         identity = non_root_identity()
         values = {

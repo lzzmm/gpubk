@@ -35,6 +35,7 @@ from .service import (
 from .storage import LedgerStore
 from .timeparse import parse_duration_seconds, parse_memory_mb, parse_start, to_iso, utc_now
 from .usage_api import UsageQueryService
+from .usage_schema import USAGE_API_VERSION
 from .worker import JobSpecCleanupResult, cleanup_job_specs
 
 
@@ -151,7 +152,7 @@ class BkMcpBackend:
         start = end - timedelta(seconds=seconds)
         api = UsageQueryService(self.config)
         payload = {
-            "schema_version": "gpubk.usage.v1",
+            "schema_version": USAGE_API_VERSION,
             "kind": "my-usage",
             "generated_at": to_iso(end),
             "summary": api.users(

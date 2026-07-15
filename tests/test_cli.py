@@ -8,15 +8,21 @@ from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
-from bk.cli import _run_with_booking_deadline, main as bk_main
+from bk.cli import _maybe_print_preset_suggestion, _run_with_booking_deadline, main as bk_main
 from bk.collector_status import collector_document
 from bk.fileio import ensure_directory
 from bk.usage_store import UsageAuditStore
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class TtyStringIO(StringIO):
+    def isatty(self):
+        return True
 
 
 def iso(dt):
@@ -1603,7 +1609,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(created.returncode, 0, created.stderr)
             self.assertEqual(listed.returncode, 0, listed.stderr)
-            self.assertIn("dur=124h20m (5d4h20m)", listed.stdout)
+            self.assertIn("124h20m (5d4h20m)", listed.stdout)
 
     def test_short_id_and_index_can_delete_reservation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2019,6 +2025,63 @@ class CliTests(unittest.TestCase):
             self.assertEqual(status.returncode, 0, status.stderr)
             self.assertTrue(all(len(line) <= 72 for line in status.stdout.splitlines()), status.stdout)
             self.assertIn("G=0,1", status.stdout)
+
+    def test_wide_status_reservation_columns_align_with_header(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            env = {"BK_GPU_COUNT": "8", "BK_MAX_SHARED_USERS": "4", "COLUMNS": "160"}
+            created = self.run_bk(["1", "20m", "--gpu", "0", "--quiet"], data_dir, env)
+            status = self.run_bk(["st"], data_dir, env)
+
+            self.assertEqual(created.returncode, 0, created.stderr)
+            self.assertEqual(status.returncode, 0, status.stderr)
+            lines = status.stdout.splitlines()
+            header = next(line for line in lines if line.lstrip().startswith("# ID"))
+            row = lines[lines.index(header) + 1]
+            reservation = json.loads((data_dir / "ledger.json").read_text(encoding="utf-8"))["reservations"][0]
+            start = datetime.fromisoformat(reservation["start_at"].replace("Z", "+00:00")).astimezone()
+            end = datetime.fromisoformat(reservation["end_at"].replace("Z", "+00:00")).astimezone()
+
+            self.assertEqual(header.index("Start"), row.index(f"{start:%m-%d %H:%M}"))
+            self.assertEqual(header.index("End"), row.index(f"{end:%m-%d %H:%M}"))
+
+    def test_list_is_bounded_for_humans_but_json_stays_complete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            start = ceil_5m(datetime.now(timezone.utc)) + timedelta(hours=1)
+            for offset in range(3):
+                created = self.run_bk(
+                    ["1", "5m", "--start", iso(start + timedelta(minutes=5 * offset)), "--quiet"],
+                    data_dir,
+                )
+                self.assertEqual(created.returncode, 0, created.stderr)
+
+            limited = self.run_bk(["l", "-n", "2"], data_dir)
+            payload = self.run_bk(["l", "--json"], data_dir)
+
+            self.assertEqual(limited.returncode, 0, limited.stderr)
+            self.assertIn("showing 2 of 3", limited.stdout)
+            self.assertEqual(len(json.loads(payload.stdout)["reservations"]), 3)
+
+    def test_repeated_pattern_can_be_saved_by_pressing_enter(self):
+        suggestion = {
+            "name": "s1x-5m", "observations": 3, "mode": "shared", "count": 1,
+            "duration_seconds": 300, "expected_memory_mb": None, "share_units": 1,
+            "preferred_gpus": None, "excluded_gpus": [], "signature": "test",
+        }
+        output = TtyStringIO()
+        store = mock.Mock()
+        store.load.return_value = {"reservations": []}
+        with mock.patch("bk.cli.load_preset_document", return_value={"presets": []}), \
+             mock.patch("bk.cli.preset_suggestion", return_value=suggestion), \
+             mock.patch("bk.cli.save_preset", return_value=suggestion) as save, \
+             mock.patch("builtins.input", return_value=""), \
+             mock.patch.object(sys.stdin, "isatty", return_value=True), \
+             redirect_stdout(output):
+            _maybe_print_preset_suggestion(store, SimpleNamespace(uid=1003))
+
+        save.assert_called_once()
+        self.assertIn("saved preset: s1x-5m", output.getvalue())
 
     def test_timeline_auto_step_scales_a_long_window(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2594,7 +2657,8 @@ class CliTests(unittest.TestCase):
             self.assertIn(f"captured data directory: {data_dir}", installed.stdout)
             self.assertNotIn("captured config file:", installed.stdout)
             self.assertIn("bk doctor --require-worker --strict", installed.stdout)
-            self.assertIn("sudo loginctl enable-linger", installed.stdout)
+            self.assertIn("sudo bk admin worker-persistence enable", installed.stdout)
+            self.assertIn("tmux", installed.stdout)
 
     def test_service_unit_captures_an_external_trusted_config(self):
         with tempfile.TemporaryDirectory() as tmp:

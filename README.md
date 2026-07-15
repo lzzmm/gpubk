@@ -1,6 +1,6 @@
 # GPUBK
 
-**English** | [简体中文](https://github.com/lzzmm/gpubk/blob/main/README.zh-CN.md)
+**English** | [简体中文](https://github.com/lzzmm/GPUbk/blob/main/README.zh-CN.md)
 
 <p align="center">
   <img src="docs/assets/gpubk-terminal-logo.svg" alt="GPUBK terminal logo" width="860">
@@ -61,6 +61,10 @@ sudo /opt/gpubk/bin/bk admin install
 bk doctor --probe --require-monitor --strict
 ```
 
+The installer normally creates `/usr/local/bin/bk`. If that directory is not
+root-owned, do not change its ownership: first verify `/usr/bin/bk` is absent,
+then run `sudo /opt/gpubk/bin/bk admin install --command-path /usr/bin/bk`.
+
 The guided installer creates the system command, data directories, and boot
 services. Ordinary users run `bk` without `sudo` and cannot edit another UID's
 reservations or administrator policy.
@@ -107,6 +111,26 @@ bk doctor --probe --require-monitor --strict
 The installer preserves data and policy during upgrades. Preview destructive or
 ownership-changing operations with `--dry-run` first.
 
+### Uninstall a shared server
+
+The administrative uninstall removes services, configuration, the global `bk`
+link, and optionally all GPUBK data. The Python package lives inside
+`/opt/gpubk`, not in the system `python3`, so remove that environment last:
+
+```bash
+sudo systemctl disable --now gpubk-monitor.service gpubk-broker.service
+sudo /opt/gpubk/bin/bk admin services uninstall --yes
+sudo /opt/gpubk/bin/bk admin uninstall --purge-data --yes
+sudo rm -rf /opt/gpubk
+hash -r
+command -v bk || echo "GPUBK removed"
+```
+
+Use `sudo /opt/gpubk/bin/bk admin uninstall --dry-run --purge-data` first when
+you want to inspect exactly what will be removed. Do not run `python3 -m pip
+uninstall gpubk`: the system interpreter cannot see a package installed in
+`/opt/gpubk`.
+
 ## Multiple Servers
 
 Cluster mode federates independently safe GPUBK hosts. Every GPU server keeps its
@@ -133,8 +157,9 @@ UID mapping, failure behavior, NFS history export, and scheduled jobs.
 
 ## Documentation
 
-- [Complete administrator and user guide](https://github.com/lzzmm/gpubk/blob/main/docs/GUIDE.md)
-- [中文完整手册](https://github.com/lzzmm/gpubk/blob/main/docs/GUIDE.zh-CN.md)
+- [Complete administrator and user guide](https://github.com/lzzmm/GPUbk/blob/main/docs/GUIDE.md)
+- [Architecture rules](https://github.com/lzzmm/GPUbk/blob/main/docs/ARCHITECTURE.md)
+- [中文完整手册](https://github.com/lzzmm/GPUbk/blob/main/docs/GUIDE.zh-CN.md)
 - [Upgrading](docs/UPGRADING.md)
 - [Security model](SECURITY.md)
 - [Cluster deployment](docs/CLUSTER.md)

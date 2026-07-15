@@ -37,6 +37,7 @@ from .timeparse import (
     utc_now,
 )
 from .worker_status import WORKER_TERMINAL_JOB_STATES
+from .worker_guidance import WORKER_ENABLE_COMMAND, WORKER_INSTALL_COMMAND
 
 
 CLUSTER_SCHEMA_VERSION = "gpubk.cluster.v1"
@@ -919,8 +920,7 @@ def _cluster_check(
             worker_error = (
                 "scheduled-command worker is not running "
                 f"(state={worker_value.get('state') or 'unknown'}); on that node run "
-                "'bk service install worker' then "
-                "'systemctl --user enable --now bk-worker.service'"
+                f"'{WORKER_INSTALL_COMMAND}' then '{WORKER_ENABLE_COMMAND}'"
             )
             if check["status"] == "failed" and check["error"]:
                 check["error"] = f"{check['error']}; {worker_error}"
@@ -931,8 +931,7 @@ def _cluster_check(
             check["warnings"].append(
                 "a scheduled command is pending but this SSH identity's worker "
                 f"is {worker_value.get('state') or 'unknown'}; on that node run "
-                "'bk service install worker' then "
-                "'systemctl --user enable --now bk-worker.service'"
+                f"'{WORKER_INSTALL_COMMAND}' then '{WORKER_ENABLE_COMMAND}'"
             )
         checks.append(check)
 

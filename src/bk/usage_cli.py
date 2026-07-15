@@ -13,6 +13,7 @@ from .monitor import authorize_monitor
 from .timeparse import parse_duration_seconds, parse_iso, utc_now
 from .terminal import color_enabled, style
 from .usage_api import UsageQueryService
+from .usage_schema import USAGE_API_VERSION
 from .usage_store import UsageAuditStore, UsageRetentionPolicy
 from .usage_view import (
     activity_bar_cells,
@@ -144,7 +145,7 @@ def _admin_command(action: str, argv: List[str], config: Config) -> int:
         payload = api.capabilities()
     elif action == "storage":
         payload = {
-            "schema_version": "gpubk.usage.v1",
+            "schema_version": USAGE_API_VERSION,
             "kind": "usage-storage",
             "storage": store.storage_info(),
         }
@@ -155,7 +156,7 @@ def _admin_command(action: str, argv: List[str], config: Config) -> int:
                 report = store.maintain(UsageRetentionPolicy.from_config(config), dry_run=False)
         else:
             report = store.maintain(UsageRetentionPolicy.from_config(config), dry_run=True)
-        payload = {"schema_version": "gpubk.usage.v1", "kind": "usage-maintenance", "report": report}
+        payload = {"schema_version": USAGE_API_VERSION, "kind": "usage-maintenance", "report": report}
     else:
         if args.yes:
             authorize_monitor(config)
@@ -163,7 +164,7 @@ def _admin_command(action: str, argv: List[str], config: Config) -> int:
                 report = store.migrate_legacy(dry_run=False)
         else:
             report = store.migrate_legacy(dry_run=True)
-        payload = {"schema_version": "gpubk.usage.v1", "kind": "usage-migration", "report": report}
+        payload = {"schema_version": USAGE_API_VERSION, "kind": "usage-migration", "report": report}
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
     else:

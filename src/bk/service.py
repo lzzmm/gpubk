@@ -42,6 +42,7 @@ from .sharing import (
 from .storage import AUDIT_SCHEMA_VERSION, LedgerStore
 from .timeparse import normalize_queue_start, parse_iso, to_iso, utc_now
 from .usage_store import UsageAuditStore
+from .usage_schema import USAGE_API_VERSION
 from .worker import (
     JOB_SPEC_ORPHAN_GRACE_SECONDS,
     WORKER_BUSY_EXIT_CODE,
@@ -55,6 +56,7 @@ from .worker import (
     validate_job_submission,
 )
 from .worker_status import inspect_worker_status
+from .worker_guidance import WORKER_FOREGROUND_COMMAND, WorkerGuidance
 
 
 AGENT_SCHEMA_VERSION = "bk.agent.v1"
@@ -543,7 +545,7 @@ def agent_capabilities(config: Config) -> dict:
         "versioned_usage_history": True,
         "configurable_monitor_cadence": True,
         "collector_liveness": True,
-        "usage_api_schema": "gpubk.usage.v1",
+        "usage_api_schema": USAGE_API_VERSION,
         "external_allocator_is_advisory": True,
         "external_allocator_configured": bool(config.allocator_command),
         "request_gpu_exclusions": True,
@@ -1018,13 +1020,25 @@ def booking_result_payload(
 
 
 def scheduled_job_worker_warning(status: Optional[dict]) -> Optional[str]:
-    if status is None or status.get("running") is True:
+    if status is None:
+        return None
+    persistence = status.get("persistence")
+    guidance = WorkerGuidance()
+    if status.get("running") is True:
+        if isinstance(persistence, dict) and persistence.get("logout_safe") is False:
+            return (
+                "worker is running but may stop after logout; for temporary use keep "
+                f"`{WORKER_FOREGROUND_COMMAND}` in tmux, or ask the GPUBK administrator "
+                f"(`bk info`) to run `{guidance.admin_persistence_command}`"
+            )
         return None
     state = str(status.get("state", "invalid"))
     if state in {"not-seen", "stopped"}:
         return (
-            f"scheduled command worker is {state}; start `bk w start` now or enable "
-            "bk-worker.service, otherwise the command cannot launch"
+            f"scheduled command worker is {state}; start `{WORKER_FOREGROUND_COMMAND}` now or enable "
+            "bk-worker.service, otherwise the command cannot launch. For temporary use "
+            f"keep `{WORKER_FOREGROUND_COMMAND}` in tmux; for logout/reboot persistence contact the GPUBK "
+            "administrator shown by `bk info`"
         )
     if state == "invalid":
         return (

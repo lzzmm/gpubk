@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .cluster import (
+    CLUSTER_SCHEMA_VERSION,
     ClusterConfig,
     ClusterNode,
     cluster_catalog_issues,
@@ -639,7 +640,7 @@ def _ensure_cluster_catalog_parent(path: Path) -> None:
 def print_admin_cluster(config: ClusterConfig, *, json_output: bool) -> int:
     issues = cluster_catalog_issues(config)
     document = {
-        "schema_version": "gpubk.cluster.v1",
+        "schema_version": CLUSTER_SCHEMA_VERSION,
         "ready": not issues,
         "path": str(config.path),
         "nodes": [
