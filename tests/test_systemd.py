@@ -1,3 +1,7 @@
+import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +23,55 @@ from bk.systemd import (
 
 
 class BundledSystemdTests(unittest.TestCase):
+    def test_rendered_system_units_pass_systemd_analyze(self):
+        analyzer = shutil.which("systemd-analyze")
+        if analyzer is None:
+            self.skipTest("systemd-analyze is available only on systemd hosts")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            socket_dir = root / "run"
+            unit_dir = root / "units"
+            data_dir.mkdir()
+            socket_dir.mkdir()
+            unit_dir.mkdir()
+            config_file = root / "config.json"
+            config_file.write_text("{}\n", encoding="utf-8")
+            service_uid = os.getuid() or 65534
+            service_gid = os.getgid() or 65534
+            common = {
+                "service_uid": service_uid,
+                "service_gid": service_gid,
+                "config_file": config_file,
+                "data_dir": data_dir,
+                "socket_directory": socket_dir,
+                "python_executable": Path(sys.executable).resolve(),
+            }
+            unit_paths = []
+            for kind, name in zip(
+                ("broker", "monitor"),
+                system_unit_names(),
+                strict=True,
+            ):
+                path = unit_dir / name
+                path.write_text(system_unit_text(kind, **common), encoding="utf-8")
+                unit_paths.append(path)
+
+            environment = os.environ.copy()
+            environment["SYSTEMD_UNIT_PATH"] = f"{unit_dir}:"
+            result = subprocess.run(
+                [analyzer, "verify", *(str(path) for path in unit_paths)],
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=30,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_system_units_run_as_configured_non_root_owner_and_are_hardened(self):
         common = {
             "service_uid": 1001,

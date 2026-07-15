@@ -4,6 +4,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.1 - 2026-07-15
 
+- Verify rendered broker and monitor units with the host's real `systemd-analyze`
+  parser on Linux CI, while keeping the test explicitly skipped on non-systemd hosts.
 - Keep `bk c rec` and `bk c` destination selection consistent during rolling upgrades:
   read-only legacy candidates remain visible, while the reported best node is the first
   candidate that can accept the retry-safe write.
