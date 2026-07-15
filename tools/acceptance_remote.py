@@ -105,12 +105,15 @@ def execute(
 
 
 class AcceptanceReport:
-    def __init__(self, *, run_id: str, version: str) -> None:
+    def __init__(
+        self, *, run_id: str, version: str, live_workload_requested: bool = False
+    ) -> None:
         self.run_id = run_id
         self.version = version
         self.started_at = utc_now()
         self.checks: list[dict[str, Any]] = []
         self.bundle_manifest: dict[str, Any] | None = None
+        self.live_workload_requested = live_workload_requested
 
     def add(
         self,
@@ -190,6 +193,14 @@ class AcceptanceReport:
             status: sum(item["status"] == status for item in self.checks)
             for status in ("pass", "warn", "fail", "skip")
         }
+        live_checks = [
+            item for item in self.checks if item["id"] == "live-gpu-workload"
+        ]
+        live_status = "pending"
+        if self.live_workload_requested and live_checks:
+            live_status = (
+                "passed" if live_checks[-1]["status"] == "pass" else "failed"
+            )
         return {
             "schema_version": SCHEMA_VERSION,
             "kind": "remote_acceptance",
@@ -225,8 +236,12 @@ class AcceptanceReport:
                 },
                 {
                     "id": "live-gpu-workload",
-                    "status": "pending",
-                    "instruction": "Run an approved tiny booked workload on an idle GPU and verify attribution.",
+                    "status": live_status,
+                    "instruction": (
+                        "The requested bounded workload and attribution check passed."
+                        if live_status == "passed"
+                        else "Run an approved tiny booked workload on an idle GPU and verify attribution."
+                    ),
                 },
                 {
                     "id": "boot-persistence",
@@ -927,6 +942,55 @@ def run_system_checks(
             )
 
 
+def run_live_gpu_workload(
+    report: AcceptanceReport,
+    *,
+    system_bk: str,
+    live_python: str,
+    seconds: int,
+) -> None:
+    """Exercise production booking and attribution without touching busy GPUs."""
+    bk_path = system_bk_command(system_bk)
+    if bk_path is None:
+        report.add(
+            "live-gpu-workload",
+            status="fail",
+            critical=True,
+            summary="live test could not find the deployed bk command",
+        )
+        return
+    if not 20 <= seconds <= 180:
+        report.add(
+            "live-gpu-workload",
+            status="fail",
+            critical=True,
+            summary="live workload duration is outside the 20-180 second safety bound",
+        )
+        return
+    report.command(
+        "live-gpu-workload",
+        [
+            bk_path,
+            "usage",
+            "demo",
+            "--python",
+            live_python,
+            "--seconds",
+            str(seconds),
+            "--yes",
+        ],
+        timeout=seconds + 180,
+        success=(
+            "an idle GPU was booked, exercised, attributed, and released; "
+            "append-only usage and audit records remain"
+        ),
+        failure=(
+            "live workload failed or could not prove cleanup; no busy GPU is "
+            "selected by the demo"
+        ),
+    )
+
+
 def acquire_sudo(report: AcceptanceReport, requested: bool) -> bool:
     if not requested:
         report.add(
@@ -975,7 +1039,7 @@ def report_readme(payload: dict[str, Any]) -> str:
         "This archive intentionally excludes raw ledgers, other users' names,",
         "GPU process command lines, and non-GPUBK journals.",
         "",
-        "Automated checks do not replace the four manual checks listed in acceptance.json.",
+        "See acceptance.json for the manual checks that remain after this run.",
     ]
     return "\n".join(lines) + "\n"
 
@@ -1023,13 +1087,20 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--system-bk", default="bk")
     result.add_argument("--sudo", action="store_true")
     result.add_argument("--include-journal", action="store_true")
+    result.add_argument("--live-gpu", action="store_true")
+    result.add_argument("--live-seconds", type=int, default=65)
+    result.add_argument("--live-python", default="python3")
     result.add_argument("--download-wheelhouse", action="store_true")
     return result
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
-    report = AcceptanceReport(run_id=args.run_id, version=args.version)
+    report = AcceptanceReport(
+        run_id=args.run_id,
+        version=args.version,
+        live_workload_requested=args.live_gpu,
+    )
     exit_code = 2
     try:
         stage = validate_stage(args.stage)
@@ -1071,6 +1142,13 @@ def main(argv: list[str] | None = None) -> int:
             sudo_ready=sudo_ready,
             include_journal=args.include_journal,
         )
+        if args.live_gpu:
+            run_live_gpu_workload(
+                report,
+                system_bk=args.system_bk,
+                live_python=args.live_python,
+                seconds=args.live_seconds,
+            )
         exit_code = 2 if report.result == "fail" else 0
     except Exception as exc:  # noqa: BLE001 - report unexpected remote setup failures
         report.add(

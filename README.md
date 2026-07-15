@@ -906,13 +906,29 @@ runner never restarts services, writes the production ledger, or launches a GPU
 workload. Candidate scheduling uses a private directory under
 `~/.cache/gpubk/acceptance/`, which is removed after the report is retrieved.
 
+To include the production usage path, explicitly add `--live-gpu`. The live
+check uses the deployed scheduler to book exactly one GPU, refuses to run unless
+that GPU is reported idle, runs a bounded CUDA workload, verifies user-attributed
+usage, and removes its reservation in a `finally` cleanup. It does not stop other
+processes or restart services. The active reservation is removed, while its
+append-only audit and usage records intentionally remain. `--live-python` must
+point to a remote Python environment with CUDA PyTorch:
+
+```bash
+python3 tools/remote_acceptance.py USER@GPU-HOST \
+  --remote-python /opt/gpubk/bin/python \
+  --system-bk /usr/local/bin/bk \
+  --sudo --live-gpu \
+  --live-python /home/USER/miniconda3/envs/torch/bin/python
+```
+
 Reports are written below `acceptance-reports/` and include the JSON result,
 human-readable summary, bundle manifest, original archive, and checksum. A
 failed automated check still downloads its report and returns a nonzero status.
 Use `--keep-remote` only while debugging. `--include-journal` explicitly opts in
 to the last 80 lines from the two GPUBK units. TUI appearance, cross-user
-authorization, a maintenance-approved tiny workload, and reboot persistence
-remain manual checks.
+authorization, and reboot persistence remain manual checks; the live workload is
+marked complete in the report when `--live-gpu` succeeds.
 
 To hand operation to another existing local account, stop the broker and monitor,
 preview the transaction, apply it, then reload and restart the tracked units:

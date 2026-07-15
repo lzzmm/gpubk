@@ -769,11 +769,25 @@ python3 tools/remote_acceptance.py USER@GPU-HOST \
 账号、文件所有权和 systemd；脚本不会重启服务、写正式台账或启动 GPU 任务。候选版本
 的调度测试只使用 `~/.cache/gpubk/acceptance/` 下的私有临时目录，报告取回后自动清理。
 
+需要把正式用量链路也纳入验收时，必须显式增加 `--live-gpu`。该检查通过正式调度器只
+预约一张 GPU；只有调度结果同时确认该卡实时空闲时才会运行限时 CUDA 任务，随后验证
+用户归属统计，并在 `finally` 清理中取消自己创建的预约。它不会停止其他进程或重启服务。
+活动预约会删除，但追加式审计和用量历史会按设计保留。`--live-python` 应指向服务器上
+带 CUDA PyTorch 的 Python 环境：
+
+```bash
+python3 tools/remote_acceptance.py USER@GPU-HOST \
+  --remote-python /opt/gpubk/bin/python \
+  --system-bk /usr/local/bin/bk \
+  --sudo --live-gpu \
+  --live-python /home/USER/miniconda3/envs/torch/bin/python
+```
+
 报告保存在本地 `acceptance-reports/`，包含 JSON 结果、文字摘要、上传清单、原始压缩包
 和校验值。即使自动检查失败，脚本仍会尽量下载报告并返回非零状态。只有排错时才使用
 `--keep-remote`；`--include-journal` 会额外收集两个 GPUBK unit 最近 80 行日志，必须
-显式开启。TUI 观感、第二个真实用户的越权测试、维护窗口内的小型 GPU 任务和重启后
-自启动仍需人工确认。
+显式开启。TUI 观感、第二个真实用户的越权测试和重启后自启动仍需人工确认；
+`--live-gpu` 成功后，报告会把小型 GPU 任务标记为已完成。
 
 需要把运行职责交给另一个已有本机账号时，先停止 broker 和 monitor，再预览、执行、
 重新加载并启动受跟踪的 unit：

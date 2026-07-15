@@ -59,6 +59,24 @@ class LocalAcceptanceRunnerTests(unittest.TestCase):
             ):
                 LOCAL.validate_target(value)
 
+    def test_live_options_are_safely_forwarded_to_the_remote_runner(self):
+        command = LOCAL.runner_command(
+            ".cache/gpubk/acceptance/run",
+            run_id="run-1",
+            version="1.2.3",
+            remote_python="/opt/gpubk/bin/python",
+            system_bk="/usr/local/bin/bk",
+            sudo=True,
+            include_journal=False,
+            live_gpu=True,
+            live_seconds=65,
+            live_python="/home/user/torch env/bin/python",
+        )
+
+        self.assertIn("--live-gpu", command)
+        self.assertIn("--live-seconds 65", command)
+        self.assertIn("'/home/user/torch env/bin/python'", command)
+
     def test_verifies_exact_gpubk_wheel_metadata(self):
         with tempfile.TemporaryDirectory() as raw_directory:
             wheelhouse = Path(raw_directory)
@@ -305,6 +323,73 @@ class LocalAcceptanceRunnerTests(unittest.TestCase):
 
 
 class RemoteAcceptanceRunnerTests(unittest.TestCase):
+    def test_live_workload_uses_deployed_bk_with_bounded_timeout(self):
+        report = REMOTE.AcceptanceReport(
+            run_id="run-1", version="1.2.3", live_workload_requested=True
+        )
+        with (
+            mock.patch.object(REMOTE, "system_bk_command", return_value="/usr/bin/bk"),
+            mock.patch.object(report, "command") as command,
+        ):
+            REMOTE.run_live_gpu_workload(
+                report,
+                system_bk="bk",
+                live_python="/home/user/venv/bin/python",
+                seconds=65,
+            )
+
+        self.assertEqual(
+            command.call_args.args,
+            (
+                "live-gpu-workload",
+                [
+                    "/usr/bin/bk",
+                    "usage",
+                    "demo",
+                    "--python",
+                    "/home/user/venv/bin/python",
+                    "--seconds",
+                    "65",
+                    "--yes",
+                ],
+            ),
+        )
+        self.assertEqual(command.call_args.kwargs["timeout"], 245)
+
+    def test_live_manual_check_is_only_completed_after_a_pass(self):
+        report = REMOTE.AcceptanceReport(
+            run_id="run-1", version="1.2.3", live_workload_requested=True
+        )
+        report.add(
+            "live-gpu-workload",
+            status="pass",
+            critical=True,
+            summary="done",
+        )
+
+        checks = {item["id"]: item for item in report.payload()["manual_checks"]}
+
+        self.assertEqual(checks["live-gpu-workload"]["status"], "passed")
+        self.assertEqual(checks["tui"]["status"], "pending")
+
+    def test_live_workload_rejects_an_unsafe_duration_before_execution(self):
+        report = REMOTE.AcceptanceReport(
+            run_id="run-1", version="1.2.3", live_workload_requested=True
+        )
+        with (
+            mock.patch.object(REMOTE, "system_bk_command", return_value="/usr/bin/bk"),
+            mock.patch.object(report, "command") as command,
+        ):
+            REMOTE.run_live_gpu_workload(
+                report,
+                system_bk="bk",
+                live_python="python3",
+                seconds=181,
+            )
+
+        command.assert_not_called()
+        self.assertEqual(report.checks[-1]["status"], "fail")
+
     def test_doctor_core_allows_capability_warning_but_not_hard_failure(self):
         payload = {
             "probes": [

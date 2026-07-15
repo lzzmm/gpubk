@@ -115,6 +115,38 @@ def stable_gpu_uuid(gpu: int) -> str:
     return value.splitlines()[0]
 
 
+def require_no_compute_process(gpu: int) -> None:
+    """Close the monitor-to-launch race without exposing another user's PID."""
+    nvidia_smi = shutil.which("nvidia-smi")
+    if nvidia_smi is None:
+        raise DemoError("nvidia-smi is not available")
+    result = subprocess.run(
+        [
+            nvidia_smi,
+            "-i",
+            str(gpu),
+            "--query-compute-apps=pid",
+            "--format=csv,noheader,nounits",
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=15,
+    )
+    if result.returncode:
+        raise DemoError(f"cannot recheck GPU {gpu} compute processes")
+    rows = [
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.strip() and "no running processes" not in line.lower()
+    ]
+    if rows:
+        raise DemoError(
+            f"GPU {gpu} gained a compute process after booking; refusing to launch"
+        )
+
+
 def cancel(bk: str, reservation_id: str) -> bool:
     result = subprocess.run(
         [bk, "del", reservation_id],
@@ -220,6 +252,7 @@ def _run(argv: Sequence[str] | None = None) -> int:
         reservation_id = str(reservation["id"])
         gpu = selected_idle_gpu(result)
         gpu_uuid = stable_gpu_uuid(gpu)
+        require_no_compute_process(gpu)
         print(f"Booked GPU {gpu} as {reservation_id[:8]}; starting workload.")
 
         environment = dict(os.environ)

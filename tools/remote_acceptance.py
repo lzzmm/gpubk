@@ -482,6 +482,9 @@ def runner_command(
     system_bk: str,
     sudo: bool,
     include_journal: bool,
+    live_gpu: bool = False,
+    live_seconds: int = 65,
+    live_python: str = "python3",
     download_wheelhouse: bool = False,
     launcher_python: str = "python3",
 ) -> str:
@@ -499,6 +502,16 @@ def runner_command(
         options.append("--sudo")
     if include_journal:
         options.append("--include-journal")
+    if live_gpu:
+        options.extend(
+            (
+                "--live-gpu",
+                "--live-seconds",
+                str(live_seconds),
+                "--live-python",
+                live_python,
+            )
+        )
     if download_wheelhouse:
         options.append("--download-wheelhouse")
     quoted_options = " ".join(shlex.quote(value) for value in options)
@@ -612,7 +625,8 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         description=(
             "Download an exact GPUBK release locally, test it on a GPU host over SSH, "
-            "and retrieve a verified report without changing production state."
+            "and retrieve a verified report. Production stays read-only unless "
+            "--live-gpu is explicitly selected."
         )
     )
     result.add_argument(
@@ -636,6 +650,26 @@ def parser() -> argparse.ArgumentParser:
         "--include-journal",
         action="store_true",
         help="include the last 80 lines from GPUBK service units (requires --sudo)",
+    )
+    result.add_argument(
+        "--live-gpu",
+        action="store_true",
+        help=(
+            "book one idle production GPU, run a bounded CUDA workload, verify "
+            "usage attribution, and remove the booking"
+        ),
+    )
+    result.add_argument(
+        "--live-seconds",
+        type=int,
+        default=65,
+        help="live workload duration in seconds, 20-180 (default: 65)",
+    )
+    result.add_argument(
+        "--live-python",
+        type=validate_executable,
+        default="python3",
+        help="remote CUDA Python containing PyTorch (default: python3)",
     )
     result.add_argument("--wheelhouse", type=Path, help="use a prepared wheelhouse")
     result.add_argument(
@@ -665,9 +699,19 @@ def print_summary(payload: dict[str, Any], output: Path) -> None:
         flush=True,
     )
     print(f"Local report: {output}", flush=True)
-    print(
-        "Manual checks still required: TUI, second-user authorization, approved live workload, reboot."
-    )
+    manual_checks = payload.get("manual_checks")
+    if not isinstance(manual_checks, list):
+        print("Manual check status is unavailable in this report.")
+        return
+    pending = [
+        str(item.get("id"))
+        for item in manual_checks
+        if isinstance(item, dict) and item.get("status") != "passed"
+    ]
+    if pending:
+        print("Manual checks still required: " + ", ".join(pending) + ".")
+    else:
+        print("No manual checks remain in this report.")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -678,6 +722,8 @@ def main(argv: list[str] | None = None) -> int:
         parser().error("--skip-index-digest-check requires --wheelhouse")
     if args.port is not None and not 1 <= args.port <= 65535:
         parser().error("--port must be between 1 and 65535")
+    if not 20 <= args.live_seconds <= 180:
+        parser().error("--live-seconds must be between 20 and 180")
     if args.identity is not None:
         args.identity = args.identity.expanduser().resolve(strict=True)
         if not args.identity.is_file():
@@ -706,7 +752,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"remote stage: ~/{relative_stage}")
         print("download source: local, with automatic remote fallback")
         print(f"local report: {output}")
-        print("production changes: none")
+        if args.live_gpu:
+            print(
+                "production changes: one short booking plus append-only audit and "
+                "usage records; the active booking is removed"
+            )
+        else:
+            print("production changes: none")
         return 0
 
     require_local_commands()
@@ -778,6 +830,9 @@ def main(argv: list[str] | None = None) -> int:
                     system_bk=args.system_bk,
                     sudo=args.sudo,
                     include_journal=args.include_journal,
+                    live_gpu=args.live_gpu,
+                    live_seconds=args.live_seconds,
+                    live_python=args.live_python,
                     download_wheelhouse=remote_download,
                     launcher_python="python3",
                 ),

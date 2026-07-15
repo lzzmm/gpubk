@@ -24,6 +24,25 @@ class LiveUsageDemoTests(unittest.TestCase):
         with self.assertRaisesRegex(demo.DemoError, "not idle"):
             demo.selected_idle_gpu(payload)
 
+    def test_live_recheck_rejects_a_compute_process_without_exposing_its_pid(self):
+        completed = mock.Mock(returncode=0, stdout="424242\n", stderr="")
+        with (
+            mock.patch("bk.live_usage_demo.shutil.which", return_value="nvidia-smi"),
+            mock.patch("bk.live_usage_demo.subprocess.run", return_value=completed),
+        ):
+            with self.assertRaisesRegex(demo.DemoError, "gained a compute process") as error:
+                demo.require_no_compute_process(6)
+
+        self.assertNotIn("424242", str(error.exception))
+
+    def test_live_recheck_accepts_an_idle_gpu(self):
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+        with (
+            mock.patch("bk.live_usage_demo.shutil.which", return_value="nvidia-smi"),
+            mock.patch("bk.live_usage_demo.subprocess.run", return_value=completed),
+        ):
+            demo.require_no_compute_process(6)
+
     def test_usage_demo_is_routed_without_opening_the_usage_store(self):
         with mock.patch("bk.live_usage_demo.main", return_value=7) as run:
             self.assertEqual(
