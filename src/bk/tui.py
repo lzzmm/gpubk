@@ -170,6 +170,9 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
             ("OFF", "Disabled by admin; status and history stay visible"),
             ("z", "Solid bars until overlap; capacity slices otherwise"),
             ("GPU focus", "Tab to expand share lanes and live processes"),
+            ("user", "Process owner verified from the host UID"),
+            ("user*", "Container owner inferred from one reservation"),
+            ("container?", "Container owner is ambiguous; no user is charged"),
             ("Reservation", "Select a row to blink its exact interval"),
             ("Monitor", "Header shows collector health; details: bk doctor"),
             ("Worker", "Header shows your scheduled-command worker"),
@@ -654,7 +657,12 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
         for gpu in gpu_snapshots
         if gpu.memory_total_mb > 0
     }
-    usage_by_gpu = classify_process_usage(gpu_snapshots, active, now)
+    usage_by_gpu = classify_process_usage(
+        gpu_snapshots,
+        active,
+        now,
+        container_groups=config.container_attribution_groups,
+    )
     gpu_by_index = {gpu.index: gpu for gpu in gpu_snapshots}
 
     timeline_top = 3
@@ -2610,7 +2618,12 @@ def _show_gpu_details(
         (item for item in snapshots if item.index == gpu_index),
         GpuSnapshot(index=gpu_index, name="unknown"),
     )
-    usage = classify_process_usage(snapshots, active, now).get(gpu_index, [])
+    usage = classify_process_usage(
+        snapshots,
+        active,
+        now,
+        container_groups=config.container_attribution_groups,
+    ).get(gpu_index, [])
     related = [item for item in active if gpu_index in item.get("gpus", [])]
     id_width = _visible_id_width(active)
     util = f"{gpu.utilization_percent}%" if gpu.utilization_percent is not None else "n/a"

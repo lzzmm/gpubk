@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import grp
 import shutil
 import stat
 import subprocess
@@ -73,12 +74,51 @@ def run_deployment_probes(config: Config) -> list[dict]:
         for name in names:
             checks.append(_result(name, "fail", "data directory is not ready"))
     checks.append(_probe_process_identity(config))
+    checks.append(_probe_container_attribution(config))
     checks.append(_probe_gpu(config))
     return checks
 
 
 def probes_ready(checks: Iterable[dict]) -> bool:
     return all(item.get("status") == "pass" for item in checks)
+
+
+def _probe_container_attribution(config: Config) -> dict:
+    socket_path = Path("/var/run/docker.sock")
+    configured = list(config.container_attribution_groups)
+    resolved = []
+    missing = []
+    for name in configured:
+        try:
+            resolved.append({"name": name, "gid": grp.getgrnam(name).gr_gid})
+        except KeyError:
+            missing.append(name)
+    if missing:
+        return _result(
+            "container-attribution",
+            "fail",
+            "configured container attribution groups do not exist",
+            missing_groups=missing,
+            configured_groups=configured,
+        )
+    try:
+        metadata = socket_path.stat()
+    except OSError:
+        return _result(
+            "container-attribution",
+            "pass",
+            "Docker socket is absent; host process attribution remains available",
+            configured_groups=configured,
+        )
+    return _result(
+        "container-attribution",
+        "pass",
+        "Docker attribution policy is usable",
+        socket=str(socket_path),
+        socket_gid=metadata.st_gid,
+        socket_mode=f"{stat.S_IMODE(metadata.st_mode):04o}",
+        configured_groups=resolved,
+    )
 
 
 def _probe_data_directory(config: Config) -> dict:

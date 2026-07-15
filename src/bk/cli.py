@@ -4411,7 +4411,12 @@ def _print_status(
     if timeline_gpus is not None:
         selected_gpu_ids = set(timeline_gpus)
         gpu_snapshots = [gpu for gpu in gpu_snapshots if gpu.index in selected_gpu_ids]
-    usage_by_gpu = classify_process_usage(gpu_snapshots, active, now)
+    usage_by_gpu = classify_process_usage(
+        gpu_snapshots,
+        active,
+        now,
+        container_groups=config.container_attribution_groups,
+    )
     live_states = assess_gpu_live_states(gpu_snapshots, config.gpu_count)
     colors = color_enabled(sys.stdout)
     print(style("GPU status", "heading", enabled=colors))

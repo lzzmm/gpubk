@@ -2,6 +2,13 @@
 
 All notable changes are documented here. The project follows Semantic Versioning once a public release is published.
 
+## 0.2.2 - 2026-07-16
+
+- Improve the README terminal preview, alignment, palette, and anonymized demo data.
+- Attribute root-owned Docker GPU processes conservatively and expose attribution confidence.
+- Add configurable container attribution groups and deployment diagnostics.
+- Move operational reference documents into `docs/` while preserving navigation.
+
 ## 0.2.1 - 2026-07-15
 
 - Add private per-user booking presets, three-use suggestions, and history-derived editable

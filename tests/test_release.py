@@ -31,10 +31,10 @@ class ReleaseConfigurationTests(unittest.TestCase):
             ROOT / "README.md",
             ROOT / "README.zh-CN.md",
             ROOT / "CHANGELOG.md",
-            ROOT / "RELEASING.md",
+            ROOT / "docs" / "RELEASING.md",
             ROOT / "SECURITY.md",
-            ROOT / "TELEMETRY.md",
-            ROOT / "UPGRADING.md",
+            ROOT / "docs" / "TELEMETRY.md",
+            ROOT / "docs" / "UPGRADING.md",
             ROOT / "setup.py",
         ]
         files.extend((ROOT / "src").rglob("*.py"))
@@ -69,7 +69,7 @@ class ReleaseConfigurationTests(unittest.TestCase):
         public_files = [
             ROOT / "README.md",
             ROOT / "README.zh-CN.md",
-            ROOT / "RELEASING.md",
+            ROOT / "docs" / "RELEASING.md",
             ROOT / "src" / "bk" / "mcp_server.py",
             ROOT / ".github" / "workflows" / "ci.yml",
         ]
@@ -90,7 +90,7 @@ class ReleaseConfigurationTests(unittest.TestCase):
     def test_remote_gpu_acceptance_runner_is_packaged_and_documented(self):
         english = public_docs("en")
         chinese = public_docs("zh")
-        releasing = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
+        releasing = (ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8")
         command = "python3 tools/remote_acceptance.py USER@GPU-HOST"
 
         self.assertTrue((ROOT / "tools" / "remote_acceptance.py").is_file())
@@ -102,18 +102,18 @@ class ReleaseConfigurationTests(unittest.TestCase):
     def test_cluster_acceptance_and_design_are_packaged_and_documented(self):
         english = public_docs("en")
         chinese = public_docs("zh")
-        releasing = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
+        releasing = (ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8")
         manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
         command = "python3 tools/cluster_acceptance.py user@gpu-a user@gpu-b"
 
         self.assertTrue((ROOT / "tools" / "cluster_acceptance.py").is_file())
-        self.assertTrue((ROOT / "CLUSTER.md").is_file())
+        self.assertTrue((ROOT / "docs" / "CLUSTER.md").is_file())
         self.assertTrue((ROOT / "src" / "bk" / "admin_cluster.py").is_file())
         self.assertTrue((ROOT / "src" / "bk" / "admin_command.py").is_file())
         self.assertIn(command, english)
         self.assertIn(command, chinese)
         self.assertIn("tools/cluster_acceptance.py", releasing)
-        self.assertIn("include CLUSTER.md", manifest)
+        self.assertIn("recursive-include docs *.md", manifest)
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertIn('"bk/admin_cluster.py"', workflow)
         self.assertIn('"bk/admin_command.py"', workflow)
@@ -179,11 +179,11 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertNotIn("defaults to open cooperative access", security)
 
     def test_telemetry_contract_is_packaged_and_linked(self):
-        telemetry = (ROOT / "TELEMETRY.md").read_text(encoding="utf-8")
+        telemetry = (ROOT / "docs" / "TELEMETRY.md").read_text(encoding="utf-8")
         manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-        self.assertIn("include TELEMETRY.md", manifest)
+        self.assertIn("recursive-include docs *.md", manifest)
         self.assertIn("gpubk.usage.v1", telemetry)
         self.assertIn("TelemetrySink", telemetry)
         self.assertIn("TELEMETRY.md", readme)
@@ -191,8 +191,8 @@ class ReleaseConfigurationTests(unittest.TestCase):
     def test_release_docs_require_stable_scheduled_job_device_binding(self):
         readme = public_docs("en")
         security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
-        releasing = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
-        telemetry = (ROOT / "TELEMETRY.md").read_text(encoding="utf-8")
+        releasing = (ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8")
+        telemetry = (ROOT / "docs" / "TELEMETRY.md").read_text(encoding="utf-8")
         protocol = (
             ROOT / "src" / "bk" / "data" / "codex-skill" / "gpubk"
             / "references" / "protocol.md"
@@ -206,12 +206,12 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("capabilities.stable_device_identifier", protocol)
 
     def test_upgrade_guide_is_packaged_and_linked(self):
-        guide = (ROOT / "UPGRADING.md").read_text(encoding="utf-8")
+        guide = (ROOT / "docs" / "UPGRADING.md").read_text(encoding="utf-8")
         manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
         english = (ROOT / "README.md").read_text(encoding="utf-8")
         chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
 
-        self.assertIn("include UPGRADING.md", manifest)
+        self.assertIn("recursive-include docs *.md", manifest)
         self.assertIn("UPGRADING.md", english)
         self.assertIn("UPGRADING.md", chinese)
         self.assertIn("0.1.x to 0.2.x", guide)
@@ -408,7 +408,7 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertEqual(license_digest, APACHE_2_NORMALIZED_SHA256)
 
     def test_release_docs_use_a_draft_first_immutable_github_release(self):
-        guide = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
+        guide = (ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8")
 
         self.assertIn("Enable GitHub release immutability", guide)
         self.assertIn("creates a draft GitHub Release", guide)

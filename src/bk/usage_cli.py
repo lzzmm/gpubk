@@ -334,6 +334,17 @@ def _print_personal_dashboard(item: dict) -> None:
         f"  PEAK VRAM {peak:<8} AVG SM {avg_text:<7} VIOLATION "
         + style(violation_text, violation_role, enabled=colors)
     )
+    verified = max(0, int(item.get("verified_gpu_seconds", 0)))
+    inferred = max(0, int(item.get("inferred_gpu_seconds", 0)))
+    ambiguous = max(0, int(item.get("ambiguous_gpu_seconds", 0)))
+    print(
+        "  IDENTITY "
+        + style(f"verified {format_usage_duration(verified)}", "success", enabled=colors)
+        + "  "
+        + style(f"inferred {format_usage_duration(inferred)}", "warning", enabled=colors)
+        + "  "
+        + style(f"ambiguous {format_usage_duration(ambiguous)}", "error", enabled=colors)
+    )
     workloads = ", ".join(
         str(workload.get("label", "?")) for workload in item.get("workloads", [])[:4]
     )

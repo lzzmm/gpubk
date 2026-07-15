@@ -120,17 +120,17 @@ bk c 2 1h
 ```
 
 如果当前机器只是登录节点，不执行 `cluster init`，直接用 `bk c probe` 添加 GPU
-服务器。正式部署前请阅读 [CLUSTER.md](CLUSTER.md)，其中说明了节点身份、UID 映射、
+服务器。正式部署前请阅读 [CLUSTER.md](docs/CLUSTER.md)，其中说明了节点身份、UID 映射、
 故障行为、NFS 历史导出和定时任务。
 
 ## 详细文档
 
 - [中文管理员与用户完整手册](https://github.com/lzzmm/gpubk/blob/main/docs/GUIDE.zh-CN.md)
 - [English complete guide](https://github.com/lzzmm/gpubk/blob/main/docs/GUIDE.md)
-- [升级说明](UPGRADING.md)
+- [升级说明](docs/UPGRADING.md)
 - [安全模型](SECURITY.md)
-- [多机部署](CLUSTER.md)
-- [监测数据格式](TELEMETRY.md)
-- [发布流程](RELEASING.md)
+- [多机部署](docs/CLUSTER.md)
+- [监测数据格式](docs/TELEMETRY.md)
+- [发布流程](docs/RELEASING.md)
 
 本项目采用 [Apache-2.0](LICENSE) 许可证。

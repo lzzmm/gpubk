@@ -1,12 +1,8 @@
 include CHANGELOG.md
-include CLUSTER.md
 include LICENSE
 include README.zh-CN.md
 recursive-include docs *.md
-include RELEASING.md
 include SECURITY.md
-include TELEMETRY.md
-include UPGRADING.md
 recursive-include .github/workflows *.yml
 recursive-include src/bk/data *
 recursive-include tests test_*.py

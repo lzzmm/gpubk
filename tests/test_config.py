@@ -10,6 +10,19 @@ from bk.config import Config, load_config
 
 
 class ConfigTests(unittest.TestCase):
+    def test_container_attribution_groups_are_normalized(self):
+        config = Config(
+            Path("/tmp/container-groups"),
+            container_attribution_groups=("docker", "sudo", "docker"),
+        )
+
+        self.assertEqual(config.container_attribution_groups, ("docker", "sudo"))
+        with self.assertRaisesRegex(ValueError, "group name"):
+            Config(
+                Path("/tmp/container-groups"),
+                container_attribution_groups=("bad group",),
+            )
+
     def test_booking_policy_is_validated_and_normalized(self):
         config = Config(
             Path("/tmp/policy"),
