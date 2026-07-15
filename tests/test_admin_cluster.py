@@ -48,6 +48,8 @@ class AdminClusterTests(unittest.TestCase):
         document = json.loads(output.getvalue())
         self.assertEqual(document["schema_version"], "gpubk.cluster.v1")
         self.assertEqual(document["nodes"][0]["name"], "gpu-a")
+        self.assertEqual(document["nodes"][0]["executable"], "/usr/local/bin/bk")
+        self.assertEqual(document["nodes"][0]["timeout_seconds"], 8)
 
         with (
             mock.patch("bk.admin_cluster.os.geteuid", return_value=1001),
@@ -177,6 +179,78 @@ class AdminClusterTests(unittest.TestCase):
         enabled = write.call_args.args[0]
         self.assertTrue(enabled.node("gpu-b").enabled)
         self.assertEqual(enabled.principals, current.principals)
+
+    def test_set_updates_endpoint_policy_without_losing_identity_state(self):
+        path = Path("/etc/gpubk/cluster.json")
+        remote = self.remote_node()
+        current = ClusterConfig(
+            path,
+            (self.local_node(), remote),
+            (
+                {
+                    "id": "alice",
+                    "members": [{"node_id": remote.node_id, "uid": 1002}],
+                },
+            ),
+            Path("/srv/gpubk-history"),
+        )
+        with (
+            mock.patch("bk.admin_cluster.os.geteuid", return_value=0),
+            mock.patch("bk.admin_cluster.load_cluster_config", return_value=current),
+            mock.patch("bk.admin_cluster.write_cluster_config") as write,
+            redirect_stdout(StringIO()),
+        ):
+            self.assertEqual(
+                run_admin_cli(
+                    [
+                        "cluster",
+                        "set",
+                        "gpu-b",
+                        "--target",
+                        "new-gpu-b",
+                        "--executable",
+                        "/opt/gpubk/bin/bk",
+                        "--priority",
+                        "3",
+                        "--timeout",
+                        "12",
+                        "--yes",
+                    ]
+                ),
+                0,
+            )
+        updated = write.call_args.args[0]
+        node = updated.node("gpu-b")
+        self.assertEqual(node.node_id, remote.node_id)
+        self.assertEqual(node.target, "new-gpu-b")
+        self.assertEqual(node.executable, "/opt/gpubk/bin/bk")
+        self.assertEqual(node.priority, 3)
+        self.assertEqual(node.timeout_seconds, 12)
+        self.assertEqual(updated.principals, current.principals)
+        self.assertEqual(updated.history_root, current.history_root)
+
+    def test_set_requires_a_change_and_rejects_target_on_local_node(self):
+        current = ClusterConfig(
+            Path("/etc/gpubk/cluster.json"),
+            (self.local_node(), self.remote_node()),
+        )
+        for arguments, message in (
+            (["cluster", "set", "gpu-b", "--yes"], "requires"),
+            (
+                ["cluster", "set", "gpu-a", "--target", "gpu-a", "--yes"],
+                "local.*SSH target",
+            ),
+        ):
+            with (
+                mock.patch("bk.admin_cluster.os.geteuid", return_value=0),
+                mock.patch(
+                    "bk.admin_cluster.load_cluster_config", return_value=current
+                ),
+                mock.patch("bk.admin_cluster.write_cluster_config") as write,
+                self.assertRaisesRegex(BookingError, message),
+            ):
+                run_admin_cli(arguments)
+            write.assert_not_called()
 
     def test_status_lists_identity_members_and_unmap_rejects_unknown_pair(self):
         local = self.local_node()

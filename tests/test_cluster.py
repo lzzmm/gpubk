@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 from unittest import mock
@@ -312,6 +312,27 @@ class ClusterTests(unittest.TestCase):
                 ):
                     run_cluster_cli(arguments)
                 parallel.assert_not_called()
+
+    def test_friendly_booking_start_is_normalized_once_before_node_queries(self):
+        node = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        normalized = datetime(2030, 1, 1, 12, 30, tzinfo=timezone.utc)
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch(
+                "bk.cluster.parse_friendly_start", return_value=normalized
+            ) as parse,
+            mock.patch("bk.cluster._parallel", return_value=[]) as parallel,
+            self.assertRaisesRegex(BookingError, "no cluster node"),
+        ):
+            run_cluster_cli(["rec", "1", "30m", "-t", "tomorrow 9"])
+        parse.assert_called_once_with("tomorrow 9")
+        self.assertEqual(
+            parallel.call_args.args[1][
+                parallel.call_args.args[1].index("--start") + 1
+            ],
+            "2030-01-01T12:30:00Z",
+        )
 
     def test_automatic_cluster_job_preserves_command_and_skips_legacy_nodes(self):
         legacy = ClusterNode("legacy", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
@@ -1014,6 +1035,7 @@ class ClusterTests(unittest.TestCase):
         ):
             self.assertEqual(run_cluster_cli(["check", "--jobs"]), 3)
         self.assertIn("scheduled-command worker is not running", output.getvalue())
+        self.assertIn("systemctl --user enable --now", output.getvalue())
 
         payload["worker"] = {"state": "running", "running": True}
         output = StringIO()
@@ -1066,6 +1088,49 @@ class ClusterTests(unittest.TestCase):
         ):
             self.assertEqual(run_cluster_cli(["check"]), 0)
         self.assertIn("scheduled command is pending", output.getvalue())
+        self.assertIn("bk service install worker", output.getvalue())
+
+    def test_status_adds_job_column_only_when_a_scheduled_command_exists(self):
+        node = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+
+        def payload(reservation):
+            return {
+                "generated_at": to_iso(utc_now()),
+                "software": {"version": "0.2.1"},
+                "actor": {"uid": 1001, "username": "alice"},
+                "policy": {"gpu_count": 1},
+                "reservations": [reservation],
+            }
+
+        reservation = {
+            "id": "reservation-id",
+            "short_id": "12345678",
+            "username": "alice",
+            "mode": "exclusive",
+            "gpus": [0],
+            "start_at": "2030-01-01T00:00:00Z",
+            "end_at": "2030-01-01T00:30:00Z",
+        }
+        outputs = []
+        for context in (
+            payload(reservation),
+            payload({**reservation, "job": {"status": "pending"}}),
+        ):
+            output = StringIO()
+            with (
+                mock.patch("bk.cluster.load_cluster_config", return_value=config),
+                mock.patch(
+                    "bk.cluster.query_cluster_contexts",
+                    return_value=[NodeReply(node, context, None)],
+                ),
+                redirect_stdout(output),
+            ):
+                self.assertEqual(run_cluster_cli(["status"]), 0)
+            outputs.append(output.getvalue())
+        self.assertNotIn(" Job ", outputs[0])
+        self.assertIn(" Job ", outputs[1])
+        self.assertIn("pending", outputs[1])
 
     def test_malformed_node_does_not_block_a_healthy_recommendation(self):
         malformed = ClusterNode("malformed", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
@@ -1781,6 +1846,50 @@ class ClusterTests(unittest.TestCase):
         self.assertEqual(payload["kind"], "cluster-mutation-result")
         self.assertEqual(payload["node"], "gpu-a")
         self.assertEqual(payload["operation_id"], "cancel-1")
+
+    def test_friendly_edit_start_is_normalized_before_remote_write(self):
+        node = ClusterNode("gpu-a", "a" * 20, "ssh", "gpu-a", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        context = NodeReply(
+            node,
+            {
+                "capabilities": {
+                    "federated_node_identity": True,
+                    "idempotent_edit": True,
+                    "operation_status": True,
+                }
+            },
+            None,
+        )
+        result = NodeReply(
+            node,
+            {"status": "updated", "reservation": {"short_id": "12345678"}},
+            None,
+        )
+        normalized = datetime(2030, 1, 2, 1, 0, tzinfo=timezone.utc)
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._invoke", return_value=context),
+            mock.patch(
+                "bk.cluster.parse_friendly_start", return_value=normalized
+            ) as parse,
+            mock.patch(
+                "bk.cluster._invoke_idempotent_write", return_value=result
+            ) as write,
+            redirect_stdout(StringIO()),
+        ):
+            self.assertEqual(
+                run_cluster_cli(
+                    ["edit", "gpu-a/12345678", "-t", "tomorrow 9"]
+                ),
+                0,
+            )
+        parse.assert_called_once_with("tomorrow 9")
+        arguments = write.call_args.args[1]
+        self.assertEqual(
+            arguments[arguments.index("--start") + 1],
+            "2030-01-02T01:00:00Z",
+        )
 
     def test_disabled_node_rejects_edit_and_cancel_without_transport(self):
         node = ClusterNode(

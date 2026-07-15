@@ -79,6 +79,7 @@ DEFAULT_COMMAND_LINK = Path("/usr/local/bin/bk")
 CONFIG_DIRECTORY_MODE = 0o755
 CONFIG_FILE_MODE = 0o644
 INSTALL_MANIFEST_NAME = "install.json"
+CLUSTER_CATALOG_NAME = "cluster.json"
 TRANSFER_JOURNAL_NAME = "transfer.json"
 INSTALL_MANIFEST_MODE = 0o600
 BROKER_SOCKET_DIRECTORY_MODE = 0o755
@@ -2423,7 +2424,15 @@ def inspect_admin_uninstall(
         allowed = {config_file.name, manifest_path.name}
         if backup_path is not None:
             allowed.add(backup_path.name)
+        cluster_catalog = _validated_managed_cluster_catalog(
+            config_file.parent / CLUSTER_CATALOG_NAME,
+            expected_owner=expected_owner,
+        )
+        if cluster_catalog is not None:
+            allowed.add(cluster_catalog.name)
         _validate_directory_entries(config_file.parent, allowed, "configuration")
+    else:
+        cluster_catalog = None
     if not socket_directory_before["exists"]:
         _validate_directory_entries(
             broker_socket.parent, {broker_socket.name}, "broker socket"
@@ -2484,6 +2493,8 @@ def inspect_admin_uninstall(
     if not socket_directory_before["exists"]:
         actions.append(f"remove socket directory {broker_socket.parent}")
     if not config_directory_before["exists"]:
+        if cluster_catalog is not None:
+            actions.append(f"remove validated cluster catalog {cluster_catalog}")
         actions.append(f"remove configuration directory {config_file.parent}")
     return {
         "schema_version": ADMIN_SCHEMA_VERSION,
@@ -2501,6 +2512,9 @@ def inspect_admin_uninstall(
         "login_hook_managed": login_hook_managed,
         "login_hook_path": login_hook["path"],
         "command_link": command_link,
+        "cluster_catalog": (
+            str(cluster_catalog) if cluster_catalog is not None else None
+        ),
         "actions": actions,
         "blockers": blockers,
     }
@@ -2541,6 +2555,7 @@ def apply_admin_uninstall(
     login_hook_path = login_hook_path or DEFAULT_LOGIN_HOOK_PATH
     login_hook_removed = False
     command_link_removed = False
+    cluster_catalog_removed = False
 
     if inspection["login_hook_managed"]:
         result = apply_login_hook_uninstall(
@@ -2571,6 +2586,18 @@ def apply_admin_uninstall(
         else:
             data_dir.rmdir()
             fsync_directory(data_dir.parent)
+
+    cluster_catalog_value = inspection.get("cluster_catalog")
+    if cluster_catalog_value is not None:
+        cluster_catalog = _validated_managed_cluster_catalog(
+            config_file.parent / CLUSTER_CATALOG_NAME,
+            expected_owner=expected_owner,
+        )
+        if cluster_catalog is None or str(cluster_catalog) != cluster_catalog_value:
+            raise BookingError("managed cluster catalog changed during uninstall")
+        cluster_catalog.unlink()
+        fsync_directory(cluster_catalog.parent)
+        cluster_catalog_removed = True
 
     config_before = _validated_config_state(manifest["config_before"])
     if config_before["exists"]:
@@ -2612,6 +2639,7 @@ def apply_admin_uninstall(
         "manifest_removed": True,
         "login_hook_removed": login_hook_removed,
         "command_link_removed": command_link_removed,
+        "cluster_catalog_removed": cluster_catalog_removed,
         "accounts_changed": False,
     }
 
@@ -4270,6 +4298,28 @@ def _validated_backup_path(manifest: dict, config_file: Path) -> Optional[Path]:
                 os.close(fd)
         if _sha256(payload) != digest:
             raise BookingError(f"configuration backup checksum drifted: {path}")
+    return path
+
+
+def _validated_managed_cluster_catalog(
+    path: Path,
+    *,
+    expected_owner: int,
+) -> Optional[Path]:
+    if not os.path.lexists(path):
+        return None
+    fd = open_existing_regular(path, expected_mode=CONFIG_FILE_MODE)
+    try:
+        metadata = os.fstat(fd)
+        if metadata.st_uid != expected_owner:
+            raise BookingError(f"cluster catalog owner drifted: {path}")
+    finally:
+        os.close(fd)
+
+    # Import lazily because admin_cluster imports this module's public entrypoint.
+    from .cluster import load_cluster_config
+
+    load_cluster_config(path)
     return path
 
 

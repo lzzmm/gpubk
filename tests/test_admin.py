@@ -1228,6 +1228,111 @@ class AdminInitTests(unittest.TestCase):
             self.assertTrue((root / "var" / "lib").is_dir())
             self.assertTrue((root / "run").is_dir())
 
+    def test_uninstall_removes_valid_cluster_catalog_from_created_config_directory(self):
+        from bk.cluster import ClusterConfig, ClusterNode, write_cluster_config
+        from bk.node_identity import stable_node_identity
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.prepare_parents(root)
+            plan = self.plan(root)
+            apply_admin_init(plan, require_root=False)
+            catalog = plan.config_file.parent / "cluster.json"
+            identity = stable_node_identity()
+            write_cluster_config(
+                ClusterConfig(
+                    catalog,
+                    (
+                        ClusterNode(
+                            "gpu-a",
+                            identity["id"],
+                            "local",
+                            None,
+                            "/usr/local/bin/bk",
+                            0,
+                            8,
+                        ),
+                    ),
+                ),
+                require_root=False,
+            )
+
+            preview = inspect_admin_uninstall(
+                plan.config_file,
+                purge_data=True,
+                expected_owner=os.geteuid(),
+            )
+            self.assertEqual(preview["status"], "ready")
+            self.assertEqual(preview["cluster_catalog"], str(catalog))
+
+            result = apply_admin_uninstall(
+                plan.config_file,
+                purge_data=True,
+                require_root=False,
+            )
+
+            self.assertTrue(result["cluster_catalog_removed"])
+            self.assertFalse(plan.config_file.parent.exists())
+
+    def test_uninstall_preserves_cluster_catalog_in_preexisting_config_directory(self):
+        from bk.cluster import ClusterConfig, ClusterNode, write_cluster_config
+        from bk.node_identity import stable_node_identity
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.prepare_parents(root)
+            plan = self.plan(root)
+            plan.config_file.parent.mkdir(mode=0o755)
+            apply_admin_init(plan, require_root=False)
+            catalog = plan.config_file.parent / "cluster.json"
+            identity = stable_node_identity()
+            write_cluster_config(
+                ClusterConfig(
+                    catalog,
+                    (
+                        ClusterNode(
+                            "gpu-a",
+                            identity["id"],
+                            "local",
+                            None,
+                            "/usr/local/bin/bk",
+                            0,
+                            8,
+                        ),
+                    ),
+                ),
+                require_root=False,
+            )
+
+            result = apply_admin_uninstall(
+                plan.config_file,
+                purge_data=True,
+                require_root=False,
+            )
+
+            self.assertFalse(result["cluster_catalog_removed"])
+            self.assertTrue(catalog.is_file())
+
+    def test_uninstall_refuses_invalid_named_cluster_catalog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.prepare_parents(root)
+            plan = self.plan(root)
+            apply_admin_init(plan, require_root=False)
+            catalog = plan.config_file.parent / "cluster.json"
+            catalog.write_text("{}\n", encoding="utf-8")
+            catalog.chmod(0o644)
+
+            with self.assertRaisesRegex(
+                BookingError, "unsupported or invalid cluster catalog"
+            ):
+                inspect_admin_uninstall(
+                    plan.config_file,
+                    purge_data=True,
+                    expected_owner=os.geteuid(),
+                )
+            self.assertTrue(catalog.is_file())
+
     def test_uninstall_requires_explicit_purge_for_nonempty_data(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -154,6 +154,9 @@ fields. Each node entry includes `rejected_reason` and `write_compatible`.
 stable operation ID, and the unchanged destination `bk.agent.v1` result. Automation must
 inspect `result.warnings`; human cluster output prints the same distinct warnings with the
 destination node name, while structured output does not duplicate them on stderr.
+Human `-t/--at` input is parsed once on the client and the same canonical UTC start is
+sent to every node. Agents should use exact ISO 8601 through `--start` so retries remain
+independent of locale, clock passage, and natural-language parsing.
 Cluster edit and cancel accept caller-supplied stable operation IDs and return a
 `cluster-mutation-result` containing the owning node and unchanged destination result.
 `cluster-check` reports per-node reachability, stable identity, actor attribution,
@@ -175,12 +178,19 @@ prefix. Cross-node usage combines UIDs only when the administrator catalog maps 
 `(node_id, uid)` pairs to the same principal; identical usernames remain separate.
 SSH is the authentication boundary and the remote process's numeric UID is authoritative.
 An explicit operation-ID retry is fail-closed when a disabled or unreachable node prevents
-the client from proving where that operation was committed. Never reroute that retry.
+the client from proving where that operation was committed. Never reroute that retry. If
+the original destination is known, retry the exact immutable intent with the same operation
+ID through `bk @NODE`; do not send it through automatic cluster placement again.
 For a cluster scheduled command, the client injects its operation ID and structured-output
 flag only before the `--` delimiter and forwards every workload argument after the delimiter
 unchanged. Routing additionally requires `scheduled_jobs`, `scheduled_job_path_snapshot`,
 and `private_job_specs`; ordinary reservation writes continue to use the smaller booking
 capability set so rolling read-only compatibility is preserved.
+
+Administrator catalog maintenance keeps node IDs immutable. Before changing an SSH target,
+probe the replacement endpoint and verify that its discovered ID matches the catalog, then
+use `bk admin cluster set`. Priority is only a tie-break after earliest start; it must not
+delay a valid earlier placement.
 
 An operation ID identifies one immutable write intent for the current UID, including a scheduled
 command's submission `PATH`. Exact retries return

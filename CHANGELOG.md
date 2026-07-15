@@ -4,6 +4,17 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.1 - 2026-07-15
 
+- Make full managed uninstall recognize and remove a validated standard cluster catalog
+  when GPUBK originally created the configuration directory, while preserving catalogs
+  in pre-existing directories and continuing to reject unknown privileged files.
+- Add `bk admin cluster set` for in-place endpoint, executable, timeout, and priority
+  maintenance without discarding stable identity mappings or archived history, and show
+  those effective fields in administrator status output.
+- Accept single-host-style `-t/--at` friendly times for cluster booking and editing,
+  normalize them once on the client, and send one canonical UTC start to every node.
+- Show scheduled-command state in cluster status only when relevant, include actionable
+  worker startup guidance in health warnings, and pin unresolved retry instructions to
+  the original node.
 - Add a read-only `bk c probe NAME SSH_TARGET` onboarding check that works before a
   catalog exists, validates the SSH endpoint's stable identity and write readiness,
   and prints a reviewed root-owned catalog command. Add `bk c check --jobs` for

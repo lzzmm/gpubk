@@ -698,7 +698,17 @@ bk c check --jobs       # additionally require this user's worker on every node
 bk c rec 1 30m
 bk c 1 30m -j
 bk c x 1 30m          # exclusive, earliest node
+bk c 1 30m -t "tomorrow 9"  # exact friendly local start
 bk c 1 2h -- python /absolute/path/train.py
+```
+
+If an SSH alias, remote executable, timeout, or tie-break priority changes, update the
+node in place so its stable identity and UID mappings remain intact:
+
+```bash
+bk c probe gpu-b new-gpu-b        # first confirm the stable node ID is unchanged
+sudo bk admin cluster set gpu-b --target new-gpu-b --timeout 12 --yes
+sudo bk admin cluster set gpu-b --priority 10 --yes
 ```
 
 `bk c -h`, `bk c probe -h`, and every long-form subcommand's `-h` work before this
@@ -740,6 +750,10 @@ test an already-built artifact. The command writes a mode-`0600` JSON report und
 This transport test does not replace the final live checks: run the ordinary single-host
 acceptance on every GPU server, verify a second user's authorization, run one approved live GPU
 workload, and verify service restart/reboot behavior before calling a release stable.
+
+A full managed uninstall also understands the standard root-owned cluster catalog. If
+GPUBK originally created `/etc/gpubk`, the validated catalog is removed with that
+directory; catalogs in a configuration directory that predated GPUBK are preserved.
 
 The root-owned catalog contains endpoints, stable node IDs, priorities, and optional
 identity mappings, but no SSH keys. `bk c` also shows each reachable node's GPUBK version,

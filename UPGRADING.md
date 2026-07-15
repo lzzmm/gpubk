@@ -43,6 +43,11 @@ a force-link command over an unknown existing path. `admin install --no-start` i
 available for hosts without systemd, but requires the managed processes to already be
 stopped and leaves them stopped.
 
+If the installer originally created `/etc/gpubk`, a standard root-owned
+`/etc/gpubk/cluster.json` created later by `bk admin cluster` is schema-validated and
+removed by the full uninstall. A configuration directory that existed before GPUBK was
+installed is preserved with its cluster catalog. Unknown entries still block removal.
+
 Then reconcile and verify again. The root-owned install manifest, configuration,
 reservations, audit log, and usage history remain in place throughout. Unit files are
 refreshed only when their current checksums still match the manifest. Per-user worker

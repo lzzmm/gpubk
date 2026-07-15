@@ -66,6 +66,17 @@ sudo bk admin cluster disable gpu-b --yes
 sudo bk admin cluster enable gpu-b --yes
 ```
 
+Update a changed SSH alias, candidate path, timeout, or tie-break priority in place.
+This keeps the stable node identity, global-principal mappings, and archived history:
+
+```bash
+bk c probe gpu-b new-gpu-b
+# Confirm the probe reports the same stable node ID, then update the endpoint.
+sudo bk admin cluster set gpu-b --target new-gpu-b --timeout 12 --yes
+sudo bk admin cluster set gpu-b --priority 10 --yes
+bk c check
+```
+
 A disabled node is not contacted and cannot receive new cluster writes. Its endpoint,
 stable identity, principal mappings, and archived history remain in the version-1
 catalog. Old catalogs have no `enabled` field and therefore continue to treat every
@@ -81,6 +92,9 @@ node as enabled.
 - `bk c 2 1h` submits to the node with the earliest legal start; `bk c x 2 1h`
   requests exclusive mode. The longer `bk cluster book ...` form remains valid. A
   reservation never spans hosts.
+- `-t/--at` accepts the same local-friendly exact times as single-host booking. The
+  client parses the value once and sends one canonical UTC instant to every node;
+  `--start` remains the exact ISO form for Agents and scripts.
 - `bk c 1 2h -- python /absolute/path/train.py` attaches a private scheduled command
   to the automatically selected node. GPUBK options stay before `--`; every argument
   after it is preserved for the workload. Nodes without scheduled-job and private-spec
@@ -93,6 +107,8 @@ node as enabled.
   node name. In particular, do not ignore a stopped or unseen scheduled-command worker:
   the reservation exists, but the command cannot launch until that user's worker runs.
   JSON keeps the same warnings inside the destination `result.warnings` array.
+- `bk c` keeps the reservation table compact for reservation-only use and adds a `Job`
+  column automatically when any scheduled command is present.
 - Node-qualified IDs use `NODE/SHORT_ID`; the stored booking UUID is unchanged.
 - Ties are resolved by start time, configured node priority, live-load confidence,
   then node name. A remote broker performs the final locked validation.
@@ -217,7 +233,8 @@ identity and avoids creating a second writer.
   failure, the client queries that ID on the same node. It may replay the same write
   once on that node only when the query confirms that no operation is visible.
 - If both the write and operation query are unavailable, the result is reported as
-  unresolved with its operation ID; the client does not guess or submit elsewhere.
+  unresolved with its operation ID; the client does not guess or submit elsewhere and
+  tells the user to retry against the original `@NODE` only.
 - Clock skew is reported. Exact starts are rejected when node clocks differ beyond
   policy. Implicit earliest-slot requests compare node-reported waiting durations,
   so a fixed clock offset does not by itself change the selected node.

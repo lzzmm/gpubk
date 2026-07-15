@@ -58,6 +58,49 @@ def add_admin_cluster_parser(commands) -> None:
     cluster_add.add_argument("--cluster-file", type=Path)
     cluster_add.add_argument("--yes", action="store_true")
 
+    cluster_set = cluster_commands.add_parser(
+        "set",
+        aliases=["update"],
+        help="update one node without changing its stable identity",
+        description=(
+            "Update connection and routing settings in place. Probe a changed SSH "
+            "target first; the catalog's stable node identity is never rewritten."
+        ),
+    )
+    cluster_set.add_argument("name", help="configured cluster node name")
+    cluster_set.add_argument(
+        "--target",
+        metavar="USER@HOST",
+        help="replacement OpenSSH target or host alias (SSH nodes only)",
+    )
+    cluster_set.add_argument(
+        "--executable",
+        metavar="PATH",
+        help="absolute path to bk on the destination node",
+    )
+    cluster_set.add_argument(
+        "--priority",
+        metavar="N",
+        type=int,
+        help="nonnegative tie-break priority; lower values win at the same start time",
+    )
+    cluster_set.add_argument(
+        "--timeout",
+        metavar="SECONDS",
+        type=float,
+        help="per-call timeout from 1 to 300 seconds",
+    )
+    cluster_set.add_argument(
+        "--cluster-file",
+        type=Path,
+        help=argparse.SUPPRESS,
+    )
+    cluster_set.add_argument(
+        "--yes",
+        action="store_true",
+        help="apply without an interactive confirmation",
+    )
+
     cluster_remove = cluster_commands.add_parser(
         "remove",
         help="remove one node by name",
@@ -321,6 +364,8 @@ def _updated_cluster_config(
                 args.timeout,
             )
         )
+    elif args.cluster_action in {"set", "update"}:
+        nodes = _update_cluster_node(current, args)
     elif args.cluster_action == "remove":
         nodes, principals = _remove_cluster_node(current, principals, args.name)
     elif args.cluster_action in {"enable", "disable"}:
@@ -345,6 +390,28 @@ def _copy_principals(current: ClusterConfig) -> list[dict]:
         {"id": item["id"], "members": [dict(member) for member in item["members"]]}
         for item in current.principals
     ]
+
+
+def _update_cluster_node(
+    current: ClusterConfig,
+    args: argparse.Namespace,
+) -> list[ClusterNode]:
+    node = current.node(args.name)
+    changes = {
+        "target": args.target,
+        "executable": args.executable,
+        "priority": args.priority,
+        "timeout_seconds": args.timeout,
+    }
+    selected = {key: value for key, value in changes.items() if value is not None}
+    if not selected:
+        raise BookingError(
+            "cluster set requires --target, --executable, --priority, or --timeout"
+        )
+    if node.transport == "local" and "target" in selected:
+        raise BookingError("a local cluster node cannot define an SSH target")
+    updated = replace(node, **selected)
+    return [updated if item.name == node.name else item for item in current.nodes]
 
 
 def _remove_cluster_node(
@@ -484,7 +551,9 @@ def print_admin_cluster(config: ClusterConfig, *, json_output: bool) -> int:
                 "node_id": node.node_id,
                 "transport": node.transport,
                 "target": node.target,
+                "executable": node.executable,
                 "priority": node.priority,
+                "timeout_seconds": node.timeout_seconds,
                 "enabled": node.enabled,
             }
             for node in config.nodes
@@ -501,7 +570,8 @@ def print_admin_cluster(config: ClusterConfig, *, json_output: bool) -> int:
         state = "enabled" if node.enabled else "disabled"
         print(
             f"  {node.name:<16} {node.node_id} {node.transport:<5} "
-            f"{state:<9} priority={node.priority} endpoint={endpoint}"
+            f"{state:<9} priority={node.priority} timeout={node.timeout_seconds:g}s "
+            f"endpoint={endpoint} executable={node.executable}"
         )
     if config.principals:
         names = {node.node_id: node.name for node in config.nodes}

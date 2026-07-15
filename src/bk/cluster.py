@@ -30,8 +30,10 @@ from .node_identity import stable_node_identity
 from .timeparse import (
     format_local,
     parse_duration_seconds,
+    parse_friendly_start,
     parse_iso,
     parse_memory_mb,
+    to_iso,
     utc_now,
 )
 from .worker_status import WORKER_TERMINAL_JOB_STATES
@@ -116,7 +118,7 @@ class ClusterBookingIntent:
             count=args.count,
             duration=args.duration,
             mode="exclusive" if args.mode in {"x", "exclusive"} else "shared",
-            start=args.start,
+            start=_normalized_cluster_start(args),
             gpu=args.gpu,
             exclude_gpu=args.exclude_gpu,
             memory=args.mem or args.memory,
@@ -584,9 +586,15 @@ def _cluster_status(config: ClusterConfig, *, json_output: bool = False) -> int:
         reservations.extend((reply.node.name, item) for item in node_reservations)
     if reservations:
         print("\nReservations")
+        show_jobs = any(
+            isinstance(reservation.get("job"), dict)
+            for _node_name, reservation in reservations
+        )
         print(
             f"{'ID':<25} {'Own':<3} {'User':<16} {'Mode':<6} {'Req':>5} "
-            f"{'VRAM':>8} {'GPU':<10} {'Start':<22} {'End':<22}"
+            f"{'VRAM':>8} {'GPU':<10} "
+            + (f"{'Job':<10} " if show_jobs else "")
+            + f"{'Start':<22} {'End':<22}"
         )
         for node_name, reservation in sorted(
             reservations,
@@ -594,6 +602,9 @@ def _cluster_status(config: ClusterConfig, *, json_output: bool = False) -> int:
         ):
             short_id = reservation.get("short_id") or str(reservation.get("id", ""))[:8]
             qualified = f"{node_name}/{short_id}"
+            job_text = (
+                f"{_reservation_job_text(reservation):<10} " if show_jobs else ""
+            )
             print(
                 f"{_clip(qualified, 25):<25} "
                 f"{('*' if reservation.get('mine') is True else '-'):<3} "
@@ -602,6 +613,7 @@ def _cluster_status(config: ClusterConfig, *, json_output: bool = False) -> int:
                 f"{_reservation_request_text(reservation):>5} "
                 f"{_reservation_memory_text(reservation):>8} "
                 f"{_clip(_gpu_text(reservation.get('gpus')), 10):<10} "
+                f"{job_text}"
                 f"{_clip(_local_time(reservation.get('start_at')), 22):<22} "
                 f"{_clip(_local_time(reservation.get('end_at')), 22):<22}"
             )
@@ -816,7 +828,9 @@ def _cluster_check(
         if require_jobs and worker_value.get("running") is not True:
             worker_error = (
                 "scheduled-command worker is not running "
-                f"(state={worker_value.get('state') or 'unknown'})"
+                f"(state={worker_value.get('state') or 'unknown'}); on that node run "
+                "'bk service install worker' then "
+                "'systemctl --user enable --now bk-worker.service'"
             )
             if check["status"] == "failed" and check["error"]:
                 check["error"] = f"{check['error']}; {worker_error}"
@@ -826,7 +840,9 @@ def _cluster_check(
         elif pending_job and worker_value.get("running") is not True:
             check["warnings"].append(
                 "a scheduled command is pending but this SSH identity's worker "
-                f"is {worker_value.get('state') or 'unknown'}"
+                f"is {worker_value.get('state') or 'unknown'}; on that node run "
+                "'bk service install worker' then "
+                "'systemctl --user enable --now bk-worker.service'"
             )
         checks.append(check)
 
@@ -1212,7 +1228,8 @@ def _submit_cluster_booking(
             )
         raise BookingError(
             f"cluster booking on {selected.node.name} is unresolved: {result.error}; "
-            f"retry the same request with --op-id {operation_id}"
+            "do not auto-route it again; retry the same request on the original "
+            f"node with 'bk @{selected.node.name} ... --op-id {operation_id}'"
         )
     payload = result.payload or {}
     reservation = payload.get("reservation", {})
@@ -1504,6 +1521,7 @@ def _cluster_edit(config: ClusterConfig, args: argparse.Namespace) -> int:
             for value in (
                 args.duration,
                 args.start,
+                args.at,
                 args.gpu,
                 args.exclude_gpu,
                 args.count,
@@ -1517,9 +1535,10 @@ def _cluster_edit(config: ClusterConfig, args: argparse.Namespace) -> int:
         raise BookingError("cluster edit requires at least one changed field")
     node, reservation_id = _qualified_reservation(config, args.reservation_id)
     arguments = []
+    normalized_start = _normalized_cluster_start(args)
     for flag, value in (
         ("--duration", args.duration),
-        ("--start", args.start),
+        ("--start", normalized_start),
         ("--gpu", args.gpu),
         ("--exclude-gpu", args.exclude_gpu),
         ("--count", str(args.count) if args.count is not None else None),
@@ -1842,6 +1861,13 @@ def _argument_value(argv: Sequence[str], option: str) -> Optional[str]:
     return None
 
 
+def _normalized_cluster_start(args: argparse.Namespace) -> Optional[str]:
+    friendly = getattr(args, "at", None)
+    if friendly is not None:
+        return to_iso(parse_friendly_start(friendly))
+    return getattr(args, "start", None)
+
+
 def _parse_cluster_config(path: Path, document: object) -> ClusterConfig:
     if (
         not isinstance(document, dict)
@@ -2007,8 +2033,15 @@ def _cluster_booking_parser(prog: str) -> argparse.ArgumentParser:
     parser.add_argument(
         "--mode", choices=["s", "shared", "x", "exclusive"], default="s"
     )
-    parser.add_argument(
-        "--start", help="exact ISO start; omitted means earliest on each node"
+    start = parser.add_mutually_exclusive_group()
+    start.add_argument(
+        "--start",
+        help="exact ISO start; omitted means earliest on each node",
+    )
+    start.add_argument(
+        "-t",
+        "--at",
+        help="exact local-friendly start: +30m, 20:00, 'tomorrow 09:00', or 07-13 20:00",
     )
     placement = parser.add_mutually_exclusive_group()
     placement.add_argument("-g", "--gpu")
@@ -2107,7 +2140,13 @@ def _cluster_edit_parser() -> argparse.ArgumentParser:
     parser.add_argument("reservation_id", metavar="NODE/ID")
     parser.add_argument("--op-id", help="stable retry-safe operation ID")
     parser.add_argument("-d", "--duration")
-    parser.add_argument("--start", help="exact ISO start unless --queue is used")
+    start = parser.add_mutually_exclusive_group()
+    start.add_argument("--start", help="exact ISO start unless --queue is used")
+    start.add_argument(
+        "-t",
+        "--at",
+        help="local-friendly start: +30m, 20:00, 'tomorrow 09:00', or 07-13 20:00",
+    )
     placement = parser.add_mutually_exclusive_group()
     placement.add_argument("-g", "--gpu")
     placement.add_argument("-e", "--exclude-gpu", "--exclude", dest="exclude_gpu")
@@ -2182,12 +2221,18 @@ First setup (administrator):
   bk c probe NODE SSH_TARGET
   sudo bk admin cluster add NODE SSH_TARGET STABLE_NODE_ID --yes
 
+Node maintenance (administrator):
+  bk c probe NODE NEW_SSH_TARGET
+  sudo bk admin cluster set NODE --target NEW_SSH_TARGET --yes
+  sudo bk admin cluster disable NODE --yes
+
 Everyday commands:
   bk c                       show all configured nodes and reservations
   bk c check                 verify access, identity, clocks, and safe writes
   bk c check --jobs          also require your worker on every enabled node
   bk c rec 2 1h              compare earliest legal placements without writing
   bk c 2 1h                  book the best single node in shared mode
+  bk c 2 1h -t "tomorrow 9"  book from one human-friendly time on every node
   bk c x 2 1h                book the best single node exclusively
   bk c 1 2h -- COMMAND       book and schedule a command on the selected node
   bk c u -s 7d               aggregate this SSH identity's sampled history
@@ -2198,6 +2243,7 @@ Everyday commands:
   bk c d NODE/ID             cancel your reservation on its owning node
 
 Each destination broker performs the final transaction. A reservation never spans nodes.
+Human -t times are resolved once on this client; Agents should use exact ISO --start.
 Run any subcommand with -h for its complete options.
 """
     )
@@ -2272,6 +2318,13 @@ def _reservation_memory_text(reservation: dict) -> str:
         gib = value / 1024
         return f"{gib:.0f}G" if gib.is_integer() else f"{gib:.1f}G"
     return f"{value}M"
+
+
+def _reservation_job_text(reservation: dict) -> str:
+    job = reservation.get("job")
+    if not isinstance(job, dict):
+        return "-"
+    return _clip(str(job.get("status") or "unknown"), 10)
 
 
 def _nonnegative_number(value: object) -> float:

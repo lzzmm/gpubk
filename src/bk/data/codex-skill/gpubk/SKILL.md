@@ -39,6 +39,8 @@ for reservation-only use while warning that an existing pending job lacks a runn
 Use `bk c rec COUNT DURATION --json` before a cross-node write and keep the
 returned node name attached to every reservation ID. Use `bk c COUNT DURATION --json`
 for automatic single-node placement or `bk @NODE ... --json` for an explicit node.
+Agents should pass exact ISO 8601 through `--start`. The human `-t/--at` form is
+resolved once by the client and is not a structured protocol field.
 To attach a private scheduled command, keep all GPUBK options before the delimiter:
 `bk c COUNT DURATION --op-id ID --json -- COMMAND ARG...`. Do not move retry flags
 after `--`; those arguments belong exclusively to the workload. Require the destination
@@ -52,7 +54,9 @@ its scheduled command will launch; report the node-specific remediation to the u
 Never merge identities by username; only administrator-provided `(node_id, uid)`
 principal mappings are authoritative. A cluster reservation never spans hosts.
 If an operation retry may belong to a disabled node, surface the unresolved routing
-error instead of generating a new operation ID or writing to another node.
+error instead of generating a new operation ID or writing to another node. When the
+original destination is known, retry the exact intent against `bk @NODE` with the same
+operation ID; never send that retry back through automatic cluster placement.
 
 Read [references/protocol.md](references/protocol.md) when implementing an integration or interpreting every field.
 Use the context `administrator` object only to help the user contact the responsible operator;
