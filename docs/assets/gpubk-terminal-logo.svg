@@ -1,54 +1,87 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="860" height="220" viewBox="0 0 860 220" role="img" aria-labelledby="title desc">
-  <title id="title">GPUBK terminal logo</title>
-  <desc id="desc">A colorful terminal-style GPUBK wordmark with a GPU booking timeline.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="286" viewBox="0 0 900 286" role="img" aria-labelledby="title desc">
+  <title id="title">GPUBK TUI logo</title>
+  <desc id="desc">A dense GPUBK terminal dashboard with GPU metrics, reservations, a NOW marker, and keyboard controls.</desc>
   <style>
-    .frame { fill: #101514; stroke: #52605b; }
-    .muted { fill: #89958f; }
-    .text { fill: #e8eeeb; }
-    .green { fill: #a8d65b; }
-    .cyan { fill: #65c7c4; }
-    .violet { fill: #aa9bd8; }
-    .line { stroke: #34413d; }
-    .now { stroke: #65c7c4; }
+    .shell { fill: #090d10; stroke: #46515a; }
+    .header { fill: #173c5b; }
+    .footer { fill: #173c5b; }
+    .fg { fill: #d6dde2; }
+    .hi { fill: #f4f7f8; }
+    .dim { fill: #73808a; }
+    .grid { stroke: #253038; }
+    .now { stroke: #71c7d4; }
+    .cyan { fill: #5ca9d6; }
+    .yellow { fill: #d39b58; }
+    .green { fill: #67b66d; }
+    .magenta { fill: #a777bf; }
+    .red { fill: #cc6670; }
+    .blue { fill: #548bb5; }
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     @media (prefers-color-scheme: light) {
-      .frame { fill: #f7f9f7; stroke: #a9b3ae; }
-      .muted { fill: #64716b; }
-      .text { fill: #18201d; }
-      .green { fill: #567d16; }
-      .cyan { fill: #167d7a; }
-      .violet { fill: #66549a; }
-      .line { stroke: #d5dcd8; }
-      .now { stroke: #167d7a; }
+      .shell { fill: #f4f6f7; stroke: #68747c; }
+      .header, .footer { fill: #1f5278; }
+      .fg { fill: #26323a; }
+      .hi { fill: #ffffff; }
+      .dim { fill: #68747c; }
+      .grid { stroke: #cfd6da; }
+      .now { stroke: #167e91; }
+      .cyan { fill: #2478a7; }
+      .yellow { fill: #9b611d; }
+      .green { fill: #2f803b; }
+      .magenta { fill: #75438d; }
+      .red { fill: #a43d48; }
+      .blue { fill: #386f99; }
     }
   </style>
-  <rect class="frame" x="1" y="1" width="858" height="218" rx="8"/>
-  <circle cx="24" cy="22" r="5" fill="#d96c75"/>
-  <circle cx="42" cy="22" r="5" fill="#d9ad5c"/>
-  <circle cx="60" cy="22" r="5" fill="#79b978"/>
-  <text class="muted" x="80" y="27" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">bk · live schedule</text>
-  <text class="green" x="28" y="115" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="67" font-weight="700" letter-spacing="4">GPUBK</text>
-  <text class="text" x="31" y="143" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">GPU TIME, WITHOUT SPREADSHEET TIME.</text>
-  <text class="green" x="31" y="184" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15">$</text>
-  <text class="text" x="50" y="184" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15">bk 2 1h30m 12g</text>
-  <rect class="green" x="202" y="171" width="8" height="17" rx="1"/>
-  <g transform="translate(420 52)">
-    <text class="muted" x="0" y="0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">GPU</text>
-    <text class="muted" x="74" y="0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">NOW</text>
-    <text class="muted" x="184" y="0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">+30</text>
-    <text class="muted" x="294" y="0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">+60</text>
-    <line class="now" x1="82" y1="12" x2="82" y2="137" stroke-width="2"/>
-    <line class="line" x1="0" y1="38" x2="390" y2="38"/>
-    <line class="line" x1="0" y1="72" x2="390" y2="72"/>
-    <line class="line" x1="0" y1="106" x2="390" y2="106"/>
-    <line class="line" x1="0" y1="140" x2="390" y2="140"/>
-    <text class="text" x="0" y="31" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">0</text>
-    <text class="text" x="0" y="65" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">1</text>
-    <text class="text" x="0" y="99" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">2</text>
-    <text class="text" x="0" y="133" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">3</text>
-    <rect class="green" x="44" y="18" width="142" height="12" rx="3"/>
-    <rect class="cyan" x="116" y="52" width="176" height="12" rx="3"/>
-    <rect class="violet" x="214" y="86" width="126" height="12" rx="3"/>
-    <rect class="green" x="44" y="120" width="70" height="5" rx="2"/>
-    <rect class="cyan" x="44" y="128" width="70" height="5" rx="2"/>
+
+  <rect class="shell" x="1" y="1" width="898" height="284" rx="3"/>
+  <rect class="header" x="2" y="2" width="896" height="30"/>
+  <text class="hi" x="14" y="22" font-size="15" font-weight="700">GPUBK</text>
+  <text class="hi" x="84" y="22" font-size="12">gpu-lab</text>
+  <text class="hi" x="646" y="22" font-size="12">M:OK  W:IDLE</text>
+  <text class="hi" x="882" y="22" font-size="12" text-anchor="end">8 GPU | LIVE</text>
+
+  <text class="dim" x="14" y="53" font-size="11">GPU  MODEL          UTIL       FREE  PROC  STATE       USE/MAX</text>
+  <text class="dim" x="442" y="53" font-size="11">WED  JUL 15</text>
+  <text class="dim" x="556" y="53" font-size="11">17:00</text>
+  <text class="dim" x="654" y="53" font-size="11">17:30</text>
+  <text class="dim" x="752" y="53" font-size="11">18:00</text>
+  <text class="dim" x="850" y="53" font-size="11">18:30</text>
+
+  <line class="now" x1="604" y1="59" x2="604" y2="205" stroke-width="2"/>
+  <text class="cyan" x="604" y="68" font-size="10" text-anchor="middle">NOW</text>
+  <g class="grid" stroke-width="1">
+    <line x1="12" y1="82" x2="888" y2="82"/>
+    <line x1="12" y1="111" x2="888" y2="111"/>
+    <line x1="12" y1="140" x2="888" y2="140"/>
+    <line x1="12" y1="169" x2="888" y2="169"/>
+    <line x1="12" y1="198" x2="888" y2="198"/>
+    <line x1="540" y1="59" x2="540" y2="205"/>
+    <line x1="654" y1="59" x2="654" y2="205"/>
+    <line x1="752" y1="59" x2="752" y2="205"/>
+    <line x1="850" y1="59" x2="850" y2="205"/>
   </g>
+
+  <g class="fg" font-size="12">
+    <text x="14" y="75">0    RTX PRO 6000    84%      18.2G     3  booked          3/4</text>
+    <text x="14" y="104">1    RTX PRO 6000    36%      71.4G     1  shared          2/4</text>
+    <text x="14" y="133">2    RTX PRO 6000     0%      95.7G     0  idle            0/4</text>
+    <text x="14" y="162">3    RTX PRO 6000    67%      42.8G     2  exclusive         X</text>
+    <text x="14" y="191">4    RTX PRO 6000     8%      88.1G     1  booked          1/4</text>
+  </g>
+
+  <rect class="cyan" x="560" y="70" width="128" height="8"/>
+  <rect class="yellow" x="560" y="87" width="128" height="8"/>
+  <rect class="green" x="604" y="99" width="180" height="8"/>
+  <rect class="magenta" x="734" y="128" width="138" height="8"/>
+  <rect class="red" x="584" y="145" width="202" height="8"/>
+  <rect class="blue" x="636" y="157" width="150" height="8"/>
+  <rect class="green" x="604" y="186" width="90" height="8"/>
+
+  <text class="dim" x="14" y="220" font-size="11">#  ID       USER          MODE  REQ   GPU        VRAM/GPU  START  END    DUR</text>
+  <text class="fg" x="14" y="239" font-size="12">1  e95273   chenyuhan     shar  3/4   0,1        24G       17:00  18:30  1h30m</text>
+  <text class="yellow" x="14" y="257" font-size="12">2  a81c20   lab-user      excl    X    3          -         17:15  18:45  1h30m</text>
+
+  <rect class="footer" x="2" y="263" width="896" height="21"/>
+  <text class="hi" x="14" y="278" font-size="11">RSV | arrows select | Tab GPU | a add | e edit | d delete | u usage | n NOW | ? help | q quit</text>
 </svg>
