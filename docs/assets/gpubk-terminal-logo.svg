@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="220" viewBox="0 0 860 220" role="img" aria-labelledby="title desc">
+  <title id="title">GPUBK terminal logo</title>
+  <desc id="desc">A colorful terminal-style GPUBK wordmark with a GPU booking timeline.</desc>
+  <style>
+    .frame { fill: #101514; stroke: #52605b; }
+    .muted { fill: #89958f; }
+    .text { fill: #e8eeeb; }
+    .green { fill: #a8d65b; }
+    .cyan { fill: #65c7c4; }
+    .violet { fill: #aa9bd8; }
+    .line { stroke: #34413d; }
+    .now { stroke: #65c7c4; }
+    @media (prefers-color-scheme: light) {
+      .frame { fill: #f7f9f7; stroke: #a9b3ae; }
+      .muted { fill: #64716b; }
+      .text { fill: #18201d; }
+      .green { fill: #567d16; }
+      .cyan { fill: #167d7a; }
+      .violet { fill: #66549a; }
+      .line { stroke: #d5dcd8; }
+      .now { stroke: #167d7a; }
+    }
+  </style>
+  <rect class="frame" x="1" y="1" width="858" height="218" rx="8"/>
+  <circle cx="24" cy="22" r="5" fill="#d96c75"/>
+  <circle cx="42" cy="22" r="5" fill="#d9ad5c"/>
+  <circle cx="60" cy="22" r="5" fill="#79b978"/>
+  <text class="muted" x="80" y="27" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">bk · live schedule</text>
+  <text class="green" x="28" y="115" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="67" font-weight="700" letter-spacing="4">GPUBK</text>
+  <text class="text" x="31" y="143" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">GPU TIME, WITHOUT SPREADSHEET TIME.</text>
+  <text class="green" x="31" y="184" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15">$</text>
+  <text class="text" x="50" y="184" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15">bk 2 1h30m 12g</text>
+  <rect class="green" x="202" y="171" width="8" height="17" rx="1"/>
+  <g transform="translate(420 52)">
+    <text class="muted" x="0" y="0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">GPU</text>
+    <text class="muted" x="74" y="0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">NOW</text>
+    <text class="muted" x="184" y="0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">+30</text>
+    <text class="muted" x="294" y="0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">+60</text>
+    <line class="now" x1="82" y1="12" x2="82" y2="137" stroke-width="2"/>
+    <line class="line" x1="0" y1="38" x2="390" y2="38"/>
+    <line class="line" x1="0" y1="72" x2="390" y2="72"/>
+    <line class="line" x1="0" y1="106" x2="390" y2="106"/>
+    <line class="line" x1="0" y1="140" x2="390" y2="140"/>
+    <text class="text" x="0" y="31" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">0</text>
+    <text class="text" x="0" y="65" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">1</text>
+    <text class="text" x="0" y="99" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">2</text>
+    <text class="text" x="0" y="133" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">3</text>
+    <rect class="green" x="44" y="18" width="142" height="12" rx="3"/>
+    <rect class="cyan" x="116" y="52" width="176" height="12" rx="3"/>
+    <rect class="violet" x="214" y="86" width="126" height="12" rx="3"/>
+    <rect class="green" x="44" y="120" width="70" height="5" rx="2"/>
+    <rect class="cyan" x="44" y="128" width="70" height="5" rx="2"/>
+  </g>
+</svg>

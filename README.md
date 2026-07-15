@@ -2,13 +2,9 @@
 
 **English** | [简体中文](https://github.com/lzzmm/gpubk/blob/main/README.zh-CN.md)
 
-```text
-  ____ ____  _   _ ____  _  __
- / ___|  _ \| | | | __ )| |/ /
-| |  _| |_) | | | |  _ \| ' /
-| |_| |  __/| |_| | |_) | . \
- \____|_|    \___/|____/|_|\_\
-```
+<p align="center">
+  <img src="docs/assets/gpubk-terminal-logo.svg" alt="GPUBK terminal logo" width="860">
+</p>
 
 **GPU time, without spreadsheet time.**
 

@@ -2,13 +2,9 @@
 
 [English](README.md) | **简体中文**
 
-```text
-  ____ ____  _   _ ____  _  __
- / ___|  _ \| | | | __ )| |/ /
-| |  _| |_) | | | |  _ \| ' /
-| |_| |  __/| |_| | |_) | . \
- \____|_|    \___/|____/|_|\_\
-```
+<p align="center">
+  <img src="docs/assets/gpubk-terminal-logo.svg" alt="GPUBK 终端字标" width="860">
+</p>
 
 **把 GPU 时间留给实验，而不是表格。**
 
