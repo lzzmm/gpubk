@@ -211,7 +211,8 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("monitor_uid", guide)
         self.assertIn("pip install --upgrade 'gpubk[gpu]'", guide)
         self.assertIn("bk admin transfer NEWUSER --dry-run", guide)
-        self.assertIn("bk admin services install --yes", guide)
+        self.assertIn("bk admin install --yes", guide)
+        self.assertIn("preserves every scheduling and GPU policy field", guide)
         self.assertIn("Do not run a 0.1 worker", guide)
 
     def test_bundled_monitor_unit_defers_timing_to_trusted_config(self):

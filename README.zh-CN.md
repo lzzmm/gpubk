@@ -511,6 +511,10 @@ unit、可选安装彩色登录提醒，并设置两个服务开机启动。`--d
 `--no-command-link`。pip 本身不会调用 sudo，也不会修改 `/etc`；系统级改动只由这条
 明确的管理员命令执行。
 
+在已有受管部署上重复执行同一条命令也是安全的，但语义会自动变成“校准”：保留带校验
+摘要的配置和全部数据，拒绝会改变策略的参数，只校准已跟踪的命令链接和 unit，并受控
+重启服务。若停止服务后的步骤失败，安装器会尽力重新启动原有受管服务，避免留下无意停机。
+
 排障或高级部署仍可使用底层分步流程；此时需自行确保用户执行的路径上已有 `bk`：
 
 ```bash
@@ -719,15 +723,13 @@ sudo systemctl start gpubk-broker.service gpubk-monitor.service
 保护整个过程；若交接中途断电，运行 `sudo bk admin transfer --recover --yes` 回到原
 账号，然后执行 `systemctl daemon-reload` 并重新启动 unit。
 
-升级软件包不会改写配置或数据。停止 broker 和 monitor，升级同一个独立环境，重新启动
-原进程并检查：
+升级软件包不会改写配置或数据。停止 broker 和 monitor，升级同一个独立环境，校准受管
+部署并检查：
 
 ```bash
 sudo systemctl stop gpubk-broker.service gpubk-monitor.service
 sudo /opt/gpubk/bin/python -m pip install --upgrade 'gpubk[gpu]'
-sudo bk admin services install --yes
-sudo systemctl daemon-reload
-sudo systemctl start gpubk-broker.service gpubk-monitor.service
+sudo /opt/gpubk/bin/bk admin install --yes
 bk --version
 bk broker --check
 bk doctor --probe --require-monitor --strict

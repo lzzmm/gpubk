@@ -832,6 +832,190 @@ class AdminInitTests(unittest.TestCase):
                 ],
             )
 
+    def test_repeated_install_preserves_configuration_and_restarts_services(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_file = root / "etc" / "gpubk" / "config.json"
+            config_file.parent.mkdir(parents=True)
+            (config_file.parent / "install.json").write_text("{}\n", encoding="utf-8")
+            command_path = root / "bin" / "bk"
+            command_target = root / "opt" / "gpubk" / "bin" / "bk"
+            manifest = {
+                "data_dir": str(root / "data"),
+                "service_uid": 1003,
+                "system_services": {"phase": "installed"},
+                "command_link": {
+                    "destination": str(command_path),
+                    "target": str(command_target),
+                },
+            }
+            document = {
+                "data_dir": str(root / "data"),
+                "broker_socket": str(root / "run" / "broker.sock"),
+                "gpu_count": 8,
+                "slot_minutes": 10,
+                "max_shared_users": 4,
+                "require_shared_memory": False,
+                "disabled_gpus": [7],
+                "gpu_priority": {"6": 10},
+            }
+            command_plan = mock.Mock(status="managed", blockers=())
+            service_plan = mock.Mock()
+            ready = {"blockers": []}
+            output = StringIO()
+            with (
+                mock.patch("bk.admin.os.geteuid", return_value=0),
+                mock.patch(
+                    "bk.admin._load_admin_services_manifest",
+                    return_value=(manifest, document),
+                ),
+                mock.patch(
+                    "bk.admin.plan_command_link_install",
+                    return_value=command_plan,
+                ),
+                mock.patch(
+                    "bk.admin.inspect_admin_system_services",
+                    side_effect=[(service_plan, ready), (service_plan, ready)],
+                ) as inspect_services,
+                mock.patch("bk.admin.apply_admin_command_link_install") as apply_link,
+                mock.patch("bk.admin.apply_admin_system_services_install") as apply_services,
+                mock.patch("bk.admin._detected_gpu_count") as detect_gpus,
+                mock.patch("bk.admin.shutil.which", return_value="/usr/bin/systemctl"),
+                mock.patch("bk.admin._run_systemctl") as systemctl,
+                redirect_stdout(output),
+            ):
+                status = run_admin_cli(
+                    [
+                        "install",
+                        "--yes",
+                        "--config-file",
+                        str(config_file),
+                        "--gpu-count",
+                        "8",
+                        "--slot-minutes",
+                        "10",
+                        "--max-shared-users",
+                        "4",
+                        "--disabled-gpus",
+                        "7",
+                        "--gpu-priority",
+                        "6=10",
+                        "--allow-implicit-shared-memory",
+                    ]
+                )
+
+            self.assertEqual(status, 0)
+            detect_gpus.assert_not_called()
+            self.assertTrue(inspect_services.call_args_list[0].kwargs["allow_running"])
+            self.assertNotIn("allow_running", inspect_services.call_args_list[1].kwargs)
+            apply_link.assert_called_once()
+            apply_services.assert_called_once_with(
+                config_file,
+                service_plan=service_plan,
+            )
+            self.assertEqual(
+                [call.args[1] for call in systemctl.call_args_list],
+                ["stop", "daemon-reload", "enable"],
+            )
+            self.assertIn("policy:   preserve", output.getvalue())
+            self.assertIn("reconciled: configuration and data were preserved", output.getvalue())
+
+    def test_repeated_install_rejects_configuration_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_file = root / "etc" / "gpubk" / "config.json"
+            config_file.parent.mkdir(parents=True)
+            (config_file.parent / "install.json").write_text("{}\n", encoding="utf-8")
+            manifest = {
+                "data_dir": str(root / "data"),
+                "service_uid": 1003,
+            }
+            document = {
+                "data_dir": str(root / "data"),
+                "broker_socket": str(root / "run" / "broker.sock"),
+                "gpu_count": 8,
+                "slot_minutes": 5,
+                "max_shared_users": 2,
+                "require_shared_memory": False,
+            }
+            with (
+                mock.patch("bk.admin.os.geteuid", return_value=0),
+                mock.patch(
+                    "bk.admin._load_admin_services_manifest",
+                    return_value=(manifest, document),
+                ),
+                mock.patch("bk.admin.inspect_admin_system_services") as inspect_services,
+            ):
+                with self.assertRaisesRegex(
+                    BookingError,
+                    "will not rewrite.*--max-shared-users",
+                ):
+                    run_admin_cli(
+                        [
+                            "install",
+                            "--yes",
+                            "--config-file",
+                            str(config_file),
+                            "--max-shared-users",
+                            "4",
+                        ]
+                    )
+
+            inspect_services.assert_not_called()
+
+    def test_repeated_install_recovers_services_after_a_post_stop_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_file = root / "etc" / "gpubk" / "config.json"
+            config_file.parent.mkdir(parents=True)
+            (config_file.parent / "install.json").write_text("{}\n", encoding="utf-8")
+            manifest = {
+                "data_dir": str(root / "data"),
+                "service_uid": 1003,
+                "system_services": {"phase": "installed"},
+            }
+            document = {
+                "data_dir": str(root / "data"),
+                "broker_socket": str(root / "run" / "broker.sock"),
+                "gpu_count": 8,
+                "slot_minutes": 5,
+                "max_shared_users": 2,
+                "require_shared_memory": False,
+            }
+            service_plan = mock.Mock()
+            with (
+                mock.patch("bk.admin.os.geteuid", return_value=0),
+                mock.patch(
+                    "bk.admin._load_admin_services_manifest",
+                    return_value=(manifest, document),
+                ),
+                mock.patch(
+                    "bk.admin.inspect_admin_system_services",
+                    side_effect=[
+                        (service_plan, {"blockers": []}),
+                        (service_plan, {"blockers": ["injected post-stop failure"]}),
+                    ],
+                ),
+                mock.patch("bk.admin.shutil.which", return_value="/usr/bin/systemctl"),
+                mock.patch("bk.admin._run_systemctl") as systemctl,
+                redirect_stdout(StringIO()),
+            ):
+                with self.assertRaisesRegex(BookingError, "injected post-stop failure"):
+                    run_admin_cli(
+                        [
+                            "install",
+                            "--yes",
+                            "--no-command-link",
+                            "--config-file",
+                            str(config_file),
+                        ]
+                    )
+
+            self.assertEqual(
+                [call.args[1] for call in systemctl.call_args_list],
+                ["stop", "daemon-reload", "start"],
+            )
+
     def test_command_link_is_tracked_by_install_manifest_and_full_uninstall(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1336,6 +1520,50 @@ class AdminInitTests(unittest.TestCase):
             )
             self.assertFalse(uninstall_preview["system_services_present"])
             self.assertEqual(uninstall_preview["status"], "ready")
+
+    def test_service_reconcile_can_plan_a_controlled_restart_while_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.prepare_parents(root)
+            plan = self.plan(root)
+            apply_admin_init(plan, require_root=False)
+            unit_directory = root / "systemd"
+            unit_directory.mkdir(mode=0o755)
+            service_plan, _inspection = inspect_admin_system_services(
+                plan.config_file,
+                operation="install",
+                unit_directory=unit_directory,
+                expected_owner=os.geteuid(),
+            )
+            apply_admin_system_services_install(
+                plan.config_file,
+                service_plan=service_plan,
+                require_root=False,
+            )
+
+            with (
+                mock.patch("bk.admin._broker_socket_state", return_value="active"),
+                mock.patch("bk.admin._probe_admin_lock", return_value="active"),
+            ):
+                _strict_plan, strict = inspect_admin_system_services(
+                    plan.config_file,
+                    operation="install",
+                    unit_directory=unit_directory,
+                    expected_owner=os.geteuid(),
+                )
+                _restart_plan, restart = inspect_admin_system_services(
+                    plan.config_file,
+                    operation="install",
+                    unit_directory=unit_directory,
+                    expected_owner=os.geteuid(),
+                    allow_running=True,
+                )
+
+            self.assertEqual(strict["status"], "blocked")
+            self.assertTrue(any("broker is running" in item for item in strict["blockers"]))
+            self.assertTrue(any("monitor is running" in item for item in strict["blockers"]))
+            self.assertEqual(restart["status"], "ready")
+            self.assertEqual(restart["blockers"], [])
 
     def test_system_service_uninstall_requires_disable_first(self):
         with tempfile.TemporaryDirectory() as tmp:

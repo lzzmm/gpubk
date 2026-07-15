@@ -10,40 +10,43 @@ upgrade touches only `/opt/gpubk`.
 2. Stop the broker and the one monitor. Stop each scheduled-job worker before
    replacing code; running GPU workloads are unrelated and must not be stopped.
 3. Upgrade the existing isolated environment.
-4. Run the broker preflight as the configured owner, restart the same services,
-   and verify them from an ordinary account.
+4. Reconcile the tracked command and system units. This preserves the existing
+   configuration and data, reloads systemd, and starts the same services.
+5. Verify from an ordinary account.
 
 ```bash
 /opt/gpubk/bin/bk --version
 sudo systemctl stop gpubk-broker.service gpubk-monitor.service
 sudo /opt/gpubk/bin/python -m pip install --upgrade 'gpubk[gpu]'
-sudo /opt/gpubk/bin/bk admin services install --yes
-sudo systemctl daemon-reload
-sudo systemctl start gpubk-broker.service gpubk-monitor.service
+sudo /opt/gpubk/bin/bk admin install --yes
 /opt/gpubk/bin/bk --version
 /opt/gpubk/bin/bk broker --check
 /opt/gpubk/bin/bk doctor --probe --require-monitor --strict
 ```
 
-Keep the same extras used during installation (`gpu`, `mcp`, or `all`). Do not
-rerun `sudo bk admin init` for a code-only upgrade. If verification fails, stop the
-new processes and reinstall the recorded version, for example:
+Keep the same extras used during installation (`gpu`, `mcp`, or `all`). On an
+existing managed deployment, `admin install` enters reconciliation mode: it reads
+the checksummed manifest, preserves every scheduling and GPU policy field, repairs
+the tracked command link, refreshes only previously managed unit files, and restarts
+the services. It refuses configuration-changing flags. Do not rerun `sudo bk admin
+init` for a code-only upgrade. If verification fails, stop the new processes and
+reinstall the recorded version, for example:
 
 ```bash
 sudo /opt/gpubk/bin/python -m pip install 'gpubk[gpu]==PREVIOUS_VERSION'
 ```
 
-The tracked `/usr/local/bin/bk` symbolic link does not need to be recreated during
-a routine upgrade. `sudo /opt/gpubk/bin/bk admin install --no-start` can repair a
-missing GPUBK-owned link while preserving a correct link that predated setup. It
-refuses regular files and links to another target; do not use a force-link command
-over an unknown existing path.
+The tracked `/usr/local/bin/bk` symbolic link does not need to be recreated manually.
+Reconciliation repairs a missing GPUBK-owned link while preserving a correct link
+that predated setup. It refuses regular files and links to another target; do not use
+a force-link command over an unknown existing path. `admin install --no-start` is
+available for hosts without systemd, but requires the managed processes to already be
+stopped and leaves them stopped.
 
-Then restart and verify again. The root-owned install manifest, configuration,
-reservations, audit log, and usage history remain in place throughout. Running
-`sudo bk admin services install --yes` after the package update refreshes tracked
-system units only when their current checksums still match the manifest. Per-user
-worker units remain separate and can be refreshed with
+Then reconcile and verify again. The root-owned install manifest, configuration,
+reservations, audit log, and usage history remain in place throughout. Unit files are
+refreshed only when their current checksums still match the manifest. Per-user worker
+units remain separate and can be refreshed with
 `bk service install worker --force` when release notes require it.
 
 To change the account that runs the broker and monitor, do not copy the ledger or

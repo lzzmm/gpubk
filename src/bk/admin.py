@@ -313,14 +313,23 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     commands = parser.add_subparsers(dest="action", required=True)
     install_parser = commands.add_parser(
         "install",
-        help="guided one-command initialization and boot-service setup",
+        help="initialize once, or reconcile an existing managed deployment",
+        description=(
+            "Initialize a new shared server. If a valid install manifest already "
+            "exists, preserve configuration and data while reconciling the tracked "
+            "command, systemd units, and service state."
+        ),
     )
     install_parser.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
     install_parser.add_argument("--data-dir", type=Path)
     install_parser.add_argument("--access", choices=("all", "group"))
     install_parser.add_argument("--group")
     install_parser.add_argument("--service-user")
-    install_parser.add_argument("--broker-socket", type=Path, default=DEFAULT_BROKER_SOCKET)
+    install_parser.add_argument(
+        "--broker-socket",
+        type=Path,
+        help="broker socket for a new deployment (default: /run/gpubk/broker.sock)",
+    )
     install_parser.add_argument("--gpu-count", type=int)
     install_parser.add_argument("--disabled-gpus")
     install_parser.add_argument("--gpu-priority")
@@ -342,7 +351,6 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     install_parser.add_argument(
         "--command-path",
         type=Path,
-        default=DEFAULT_COMMAND_LINK,
         help="system-wide bk link (default: /usr/local/bin/bk)",
     )
     install_parser.add_argument(
@@ -355,11 +363,23 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         action="store_true",
         help="leave the system-wide bk command unchanged",
     )
-    install_parser.add_argument("--login-hook", action="store_true")
-    install_parser.add_argument("--no-start", action="store_true")
-    install_parser.add_argument("--force", action="store_true")
-    install_parser.add_argument("--yes", action="store_true")
-    install_parser.add_argument("--dry-run", action="store_true")
+    install_parser.add_argument(
+        "--login-hook",
+        action="store_true",
+        help="install or refresh the bounded interactive-login reminder",
+    )
+    install_parser.add_argument(
+        "--no-start",
+        action="store_true",
+        help="write tracked files but do not manage service state",
+    )
+    install_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="adopt reviewed untracked unit files during initial service setup",
+    )
+    install_parser.add_argument("--yes", action="store_true", help="apply without prompting")
+    install_parser.add_argument("--dry-run", action="store_true", help="show the plan only")
     init_parser = commands.add_parser(
         "init",
         help="preview or initialize shared server configuration",
@@ -876,6 +896,10 @@ def _run_admin_login_hook(args: argparse.Namespace) -> int:
 def _run_admin_install(args: argparse.Namespace) -> int:
     if os.geteuid() != 0 and not args.dry_run:
         raise BookingError("administrator install must run as root; use sudo bk admin install")
+    config_file = _absolute_path(args.config_file)
+    if os.path.lexists(_manifest_path(config_file)):
+        return _run_existing_admin_install(args, config_file)
+
     interactive = sys.stdin.isatty() and not args.yes
     detected_gpu_count = _detected_gpu_count(args.gpu_count)
     default_service = _default_service_identity(args.service_user)
@@ -892,7 +916,7 @@ def _run_admin_install(args: argparse.Namespace) -> int:
         login_hook = _ask_bool("Install the interactive login reminder", True, enabled=True)
 
     python_executable = _absolute_path(args.python_executable or Path(sys.executable))
-    command_path = _absolute_path(args.command_path)
+    command_path = _absolute_path(args.command_path or DEFAULT_COMMAND_LINK)
     command_target = _absolute_path(
         args.command_target or python_executable.with_name("bk")
     )
@@ -973,6 +997,258 @@ def _run_admin_install(args: argparse.Namespace) -> int:
         print("next: start the broker and monitor using your service supervisor")
     print("verify as an ordinary user: bk doctor --probe --require-monitor --strict")
     return 0
+
+
+def _run_existing_admin_install(args: argparse.Namespace, config_file: Path) -> int:
+    if os.geteuid() != 0:
+        raise BookingError(
+            "reconciling an existing installation must run as root; "
+            "use sudo bk admin install"
+        )
+    manifest, document = _load_admin_services_manifest(
+        config_file,
+        expected_owner=0,
+    )
+    _validate_existing_install_arguments(args, document, manifest)
+
+    python_executable = _absolute_path(args.python_executable or Path(sys.executable))
+    tracked_link = manifest.get("command_link")
+    tracked_destination = (
+        Path(tracked_link["destination"])
+        if isinstance(tracked_link, dict)
+        else DEFAULT_COMMAND_LINK
+    )
+    tracked_target = (
+        Path(tracked_link["target"])
+        if isinstance(tracked_link, dict)
+        else python_executable.with_name("bk")
+    )
+    command_path = _absolute_path(args.command_path or tracked_destination)
+    command_target = _absolute_path(args.command_target or tracked_target)
+    command_preview = None
+    if not args.no_command_link:
+        command_preview = plan_command_link_install(
+            existing=tracked_link,
+            destination=command_path,
+            target=command_target,
+            expected_owner=0,
+        )
+        if command_preview.blockers:
+            raise BookingError("; ".join(command_preview.blockers))
+
+    systemctl = None if args.no_start else shutil.which("systemctl")
+    if not args.no_start and systemctl is None:
+        raise BookingError(
+            "systemctl is unavailable; use --no-start and supervise services manually"
+        )
+    stop_managed_services = (
+        systemctl is not None and manifest.get("system_services") is not None
+    )
+    service_plan, service_inspection = inspect_admin_system_services(
+        config_file,
+        operation="install",
+        python_executable=python_executable,
+        force=args.force,
+        expected_owner=0,
+        allow_running=stop_managed_services,
+    )
+    if service_inspection["blockers"]:
+        raise BookingError("; ".join(service_inspection["blockers"]))
+
+    print("GPUBK managed installation")
+    print(f"  config:   preserve {config_file}")
+    print(f"  data:     preserve {manifest['data_dir']}")
+    print(f"  Python:   {python_executable}")
+    if args.no_command_link:
+        print("  command:  leave system-wide bk unchanged")
+    else:
+        print(
+            f"  command:  {command_path} -> {command_target} "
+            f"({command_preview.status})"
+        )
+    if args.login_hook:
+        print("  login:    install or refresh reminder")
+    else:
+        print("  login:    preserve current setting")
+    if systemctl is None:
+        print("  services: reconcile files; leave stopped")
+    elif stop_managed_services:
+        print("  services: stop, reconcile, enable, and restart")
+    else:
+        print("  services: install, enable, and start")
+    print("  policy:   preserve all scheduling and GPU settings")
+    if args.dry_run:
+        print("Dry run: no files or services changed.")
+        return 0
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print("bk: pass --yes to reconcile this installation", file=sys.stderr)
+            return 1
+        answer = input("Reconcile this managed installation? [y/N]: ").strip().lower()
+        if answer not in {"y", "yes"}:
+            print("No changes made.")
+            return 1
+
+    stopped_services = False
+    try:
+        if stop_managed_services:
+            stopped_services = True
+            _run_systemctl(
+                systemctl,
+                "stop",
+                "gpubk-broker.service",
+                "gpubk-monitor.service",
+            )
+
+        service_plan, service_inspection = inspect_admin_system_services(
+            config_file,
+            operation="install",
+            python_executable=python_executable,
+            force=args.force,
+            expected_owner=0,
+        )
+        if service_inspection["blockers"]:
+            raise BookingError("; ".join(service_inspection["blockers"]))
+        if not args.no_command_link:
+            apply_admin_command_link_install(
+                config_file,
+                destination=command_path,
+                target=command_target,
+            )
+        apply_admin_system_services_install(
+            config_file,
+            service_plan=service_plan,
+        )
+        if args.login_hook:
+            from .login_hook import apply_login_hook_install
+
+            apply_login_hook_install(executable=command_path)
+        if systemctl is not None:
+            _run_systemctl(systemctl, "daemon-reload")
+            _run_systemctl(
+                systemctl,
+                "enable",
+                "--now",
+                "gpubk-broker.service",
+                "gpubk-monitor.service",
+            )
+            stopped_services = False
+    except BaseException as exc:
+        if stopped_services:
+            recovery_errors = []
+            for action in (
+                ("daemon-reload",),
+                (
+                    "start",
+                    "gpubk-broker.service",
+                    "gpubk-monitor.service",
+                ),
+            ):
+                try:
+                    _run_systemctl(systemctl, *action)
+                except BaseException as recovery_exc:
+                    recovery_errors.append(str(recovery_exc))
+            if recovery_errors:
+                raise BookingError(
+                    f"installation reconciliation failed: {exc}; service recovery also "
+                    f"failed: {'; '.join(recovery_errors)}"
+                ) from exc
+        raise
+    print("reconciled: configuration and data were preserved")
+    if systemctl is not None:
+        print("started: gpubk-broker.service and gpubk-monitor.service")
+    else:
+        print("next: start the broker and monitor using your service supervisor")
+    print("verify as an ordinary user: bk doctor --probe --require-monitor --strict")
+    return 0
+
+
+def _validate_existing_install_arguments(
+    args: argparse.Namespace,
+    document: dict,
+    manifest: dict,
+) -> None:
+    mismatches = []
+
+    def compare(flag: str, explicit: object, current: object) -> None:
+        if explicit is not None and explicit != current:
+            mismatches.append(flag)
+
+    if args.data_dir is not None:
+        compare(
+            "--data-dir",
+            str(_absolute_path(args.data_dir)),
+            document.get("data_dir"),
+        )
+    current_access = "group" if document.get("broker_gid") is not None else "all"
+    compare("--access", args.access, current_access)
+    if args.group is not None:
+        try:
+            requested_gid = int(grp.getgrnam(args.group).gr_gid)
+        except KeyError as exc:
+            raise BookingError(f"Unix group does not exist: {args.group}") from exc
+        compare("--group", requested_gid, document.get("broker_gid"))
+    if args.service_user is not None:
+        compare(
+            "--service-user",
+            _resolve_identity(args.service_user).uid,
+            manifest.get("service_uid"),
+        )
+    if args.broker_socket is not None:
+        compare(
+            "--broker-socket",
+            str(_absolute_path(args.broker_socket)),
+            document.get("broker_socket"),
+        )
+    compare("--gpu-count", args.gpu_count, document.get("gpu_count"))
+    compare("--slot-minutes", args.slot_minutes, document.get("slot_minutes"))
+    compare(
+        "--max-shared-users",
+        args.max_shared_users,
+        document.get("max_shared_users"),
+    )
+    compare(
+        "--require-shared-memory/--allow-implicit-shared-memory",
+        args.require_shared_memory,
+        document.get("require_shared_memory"),
+    )
+
+    gpu_count = document.get("gpu_count")
+    if isinstance(gpu_count, bool) or not isinstance(gpu_count, int):
+        raise BookingError("trusted configuration gpu_count is invalid")
+    try:
+        current_disabled = validate_gpu_list(
+            document.get("disabled_gpus"),
+            gpu_count,
+            "disabled_gpus",
+        )
+        current_priority = validate_gpu_priority(
+            document.get("gpu_priority"),
+            gpu_count,
+        )
+        if args.disabled_gpus is not None:
+            compare(
+                "--disabled-gpus",
+                validate_gpu_list(args.disabled_gpus, gpu_count, "disabled_gpus"),
+                current_disabled,
+            )
+        if args.gpu_priority is not None:
+            compare(
+                "--gpu-priority",
+                validate_gpu_priority(args.gpu_priority, gpu_count),
+                current_priority,
+            )
+    except ValueError as exc:
+        raise BookingError(str(exc)) from exc
+
+    if mismatches:
+        flags = ", ".join(sorted(set(mismatches)))
+        raise BookingError(
+            "a managed installation already exists and install will not rewrite its "
+            f"configuration; different option(s): {flags}. Use 'bk admin gpu-policy' "
+            "for GPU policy, 'bk admin transfer' for the service account, or a reviewed "
+            "migration for other settings"
+        )
 
 
 def _run_systemctl(executable: str, *arguments: str) -> None:
@@ -1242,6 +1518,7 @@ def inspect_admin_system_services(
     unit_directory: Path = DEFAULT_SYSTEM_UNIT_DIR,
     force: bool = False,
     expected_owner: int = 0,
+    allow_running: bool = False,
 ) -> tuple[Optional[SystemServicesPlan], dict]:
     if operation not in {"install", "status", "uninstall"}:
         raise BookingError(f"unknown system service operation: {operation}")
@@ -1321,9 +1598,10 @@ def inspect_admin_system_services(
     allowed_owner_pairs = {(service_uid, service_gid)}
     usage_lock = _probe_admin_lock(data_dir / "usage.lock", allowed_owner_pairs)
     ledger_lock = _probe_admin_lock(data_dir / "ledger.lock", allowed_owner_pairs)
-    if socket_state == "active":
+    running_install = operation == "install" and allow_running
+    if socket_state == "active" and not running_install:
         blockers.append("broker is running; stop it before changing system services")
-    if usage_lock == "active":
+    if usage_lock == "active" and not running_install:
         blockers.append("monitor is running; stop it before changing system services")
     if operation == "uninstall" and ledger_lock == "active":
         blockers.append("a ledger transaction is active; retry after it finishes")
@@ -4269,8 +4547,9 @@ def _build_plan(
 
     broker_socket = _ask_absolute_path(
         "Broker socket",
-        args.broker_socket,
-        enabled=interactive and args.broker_socket == DEFAULT_BROKER_SOCKET,
+        args.broker_socket or DEFAULT_BROKER_SOCKET,
+        enabled=interactive
+        and args.broker_socket in {None, DEFAULT_BROKER_SOCKET},
     )
 
     gpu_count = _ask_int(

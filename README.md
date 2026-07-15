@@ -608,6 +608,12 @@ without starting, or `--no-command-link` when another package manager owns the
 global command. Python package installation itself never invokes `sudo` or changes
 `/etc`; this explicit administrator command owns those system changes.
 
+Running the same command on an existing managed deployment is safe and deliberately
+different from first setup. It preserves the checksummed configuration and all data,
+rejects flags that would change policy, reconciles only the tracked command and unit
+files, and performs a controlled service restart. A failure after stopping services
+triggers a best-effort restart of the previously managed units.
+
 The lower-level path remains available for troubleshooting. It assumes `bk` is
 already available at the path users will run:
 
@@ -845,14 +851,12 @@ interrupted handoff run `sudo bk admin transfer --recover --yes`, reload systemd
 and restart the units.
 
 Package upgrades do not rewrite configuration or data. Stop the broker and monitor,
-upgrade the isolated environment, restart the same processes, and verify:
+upgrade the isolated environment, reconcile the tracked deployment, and verify:
 
 ```bash
 sudo systemctl stop gpubk-broker.service gpubk-monitor.service
 sudo /opt/gpubk/bin/python -m pip install --upgrade 'gpubk[gpu]'
-sudo bk admin services install --yes
-sudo systemctl daemon-reload
-sudo systemctl start gpubk-broker.service gpubk-monitor.service
+sudo /opt/gpubk/bin/bk admin install --yes
 bk --version
 bk broker --check
 bk doctor --probe --require-monitor --strict

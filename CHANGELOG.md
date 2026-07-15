@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.1 - 2026-07-15
 
+- Make `bk admin install` idempotent for an existing managed deployment: preserve
+  configuration and data, reject accidental policy changes, reconcile tracked command
+  and unit files, perform a controlled restart, and recover service availability after
+  a post-stop failure.
 - Make `sudo bk admin install` safely create and track `/usr/local/bin/bk`, preserve an
   identical link that predates GPUBK, reject unknown command paths, resume interrupted
   link creation, and remove only GPUBK-owned links during the tracked uninstall.
