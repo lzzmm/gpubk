@@ -148,6 +148,7 @@ bk c 2 1h
 ## 详细文档
 
 - [中文管理员与用户完整手册](https://github.com/lzzmm/GPUbk/blob/main/docs/GUIDE.zh-CN.md)
+- [架构规则](https://github.com/lzzmm/GPUbk/blob/main/docs/ARCHITECTURE.md)
 - [English complete guide](https://github.com/lzzmm/GPUbk/blob/main/docs/GUIDE.md)
 - [升级说明](docs/UPGRADING.md)
 - [安全模型](SECURITY.md)

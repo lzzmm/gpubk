@@ -29,6 +29,7 @@ from .models import (
     BookingError,
 )
 from .timeparse import parse_iso, to_iso, utc_now
+from .worker_guidance import WorkerGuidance
 
 
 WORKER_STATUS_SCHEMA_VERSION = "gpubk.worker.v1"
@@ -204,12 +205,13 @@ def inspect_worker_status(
 def inspect_worker_persistence(actor: Actor) -> dict:
     """Report whether systemd will keep this user's manager alive after logout."""
 
-    command = ["sudo", "loginctl", "enable-linger", actor.username]
+    guidance = WorkerGuidance(actor.username)
     result = {
         "kind": "systemd-linger",
         "state": "not-applicable",
         "logout_safe": None,
-        "admin_argv": command,
+        "admin_argv": list(guidance.admin_persistence_argv),
+        "remediation": guidance.as_dict(),
     }
     if not actor.username or "/" in actor.username or actor.username in {".", ".."}:
         return {

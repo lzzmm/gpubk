@@ -72,6 +72,12 @@ from .granularity import DEFAULT_SLOT_MINUTES, validate_slot_minutes
 from .models import Actor, BookingError
 from .systemd import DEFAULT_SYSTEM_UNIT_DIR, system_unit_names
 from .worker_status import inspect_worker_persistence
+from .worker_guidance import (
+    WORKER_ENABLE_COMMAND,
+    WORKER_FOREGROUND_COMMAND,
+    WORKER_INSTALL_COMMAND,
+    WorkerGuidance,
+)
 
 
 ADMIN_SCHEMA_VERSION = "gpubk.admin.v1"
@@ -1034,6 +1040,7 @@ def _run_admin_worker_persistence(args: argparse.Namespace) -> int:
     except KeyError as exc:
         raise BookingError(f"Linux account does not exist: {args.username}") from exc
     actor = Actor(account.pw_uid, account.pw_name)
+    guidance = WorkerGuidance(actor.username)
     before = inspect_worker_persistence(actor)
     action = args.persistence_action
     if action == "status":
@@ -1045,7 +1052,7 @@ def _run_admin_worker_persistence(args: argparse.Namespace) -> int:
                 f"state={before['state']}"
             )
             if before.get("logout_safe") is False:
-                print(f"enable: sudo bk admin worker-persistence enable {actor.username}")
+                print(f"enable: {guidance.admin_persistence_command}")
         return 0 if before.get("state") != "unknown" else 2
 
     if os.geteuid() != 0:
@@ -1087,7 +1094,9 @@ def _run_admin_worker_persistence(args: argparse.Namespace) -> int:
             f"state={after['state']}"
         )
         if action == "enable":
-            print("user next: bk service install worker; systemctl --user enable --now bk-worker.service")
+            print(
+                f"user next: {WORKER_INSTALL_COMMAND}; {WORKER_ENABLE_COMMAND}"
+            )
     return 0
 
 
@@ -1204,10 +1213,13 @@ def _run_admin_install(args: argparse.Namespace) -> int:
     else:
         print("next: start the broker and monitor using your service supervisor")
     print("verify as an ordinary user: bk doctor --probe --require-monitor --strict")
-    print("scheduled commands need one worker per user; users can run `bk w start` in tmux")
+    print(
+        "scheduled commands need one worker per user; users can run "
+        f"`{WORKER_FOREGROUND_COMMAND}` in tmux"
+    )
     print(
         "for logout/reboot launch, enable each actual user with: "
-        "sudo bk admin worker-persistence enable USER"
+        f"{WorkerGuidance().admin_persistence_command}"
     )
     return 0
 

@@ -158,6 +158,7 @@ UID mapping, failure behavior, NFS history export, and scheduled jobs.
 ## Documentation
 
 - [Complete administrator and user guide](https://github.com/lzzmm/GPUbk/blob/main/docs/GUIDE.md)
+- [Architecture rules](https://github.com/lzzmm/GPUbk/blob/main/docs/ARCHITECTURE.md)
 - [中文完整手册](https://github.com/lzzmm/GPUbk/blob/main/docs/GUIDE.zh-CN.md)
 - [Upgrading](docs/UPGRADING.md)
 - [Security model](SECURITY.md)

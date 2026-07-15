@@ -6,6 +6,7 @@ from typing import Mapping, Optional, Sequence
 from .models import STATUS_ACTIVE
 from .terminal import style
 from .timeparse import parse_iso
+from .worker_guidance import WORKER_FOREGROUND_COMMAND
 
 
 LOGIN_NOTICE_SCHEMA_VERSION = "gpubk.login-notice.v1"
@@ -123,7 +124,7 @@ def render_login_summary(summary: dict, *, color: bool = False) -> str:
         if worker.get("running") is not True:
             lines.append(
                 style(
-                    "  AUTO-RUN worker is not running; use tmux with `bk w start`, "
+                    f"  AUTO-RUN worker is not running; use tmux with `{WORKER_FOREGROUND_COMMAND}`, "
                     "or enable the user service",
                     "warning",
                     enabled=color,

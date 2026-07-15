@@ -110,6 +110,13 @@ from .worker import (
     run_worker,
 )
 from .worker_status import inspect_worker_status, reservations_need_worker
+from .worker_guidance import (
+    WORKER_ENABLE_COMMAND,
+    WORKER_FOREGROUND_COMMAND,
+    WORKER_INSTALL_COMMAND,
+    WORKER_STATUS_COMMAND,
+    WorkerGuidance,
+)
 
 try:
     import readline  # noqa: F401
@@ -1167,8 +1174,8 @@ def _run_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         if not due:
             print("run: queued; your worker will launch the command at the reservation start")
             print(
-                "worker: enable your user service once with `bk service install worker`, "
-                "then `systemctl --user enable --now bk-worker.service`"
+                f"worker: enable your user service once with `{WORKER_INSTALL_COMMAND}`, "
+                f"then `{WORKER_ENABLE_COMMAND}`"
             )
             print("worker: check it with `bk w`; an administrator may enable loginctl linger")
             return 0
@@ -1817,10 +1824,14 @@ def _service_command(argv: List[str], config: Config) -> int:
         print("after starting it, verify: bk doctor --require-worker --strict")
     username = shlex.quote(_current_actor().username)
     if args.kind == "worker":
-        print("temporary after SSH disconnect: keep `bk w start` running in tmux")
+        guidance = WorkerGuidance(_current_actor().username)
+        print(
+            "temporary after SSH disconnect: keep "
+            f"`{WORKER_FOREGROUND_COMMAND}` running in tmux"
+        )
         print(
             "Linux boot/logout persistence (admin): "
-            f"sudo bk admin worker-persistence enable {username}"
+            f"{guidance.admin_persistence_command}"
         )
     else:
         print(
@@ -1867,7 +1878,10 @@ def _worker_status_line(status: dict) -> str:
         suffix = f": {status['warning']}" if status.get("warning") else ""
         return f"worker: stopped{suffix}{persistence_suffix}"
     if state == "not-seen":
-        return f"worker: not seen (`bk w` checks status; `bk w start` launches it){persistence_suffix}"
+        return (
+            "worker: not seen (`bk w` checks status; "
+            f"`{WORKER_FOREGROUND_COMMAND}` launches it){persistence_suffix}"
+        )
     warning = str(status.get("warning") or "status unavailable")
     return f"worker: {state}: {warning}"
 
@@ -4303,8 +4317,8 @@ MANAGE
 JOBS AND USAGE
   bk run -- COMMAND              run on your active booking
   bk run 1 30m -- COMMAND        book the earliest GPU and run now/later
-  bk w                            inspect your scheduled-command worker
-  bk w start                      launch it in the foreground
+  {WORKER_STATUS_COMMAND:<31} inspect your scheduled-command worker
+  {WORKER_FOREGROUND_COMMAND:<31} launch it in the foreground
   bk w once                       run due work once, then exit
   bk worker                       full long-running worker command
   bk j / bk jl ID / bk jr ID     list, inspect, or retry jobs
