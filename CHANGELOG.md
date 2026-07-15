@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.1 - 2026-07-15
 
+- Surface destination booking warnings in human cluster output, including a missing
+  scheduled-command worker, live-GPU uncertainty, storage recovery, and allocator fallback.
+  Structured output keeps warnings in JSON only; human warnings are bounded, deduplicated,
+  and stripped of remote terminal control characters.
 - Preserve the `--` job-command boundary for explicit and automatically selected cluster
   bookings, inject retry and JSON options only into the GPUBK side, and require scheduled-job
   capabilities before routing a command to a mixed-version node. The isolated multi-host

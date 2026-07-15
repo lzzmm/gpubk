@@ -6,6 +6,7 @@ import math
 import os
 import re
 import stat
+import sys
 import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -38,6 +39,7 @@ SYSTEM_CLUSTER_FILE = Path("/etc/gpubk/cluster.json")
 MAX_CLUSTER_FILE_BYTES = 1024 * 1024
 MAX_CLUSTER_NODES = 128
 MAX_CLOCK_SKEW_SECONDS = 30
+MAX_REMOTE_WARNING_CHARS = 400
 _NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$")
 _NODE_ID = re.compile(r"^[0-9a-f]{20}$")
 _SSH_TARGET = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.@:\[\]-]{0,254}$")
@@ -459,6 +461,7 @@ def run_node_cli(node_name: str, argv: Sequence[str]) -> int:
             f"{_local_time(reservation.get('start_at'))} -> "
             f"{_local_time(reservation.get('end_at'))}"
         )
+        _print_remote_booking_warnings(payload, node.name)
     elif payload:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
@@ -1067,7 +1070,27 @@ def _submit_cluster_booking(
         f"{_local_time(reservation.get('start_at'))} -> "
         f"{_local_time(reservation.get('end_at'))}"
     )
+    _print_remote_booking_warnings(payload, selected.node.name)
     return 0
+
+
+def _print_remote_booking_warnings(payload: dict, node_name: str) -> None:
+    raw_warnings = payload.get("warnings")
+    if not isinstance(raw_warnings, list):
+        return
+    shown = set()
+    for value in raw_warnings:
+        if not isinstance(value, str):
+            continue
+        bounded = value[: MAX_REMOTE_WARNING_CHARS * 8]
+        printable = "".join(
+            character if character.isprintable() else " " for character in bounded
+        )
+        warning = _clip(" ".join(printable.split()), MAX_REMOTE_WARNING_CHARS)
+        if not warning or warning in shown:
+            continue
+        shown.add(warning)
+        print(f"warning [{node_name}]: {warning}", file=sys.stderr)
 
 
 def _cluster_usage(

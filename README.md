@@ -503,6 +503,10 @@ the automatically selected host. GPUBK-generated retry and JSON flags remain bef
 must advertise scheduled-job and private-spec support before it can receive this write.
 Use executable and script paths valid on the destination: the remote non-interactive
 SSH session supplies its working directory and `PATH`, not the caller's local directory.
+Human cluster bookings repeat destination warnings with the node name. A `created`
+reservation accompanied by a stopped or unseen worker warning will not execute its
+command until that destination user's worker is started. JSON callers should inspect
+`result.warnings` instead.
 In the browser, `Tab` changes focus and `Enter` opens complete reservation details.
 Older nodes remain visible during
 rolling upgrades but are read-only until they advertise the required safe-write

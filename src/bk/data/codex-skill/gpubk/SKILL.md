@@ -43,6 +43,9 @@ to advertise `scheduled_jobs`, `scheduled_job_path_snapshot`, and `private_job_s
 Do not assume the caller's local working directory exists on the selected host. Use
 destination-valid absolute executable and script paths; the remote non-interactive SSH
 session determines the captured working directory and `PATH`.
+After any cluster write, inspect the destination `result.warnings`. A committed
+reservation with a stopped, unseen, invalid, or wrong-instance worker is not proof that
+its scheduled command will launch; report the node-specific remediation to the user.
 Never merge identities by username; only administrator-provided `(node_id, uid)`
 principal mappings are authoritative. A cluster reservation never spans hosts.
 If an operation retry may belong to a disabled node, surface the unresolved routing

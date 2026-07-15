@@ -149,7 +149,9 @@ flattening node-local GPU indexes. `cluster-recommendation` ranks by start, node
 priority, and node name after validating duration, exact start, and any echoed request
 fields. Each node entry includes `rejected_reason` and `write_compatible`.
 `cluster-booking-result` contains one destination node, one
-stable operation ID, and the unchanged destination `bk.agent.v1` result.
+stable operation ID, and the unchanged destination `bk.agent.v1` result. Automation must
+inspect `result.warnings`; human cluster output prints the same distinct warnings with the
+destination node name, while structured output does not duplicate them on stderr.
 Cluster edit and cancel accept caller-supplied stable operation IDs and return a
 `cluster-mutation-result` containing the owning node and unchanged destination result.
 `cluster-check` reports per-node reachability, stable identity, actor attribution,

@@ -80,6 +80,10 @@ node as enabled.
   `PATH`; use executable and script paths that are valid on that host. GPUBK does not
   pretend that the submitting machine's current directory exists remotely.
 - `bk @NODE 2 1h` explicitly books one node using the ordinary booking syntax.
+- A successful human booking also prints every distinct destination warning with its
+  node name. In particular, do not ignore a stopped or unseen scheduled-command worker:
+  the reservation exists, but the command cannot launch until that user's worker runs.
+  JSON keeps the same warnings inside the destination `result.warnings` array.
 - Node-qualified IDs use `NODE/SHORT_ID`; the stored booking UUID is unchanged.
 - Ties are resolved by start time, configured node priority, live-load confidence,
   then node name. A remote broker performs the final locked validation.

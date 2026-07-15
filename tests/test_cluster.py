@@ -2,7 +2,7 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import timedelta
 from io import StringIO
 from pathlib import Path
@@ -228,6 +228,12 @@ class ClusterTests(unittest.TestCase):
             current,
             {
                 "status": "created",
+                "warnings": [
+                    "scheduled command worker is \x1b[31mstopped\x1b[0m\nstart it",
+                    "scheduled command worker is \x1b[31mstopped\x1b[0m\nstart it",
+                    "external allocator unavailable; builtin placement used",
+                    42,
+                ],
                 "reservation": {
                     "short_id": "12345678",
                     "gpus": [0],
@@ -247,6 +253,7 @@ class ClusterTests(unittest.TestCase):
             "debug",
             "; rm -rf /",
         ]
+        errors = StringIO()
         with (
             mock.patch("bk.cluster.load_cluster_config", return_value=config),
             mock.patch("bk.cluster._parallel", return_value=replies) as parallel,
@@ -254,6 +261,7 @@ class ClusterTests(unittest.TestCase):
                 "bk.cluster._invoke_idempotent_write", return_value=result
             ) as write,
             redirect_stdout(StringIO()),
+            redirect_stderr(errors),
         ):
             self.assertEqual(run_cluster_cli(["x", "1", "30m", "--", *job]), 0)
 
@@ -265,6 +273,11 @@ class ClusterTests(unittest.TestCase):
         self.assertIn("--op-id", sent[:separator])
         self.assertIn("--json", sent[:separator])
         self.assertEqual(sent[separator + 1 :], job)
+        warning_lines = errors.getvalue().splitlines()
+        self.assertEqual(len(warning_lines), 2)
+        self.assertIn("warning [current]: scheduled command worker", warning_lines[0])
+        self.assertNotIn("\x1b", warning_lines[0])
+        self.assertIn("external allocator unavailable", warning_lines[1])
 
     def test_explicit_node_job_injects_internal_options_before_delimiter(self):
         node = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
@@ -288,6 +301,7 @@ class ClusterTests(unittest.TestCase):
             node,
             {
                 "status": "created",
+                "warnings": ["scheduled command worker is not-seen"],
                 "reservation": {
                     "short_id": "12345678",
                     "gpus": [0],
@@ -298,6 +312,7 @@ class ClusterTests(unittest.TestCase):
             None,
         )
         job = ["python", "train.py", "--json", "--op-id", "job-value"]
+        errors = StringIO()
         with (
             mock.patch("bk.cluster.load_cluster_config", return_value=config),
             mock.patch("bk.cluster._invoke", return_value=context),
@@ -306,6 +321,7 @@ class ClusterTests(unittest.TestCase):
                 "bk.cluster._invoke_idempotent_write", return_value=result
             ) as write,
             redirect_stdout(StringIO()),
+            redirect_stderr(errors),
         ):
             self.assertEqual(run_node_cli("gpu-a", ["1", "30m", "--", *job]), 0)
 
@@ -315,6 +331,28 @@ class ClusterTests(unittest.TestCase):
         self.assertEqual(sent[:separator].count("--op-id"), 1)
         self.assertEqual(sent[:separator].count("--json"), 1)
         self.assertEqual(sent[separator + 1 :], job)
+        self.assertIn(
+            "warning [gpu-a]: scheduled command worker is not-seen",
+            errors.getvalue(),
+        )
+
+        output = StringIO()
+        errors = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._invoke", return_value=context),
+            mock.patch("bk.cluster._invoke_idempotent_write", return_value=result),
+            redirect_stdout(output),
+            redirect_stderr(errors),
+        ):
+            self.assertEqual(
+                run_node_cli("gpu-a", ["1", "30m", "--json", "--", *job]),
+                0,
+            )
+        self.assertEqual(
+            json.loads(output.getvalue())["warnings"], result.payload["warnings"]
+        )
+        self.assertEqual(errors.getvalue(), "")
 
     def test_cluster_jobs_fail_closed_on_missing_capabilities(self):
         node = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
