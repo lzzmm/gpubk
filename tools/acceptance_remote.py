@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import platform
+import shlex
 import shutil
 import socket
 import stat
@@ -730,6 +731,7 @@ def run_system_checks(
     version: str,
     sudo_ready: bool,
     include_journal: bool,
+    require_version_match: bool = True,
 ) -> None:
     bk_path = system_bk_command(system_bk)
     if bk_path is None:
@@ -750,9 +752,13 @@ def run_system_checks(
     report.command(
         "system.version",
         [bk_path, "--version"],
+        critical=require_version_match,
         validator=lambda result: result.stdout.strip() == f"bk {version}",
         success=f"deployed command matches candidate version {version}",
-        failure=f"deployed command is not candidate version {version}",
+        failure=(
+            f"deployed command is not candidate version {version}; source candidate "
+            "checks remain isolated and no service was upgraded"
+        ),
     )
     config_result = report.command(
         "system.config",
@@ -948,6 +954,8 @@ def run_live_gpu_workload(
     system_bk: str,
     live_python: str,
     seconds: int,
+    stage: Path,
+    remote_python: str,
 ) -> None:
     """Exercise production booking and attribution without touching busy GPUs."""
     bk_path = system_bk_command(system_bk)
@@ -967,18 +975,47 @@ def run_live_gpu_workload(
             summary="live workload duration is outside the 20-180 second safety bound",
         )
         return
+    site = stage / "site"
+    if not site.is_dir():
+        report.add(
+            "live-gpu-workload",
+            status="fail",
+            critical=True,
+            summary="candidate site is unavailable for the live test",
+        )
+        return
+    wrapper = stage / "candidate-bk"
+    wrapper.write_text(
+        "#!/bin/sh\nexec env PYTHONPATH="
+        + shlex.quote(str(site))
+        + " PYTHONNOUSERSITE=1 "
+        + shlex.quote(remote_python)
+        + ' -m bk "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o700)
+    environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("BK_")
+    }
+    environment["PYTHONPATH"] = str(site)
+    environment["PYTHONNOUSERSITE"] = "1"
     report.command(
         "live-gpu-workload",
         [
-            bk_path,
+            remote_python,
+            "-m",
+            "bk",
             "usage",
             "demo",
+            "--bk",
+            str(wrapper),
             "--python",
             live_python,
             "--seconds",
             str(seconds),
             "--yes",
         ],
+        env=environment,
         timeout=seconds + 180,
         success=(
             "an idle GPU was booked, exercised, attributed, and released; "
@@ -1090,6 +1127,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--live-gpu", action="store_true")
     result.add_argument("--live-seconds", type=int, default=65)
     result.add_argument("--live-python", default="python3")
+    result.add_argument("--source-candidate", action="store_true")
     result.add_argument("--download-wheelhouse", action="store_true")
     return result
 
@@ -1141,6 +1179,7 @@ def main(argv: list[str] | None = None) -> int:
             version=args.version,
             sudo_ready=sudo_ready,
             include_journal=args.include_journal,
+            require_version_match=not args.source_candidate,
         )
         if args.live_gpu:
             run_live_gpu_workload(
@@ -1148,6 +1187,8 @@ def main(argv: list[str] | None = None) -> int:
                 system_bk=args.system_bk,
                 live_python=args.live_python,
                 seconds=args.live_seconds,
+                stage=stage,
+                remote_python=remote_python,
             )
         exit_code = 2 if report.result == "fail" else 0
     except Exception as exc:  # noqa: BLE001 - report unexpected remote setup failures

@@ -317,8 +317,82 @@ def prepare_wheelhouse(
     return verify_wheelhouse(destination, version, verify_index=verify_index)
 
 
+def prepare_source_wheelhouse(destination: Path, version: str) -> list[Path]:
+    """Build this checkout and resolve its GPU extra into one private wheelhouse."""
+    destination.mkdir(mode=0o700)
+    build_output = destination.parent / "source-dist"
+    builders = (ROOT / ".venv" / "bin" / "python", Path(sys.executable))
+    builder = next(
+        (
+            path
+            for path in builders
+            if path.is_file()
+            and subprocess.run(
+                [str(path), "-c", "import build"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            ).returncode
+            == 0
+        ),
+        None,
+    )
+    if builder is None:
+        raise AcceptanceError(
+            "Python build frontend is unavailable; run "
+            "`.venv/bin/python -m pip install build`"
+        )
+    print(f"Building local GPUBK {version} candidate...", flush=True)
+    run_checked(
+        [
+            str(builder),
+            "-m",
+            "build",
+            "--wheel",
+            "--outdir",
+            str(build_output),
+            str(ROOT),
+        ],
+        timeout=180,
+    )
+    candidates = list(build_output.glob("gpubk-*.whl"))
+    if len(candidates) != 1:
+        raise AcceptanceError("source build did not produce exactly one GPUBK wheel")
+    _, built_version = wheel_metadata(candidates[0])
+    if built_version != version:
+        raise AcceptanceError(
+            f"source wheel version {built_version} does not match {version}"
+        )
+    run_checked(
+        [
+            str(builder),
+            "-m",
+            "pip",
+            "download",
+            "--disable-pip-version-check",
+            "--only-binary=:all:",
+            "--timeout",
+            "20",
+            "--retries",
+            "2",
+            "--progress-bar",
+            "off",
+            "--dest",
+            str(destination),
+            f"{candidates[0]}[gpu]",
+        ],
+        timeout=180,
+    )
+    return verify_wheelhouse(destination, version, verify_index=False)
+
+
 def build_manifest(
-    run_id: str, version: str, runner: Path, wheels: Sequence[Path]
+    run_id: str,
+    version: str,
+    runner: Path,
+    wheels: Sequence[Path],
+    *,
+    source: str = "https://pypi.org/project/gpubk/",
 ) -> dict[str, Any]:
     paths = [runner, *wheels]
     files: dict[str, dict[str, Any]] = {}
@@ -332,7 +406,7 @@ def build_manifest(
         "run_id": run_id,
         "version": version,
         "created_at": utc_now(),
-        "source": "https://pypi.org/project/gpubk/",
+        "source": source,
         "files": files,
     }
 
@@ -482,6 +556,7 @@ def runner_command(
     system_bk: str,
     sudo: bool,
     include_journal: bool,
+    source_candidate: bool = False,
     live_gpu: bool = False,
     live_seconds: int = 65,
     live_python: str = "python3",
@@ -502,6 +577,8 @@ def runner_command(
         options.append("--sudo")
     if include_journal:
         options.append("--include-journal")
+    if source_candidate:
+        options.append("--source-candidate")
     if live_gpu:
         options.extend(
             (
@@ -671,6 +748,11 @@ def parser() -> argparse.ArgumentParser:
         default="python3",
         help="remote CUDA Python containing PyTorch (default: python3)",
     )
+    result.add_argument(
+        "--source",
+        action="store_true",
+        help="build and test the current checkout instead of downloading GPUBK from PyPI",
+    )
     result.add_argument("--wheelhouse", type=Path, help="use a prepared wheelhouse")
     result.add_argument(
         "--skip-index-digest-check",
@@ -720,6 +802,8 @@ def main(argv: list[str] | None = None) -> int:
         parser().error("--include-journal requires --sudo")
     if args.skip_index_digest_check and args.wheelhouse is None:
         parser().error("--skip-index-digest-check requires --wheelhouse")
+    if args.source and args.wheelhouse is not None:
+        parser().error("--source cannot be combined with --wheelhouse")
     if args.port is not None and not 1 <= args.port <= 65535:
         parser().error("--port must be between 1 and 65535")
     if not 20 <= args.live_seconds <= 180:
@@ -750,7 +834,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"version: {version}")
         print(f"target: {args.target}")
         print(f"remote stage: ~/{relative_stage}")
-        print("download source: local, with automatic remote fallback")
+        print(
+            "candidate source: current checkout"
+            if args.source
+            else "download source: local, with automatic remote fallback"
+        )
         print(f"local report: {output}")
         if args.live_gpu:
             print(
@@ -775,25 +863,37 @@ def main(argv: list[str] | None = None) -> int:
         try:
             remote_download = False
             bundle: Path | None = None
-            try:
-                wheels = prepare_wheelhouse(
-                    wheelhouse,
+            if args.source:
+                wheels = prepare_source_wheelhouse(wheelhouse, version)
+                manifest = build_manifest(
+                    run_id,
                     version,
-                    args.wheelhouse,
-                    verify_index=not args.skip_index_digest_check,
+                    REMOTE_RUNNER,
+                    wheels,
+                    source="local-checkout",
                 )
-            except DownloadUnavailable as exc:
-                if args.wheelhouse is not None:
-                    raise
-                remote_download = True
-                print(
-                    f"Local PyPI unavailable ({exc}); using {args.target} instead.",
-                    flush=True,
-                )
-            else:
-                manifest = build_manifest(run_id, version, REMOTE_RUNNER, wheels)
                 bundle = build_bundle(work, manifest, REMOTE_RUNNER, wheels)
                 print(f"Bundle SHA256: {sha256_file(bundle)}", flush=True)
+            else:
+                try:
+                    wheels = prepare_wheelhouse(
+                        wheelhouse,
+                        version,
+                        args.wheelhouse,
+                        verify_index=not args.skip_index_digest_check,
+                    )
+                except DownloadUnavailable as exc:
+                    if args.wheelhouse is not None:
+                        raise
+                    remote_download = True
+                    print(
+                        f"Local PyPI unavailable ({exc}); using {args.target} instead.",
+                        flush=True,
+                    )
+                else:
+                    manifest = build_manifest(run_id, version, REMOTE_RUNNER, wheels)
+                    bundle = build_bundle(work, manifest, REMOTE_RUNNER, wheels)
+                    print(f"Bundle SHA256: {sha256_file(bundle)}", flush=True)
 
             setup = run_ssh(settings, remote_setup_command(run_id), capture=True)
             require_ssh_success(setup, "remote stage creation")
@@ -830,6 +930,7 @@ def main(argv: list[str] | None = None) -> int:
                     system_bk=args.system_bk,
                     sudo=args.sudo,
                     include_journal=args.include_journal,
+                    source_candidate=args.source,
                     live_gpu=args.live_gpu,
                     live_seconds=args.live_seconds,
                     live_python=args.live_python,

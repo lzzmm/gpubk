@@ -783,6 +783,17 @@ python3 tools/remote_acceptance.py USER@GPU-HOST \
   --live-python /home/USER/miniconda3/envs/torch/bin/python
 ```
 
+正式发布前可增加 `--source`：脚本会自动构建并上传当前工作区，不再要求该版本已经存在
+于 PyPI。候选程序只在远端私有目录运行，并通过当前正式 broker/monitor 验证兼容性，
+不会替换或重启服务：
+
+```bash
+python3 tools/remote_acceptance.py USER@GPU-HOST \
+  --source --sudo --live-gpu \
+  --remote-python /opt/gpubk/bin/python \
+  --system-bk /usr/local/bin/bk
+```
+
 报告保存在本地 `acceptance-reports/`，包含 JSON 结果、文字摘要、上传清单、原始压缩包
 和校验值。即使自动检查失败，脚本仍会尽量下载报告并返回非零状态。只有排错时才使用
 `--keep-remote`；`--include-journal` 会额外收集两个 GPUBK unit 最近 80 行日志，必须

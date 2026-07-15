@@ -922,6 +922,18 @@ python3 tools/remote_acceptance.py USER@GPU-HOST \
   --live-python /home/USER/miniconda3/envs/torch/bin/python
 ```
 
+Before publishing a release, add `--source` to build the current checkout and
+upload that exact candidate instead of downloading GPUBK from PyPI. The
+candidate runs from a private remote stage and exercises the deployed broker and
+monitor without replacing or restarting them:
+
+```bash
+python3 tools/remote_acceptance.py USER@GPU-HOST \
+  --source --sudo --live-gpu \
+  --remote-python /opt/gpubk/bin/python \
+  --system-bk /usr/local/bin/bk
+```
+
 Reports are written below `acceptance-reports/` and include the JSON result,
 human-readable summary, bundle manifest, original archive, and checksum. A
 failed automated check still downloads its report and returns a nonzero status.

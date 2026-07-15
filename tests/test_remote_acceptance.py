@@ -68,12 +68,14 @@ class LocalAcceptanceRunnerTests(unittest.TestCase):
             system_bk="/usr/local/bin/bk",
             sudo=True,
             include_journal=False,
+            source_candidate=True,
             live_gpu=True,
             live_seconds=65,
             live_python="/home/user/torch env/bin/python",
         )
 
         self.assertIn("--live-gpu", command)
+        self.assertIn("--source-candidate", command)
         self.assertIn("--live-seconds 65", command)
         self.assertIn("'/home/user/torch env/bin/python'", command)
 
@@ -327,25 +329,36 @@ class RemoteAcceptanceRunnerTests(unittest.TestCase):
         report = REMOTE.AcceptanceReport(
             run_id="run-1", version="1.2.3", live_workload_requested=True
         )
-        with (
-            mock.patch.object(REMOTE, "system_bk_command", return_value="/usr/bin/bk"),
-            mock.patch.object(report, "command") as command,
-        ):
-            REMOTE.run_live_gpu_workload(
-                report,
-                system_bk="bk",
-                live_python="/home/user/venv/bin/python",
-                seconds=65,
-            )
+        with tempfile.TemporaryDirectory() as raw_directory:
+            stage = Path(raw_directory)
+            (stage / "site").mkdir()
+            with (
+                mock.patch.object(
+                    REMOTE, "system_bk_command", return_value="/usr/bin/bk"
+                ),
+                mock.patch.object(report, "command") as command,
+            ):
+                REMOTE.run_live_gpu_workload(
+                    report,
+                    system_bk="bk",
+                    live_python="/home/user/venv/bin/python",
+                    seconds=65,
+                    stage=stage,
+                    remote_python="/opt/gpubk/bin/python",
+                )
 
         self.assertEqual(
             command.call_args.args,
             (
                 "live-gpu-workload",
                 [
-                    "/usr/bin/bk",
+                    "/opt/gpubk/bin/python",
+                    "-m",
+                    "bk",
                     "usage",
                     "demo",
+                    "--bk",
+                    str(stage / "candidate-bk"),
                     "--python",
                     "/home/user/venv/bin/python",
                     "--seconds",
@@ -385,6 +398,8 @@ class RemoteAcceptanceRunnerTests(unittest.TestCase):
                 system_bk="bk",
                 live_python="python3",
                 seconds=181,
+                stage=Path("/unused"),
+                remote_python="python3",
             )
 
         command.assert_not_called()
