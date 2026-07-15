@@ -98,12 +98,14 @@ class AdminInitTests(unittest.TestCase):
         self.assertNotIn("pip uninstall", hint)
 
     def test_python_uninstall_hint_for_system_interpreter(self):
+        executable = "/usr/bin/python3"
         with mock.patch.object(admin_module.sys, "prefix", "/usr"), mock.patch.object(
             admin_module.sys, "base_prefix", "/usr"
-        ), mock.patch.object(admin_module.sys, "executable", "/usr/bin/python3"):
+        ), mock.patch.object(admin_module.sys, "executable", executable):
             hint = _python_uninstall_hint()
 
-        self.assertIn("/usr/bin/python3 -m pip uninstall gpubk", hint)
+        resolved = Path(executable).resolve()
+        self.assertIn(f"{resolved} -m pip uninstall gpubk", hint)
 
     def plan(self, root: Path, **changes) -> AdminInitPlan:
         identity = non_root_identity()
