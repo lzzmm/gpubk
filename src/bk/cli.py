@@ -637,8 +637,30 @@ def _maybe_print_preset_suggestion(store: LedgerStore, actor: Actor) -> None:
         )
     except (OSError, ValueError):
         return
-    if suggestion is not None and suggestion["observations"] == 3:
+    if suggestion is None or suggestion["observations"] != 3:
+        return
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
         print(f"tip: {_preset_suggestion_text(suggestion)}")
+        return
+    name = str(suggestion["name"])
+    try:
+        answer = input(
+            f"Save this frequently used pattern as preset [{name}]? [Y/n]: "
+        ).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    if answer.lower() in {"n", "no"}:
+        return
+    if answer and answer.lower() not in {"y", "yes"}:
+        print("not saved; press Enter next time to accept the suggested name")
+        return
+    try:
+        saved = save_preset({**suggestion, "name": name})
+    except (OSError, ValueError) as exc:
+        print(f"warning: could not save preset: {exc}", file=sys.stderr)
+        return
+    print(f"saved preset: {saved['name']} (next time: `bk p {saved['name']}`)")
 
 
 def _book_command(
@@ -648,6 +670,7 @@ def _book_command(
     store: LedgerStore,
     *,
     prog: Optional[str] = None,
+    worker_notice: bool = True,
 ) -> int:
     booking_argv, command_argv = _split_job_command(argv)
     parser = argparse.ArgumentParser(
@@ -776,7 +799,8 @@ def _book_command(
                 f"job: {reservation['job'].get('status')} "
                 f"command={reservation['job'].get('summary', 'private command')}"
             )
-        _print_scheduled_job_worker(submission, quiet=args.quiet)
+        if worker_notice:
+            _print_scheduled_job_worker(submission, quiet=args.quiet)
     if store.last_warning:
         print(f"warning: {store.last_warning}", file=sys.stderr)
     if not args.quiet:
@@ -1128,6 +1152,7 @@ def _run_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             config,
             store,
             prog="bk run",
+            worker_notice=False,
         )
         if result:
             return result
@@ -1141,7 +1166,11 @@ def _run_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         ]
         if not due:
             print("run: queued; your worker will launch the command at the reservation start")
-            print("worker: keep `bk worker` running; check with `bk worker --status`")
+            print(
+                "worker: enable your user service once with `bk service install worker`, "
+                "then `systemctl --user enable --now bk-worker.service`"
+            )
+            print("worker: check it with `bk w`; an administrator may enable loginctl linger")
             return 0
         status = inspect_worker_status(config, actor)
         if status.get("running") is True:
@@ -3179,10 +3208,14 @@ def _list_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         action="store_true",
         help="show this UID's active, cancelled, and expired reservations",
     )
+    limit_group = parser.add_mutually_exclusive_group()
+    limit_group.add_argument("-n", "--limit", type=int, help="rows to show (default: 20)")
+    limit_group.add_argument("--no-limit", action="store_true", help="show every matching row")
     args = parser.parse_args(argv)
+    if args.limit is not None and (args.limit < 1 or args.limit > 1000):
+        parser.error("--limit must be between 1 and 1000")
     actor = _current_actor()
     ledger = store.load()
-    active = list_active(ledger)
     reservations = (
         sorted(
             [
@@ -3191,10 +3224,14 @@ def _list_command(argv: List[str], config: Config, store: LedgerStore) -> int:
                 if int(item.get("uid", -1)) == actor.uid
             ],
             key=lambda item: (str(item.get("start_at", "")), str(item.get("id", ""))),
+            reverse=True,
         )
         if args.history
-        else active
+        else _own_active_reservations(store, actor)
     )
+    total = len(reservations)
+    row_limit = args.limit if args.limit is not None else (None if args.json else 20)
+    visible = reservations if args.no_limit or row_limit is None else reservations[:row_limit]
     if args.json:
         print(
             json.dumps(
@@ -3203,8 +3240,10 @@ def _list_command(argv: List[str], config: Config, store: LedgerStore) -> int:
                     "kind": "reservations",
                     "reservations": [
                         public_reservation(item, actor, config.max_shared_users)
-                        for item in reservations
+                        for item in visible
                     ],
+                    "total": total,
+                    "truncated": len(visible) < total,
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -3215,15 +3254,30 @@ def _list_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         print("No reservation history." if args.history else "No active reservations.")
         return 0
     colors = color_enabled(sys.stdout)
-    if colors:
-        title = "YOUR RESERVATION HISTORY" if args.history else "YOUR RESERVATIONS"
-        print(style(title, "heading", enabled=True))
+    title = "YOUR RESERVATION HISTORY" if args.history else "YOUR RESERVATIONS"
+    print(style(title, "heading", enabled=colors))
     mine = _own_active_reservations(store, actor)
     mine_index = {reservation["id"]: index + 1 for index, reservation in enumerate(mine)}
-    for reservation in reservations:
+    terminal_width = shutil.get_terminal_size(fallback=(120, 24)).columns
+    wide = terminal_width >= 140
+    duration_values = {
+        str(item.get("id")): _duration_detail(
+            int((parse_iso(item["end_at"]) - parse_iso(item["start_at"])).total_seconds())
+        )
+        for item in visible
+    }
+    duration_width = max(3, min(20, max(map(len, duration_values.values()), default=3)))
+    if wide:
+        header = (
+            f"{'#':>3} {'ID':<8} {'Mode':<9} {'GPU':<10} {'Slots':>5} "
+            f"{'VRAM/GPU':>10} {'Job':<10} {'Start':<16} {'End':<16} {'Dur':>{duration_width}}"
+        )
+    else:
+        header = f"{'#':>3} {'ID':<8} {'Mode':<9} {'GPU':<8} {'Req':>5} {'Start':<11} {'End':<11} {'Dur':>{duration_width}}"
+    print(style(header, "muted", enabled=colors))
+    for reservation in visible:
         gpus = ",".join(str(item) for item in reservation.get("gpus", []))
         index = mine_index.get(reservation["id"], "-")
-        duration_seconds = int((parse_iso(reservation["end_at"]) - parse_iso(reservation["start_at"])).total_seconds())
         suffix = ""
         if args.history:
             cancellation = reservation.get("cancel_operation")
@@ -3234,16 +3288,36 @@ def _list_command(argv: List[str], config: Config, store: LedgerStore) -> int:
                 + (f" reason={reason}" if reason else "")
             )
         mode_role = "warning" if reservation["mode"] == MODE_EXCLUSIVE else "accent"
-        reservation_id = style(_short_id(reservation), "id", enabled=colors)
-        mode = style(str(reservation["mode"]), mode_role, enabled=colors)
-        print(
-            f"{index:>2} {reservation_id} {mode} uid={reservation['uid']} "
-            f"user={reservation['username']} gpu={gpus} "
-            f"{_reservation_share_label(reservation, config)}"
-            f"job={reservation.get('job', {}).get('status', '-')} "
-            f"dur={_duration_detail(duration_seconds)} "
-            f"{format_local_range(reservation['start_at'], reservation['end_at'])}{suffix}"
-        )
+        reservation_id = style(f"{_short_id(reservation):<8}", "id", enabled=colors)
+        mode = style(f"{str(reservation['mode']):<9}", mode_role, enabled=colors)
+        start = parse_iso(reservation["start_at"]).astimezone()
+        end = parse_iso(reservation["end_at"]).astimezone()
+        if wide:
+            memory = _reservation_memory_column(reservation, config, {})
+            job = str(reservation.get("job", {}).get("status", "-"))
+            line = (
+                f"{index:>3} {reservation_id} {mode} {_clip_text(gpus, 10):<10} "
+                f"{_reservation_slots_column(reservation, config):>5} {memory:>10} "
+                f"{_clip_text(job, 10):<10} {start:%m-%d %H:%M %z} "
+                f"{end:%m-%d %H:%M %z} {duration_values[str(reservation.get('id'))]:>{duration_width}}"
+            )
+        else:
+            line = (
+                f"{index:>3} {reservation_id} {mode} {_clip_text(gpus, 8):<8} "
+                f"{_reservation_slots_column(reservation, config):>5} "
+                f"{start:%m-%d %H:%M} {end:%m-%d %H:%M} "
+                f"{duration_values[str(reservation.get('id'))]:>{duration_width}}"
+            )
+        print(line)
+        if suffix:
+            detail = _clip_text(suffix.strip(), max(20, terminal_width - 4))
+            print(style(f"    {detail}", "muted", enabled=colors))
+    if len(visible) < total:
+        print(style(
+            f"showing {len(visible)} of {total}; use `bk l --no-limit` or `bk l -n N`",
+            "muted",
+            enabled=colors,
+        ))
     return 0
 
 
@@ -4424,12 +4498,13 @@ def _print_status(
     wide_status = terminal_width >= 88
     wide_reservations = terminal_width >= 124
     if wide_status:
-        print(
+        gpu_header = (
             f"{'GPU':<4} {'Model':<14} {'Util':>5} {'VRAM free/total':>16} "
             f"{'Proc':>4} {'State':<10} {'Used':>4} {'Max':>3} {'X-free':<11}"
         )
     else:
-        print(f"{'GPU':<4} {'Util':>5} {'VRAM free/total':>16} {'Proc':>4} {'State':<10} {'Used':>4} {'Max':>3} {'X-free':<11}")
+        gpu_header = f"{'GPU':<4} {'Util':>5} {'VRAM free/total':>16} {'Proc':>4} {'State':<10} {'Used':>4} {'Max':>3} {'X-free':<11}"
+    print(style(gpu_header, "muted", enabled=colors))
     for gpu in gpu_snapshots:
         if gpu.memory_total_mb:
             free = max(0, gpu.memory_total_mb - gpu.memory_used_mb) / 1024
@@ -4509,22 +4584,27 @@ def _print_status(
             for gpu in gpu_snapshots
             if gpu.memory_total_mb > 0
         }
+        visible_mine = mine[:8]
         if wide_reservations:
-            print(
+            reservation_header = (
                 f"  {'#':>2} {'ID':<8} {'Mode':<9} {'Slots':>5} {'GPU':<8} "
-                f"{'User':<12} {'VRAM/GPU':>10} {'Job':<10} {'Start':<14} {'End':<14} {'Dur':>7}"
+                f"{'User':<12} {'VRAM/GPU':>12} {'Job':<10} {'Start':<11} {'End':<11} {'Dur':>7}"
             )
-        for index, reservation in enumerate(mine, 1):
+            print(style(reservation_header, "muted", enabled=colors))
+        for index, reservation in enumerate(visible_mine, 1):
             gpus = ",".join(str(item) for item in reservation.get("gpus", []))
             if wide_reservations:
                 start = parse_iso(reservation["start_at"]).astimezone()
                 end = parse_iso(reservation["end_at"]).astimezone()
+                reservation_id = style(f"{_short_id(reservation):<8}", "id", enabled=colors)
+                mode_role = "warning" if reservation.get("mode") == MODE_EXCLUSIVE else "accent"
+                mode = style(f"{str(reservation['mode']):<9}", mode_role, enabled=colors)
                 print(
-                    f"  {index:>2} {_short_id(reservation):<8} {reservation['mode']:<9} "
+                    f"  {index:>2} {reservation_id} {mode} "
                     f"{_reservation_slots_column(reservation, config):>5} "
                     f"{_clip_text(gpus, 8):<8} "
                     f"{_clip_text(str(reservation.get('username', '?')), 12):<12} "
-                    f"{_reservation_memory_column(reservation, config, memory_capacities):>10} "
+                    f"{_reservation_memory_column(reservation, config, memory_capacities):>12} "
                     f"{_clip_text(str(reservation.get('job', {}).get('status', '-')), 10):<10} "
                     f"{start:%m-%d %H:%M} {end:%m-%d %H:%M} "
                     f"{_duration_compact(int((end - start).total_seconds())):>7}"
@@ -4535,6 +4615,12 @@ def _print_status(
                     f"{_reservation_share_label(reservation, config, compact=True)}"
                     f"G={_clip_text(gpus, 8):<8} {_compact_local_range(reservation['start_at'], reservation['end_at'])}"
                 )
+        if len(mine) > len(visible_mine):
+            print(style(
+                f"  +{len(mine) - len(visible_mine)} more; use `bk l` for details",
+                "muted",
+                enabled=colors,
+            ))
     if reservations_need_worker(mine, actor.uid):
         worker_status = inspect_worker_status(config, actor)
         print(_worker_status_line(worker_status))

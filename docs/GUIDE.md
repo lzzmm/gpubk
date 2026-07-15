@@ -401,6 +401,12 @@ itself, including shell redirections, are outside this policy.
 
 For unattended jobs, each user can install the bundled systemd user unit:
 
+The worker is the launcher for that user's private scheduled commands. It runs
+as that UID, sets `CUDA_VISIBLE_DEVICES`, supervises the command until the
+reservation ends, and writes private logs. It is not the shared broker or GPU
+monitor. Do not replace per-user workers with one root worker: that would give
+user commands unnecessary privilege and cross user privacy boundaries.
+
 ```bash
 bk service install worker
 systemctl --user daemon-reload

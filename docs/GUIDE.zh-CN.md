@@ -345,6 +345,11 @@ UID 状态。
 
 需要无人值守运行时，每位用户可以安装内置的 systemd user unit：
 
+worker 是“当前用户的预约脚本启动器”：它以该用户 UID 运行，设置
+`CUDA_VISIBLE_DEVICES`，监管脚本直到预约结束，并写入该用户的私有日志。它不是共享
+broker，也不是 GPU monitor。不要用一个 root worker 代替所有用户的 worker，否则用户
+脚本会获得不必要的高权限，同时破坏用户间的日志和命令隔离。
+
 ```bash
 bk service install worker
 systemctl --user daemon-reload
