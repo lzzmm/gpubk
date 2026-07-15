@@ -563,7 +563,7 @@ def _cluster_status(config: ClusterConfig, *, json_output: bool = False) -> int:
                             "enabled": reply.node.enabled,
                             "available": reply.node.enabled and reply.error is None,
                             "error": reply.error,
-                            "context": reply.payload,
+                            "context": _context_with_principals(config, reply),
                         }
                         for reply in replies
                     ],
@@ -610,11 +610,7 @@ def _cluster_status(config: ClusterConfig, *, json_output: bool = False) -> int:
             if isinstance(raw_gpus, list)
             else []
         )
-        idle = sum(
-            1
-            for gpu in gpus
-            if isinstance(gpu.get("live"), dict) and gpu["live"].get("status") == "idle"
-        )
+        idle = _idle_gpu_text(gpus)
         raw_reservations = payload.get("reservations")
         node_reservations = (
             [item for item in raw_reservations if isinstance(item, dict)]
@@ -658,7 +654,7 @@ def _cluster_status(config: ClusterConfig, *, json_output: bool = False) -> int:
             for _node_name, reservation in reservations
         )
         print(
-            f"{'ID':<25} {'Own':<3} {'User':<16} {'Mode':<6} {'Req':>5} "
+            f"{'ID':<25} {'Own':<3} {'Identity':<16} {'Mode':<6} {'Req':>5} "
             f"{'VRAM':>8} {'GPU':<10} "
             + (f"{'Job':<10} " if show_jobs else "")
             + f"{'Start':<22} {'End':<22}"
@@ -669,13 +665,19 @@ def _cluster_status(config: ClusterConfig, *, json_output: bool = False) -> int:
         ):
             short_id = reservation.get("short_id") or str(reservation.get("id", ""))[:8]
             qualified = f"{node_name}/{short_id}"
+            node = config.node(node_name)
+            identity = _principal_for(
+                config,
+                node.node_id,
+                reservation.get("uid"),
+            ) or str(reservation.get("username", "?"))
             job_text = (
                 f"{_reservation_job_text(reservation):<10} " if show_jobs else ""
             )
             print(
                 f"{_clip(qualified, 25):<25} "
                 f"{('*' if reservation.get('mine') is True else '-'):<3} "
-                f"{_clip(str(reservation.get('username', '?')), 16):<16} "
+                f"{_clip(identity, 16):<16} "
                 f"{_reservation_mode_text(reservation):<6} "
                 f"{_reservation_request_text(reservation):>5} "
                 f"{_reservation_memory_text(reservation):>8} "
@@ -839,6 +841,7 @@ def _cluster_check(
             "status": "disabled" if not reply.node.enabled else "ready",
             "version": None,
             "actor": None,
+            "principal": None,
             "clock_skew_seconds": None,
             "worker": None,
             "missing_capabilities": [],
@@ -863,6 +866,11 @@ def _cluster_check(
                 "uid": actor.get("uid"),
                 "username": actor.get("username"),
             }
+            check["principal"] = _principal_for(
+                config,
+                reply.node.node_id,
+                actor.get("uid"),
+            )
         skew = _clock_skew_seconds(payload)
         check["clock_skew_seconds"] = None if skew is None else round(skew, 3)
         missing = _missing_capabilities(payload, required)
@@ -928,6 +936,7 @@ def _cluster_check(
             )
         checks.append(check)
 
+    _warn_inconsistent_actor_principals(checks)
     enabled = [item for item in checks if item["enabled"]]
     failures = [item for item in enabled if item["status"] == "failed"]
     warnings = sum(len(item["warnings"]) for item in enabled)
@@ -962,19 +971,55 @@ def _cluster_check(
             print(f"fail {item['name']}: {_clip(str(item['error']), 240)}")
             continue
         actor = item["actor"] or {}
+        principal = item["principal"]
         version = item["version"] or "unknown"
         skew = item["clock_skew_seconds"]
         clock = f"{skew:.1f}s" if isinstance(skew, (int, float)) else "unknown"
         print(
             f"pass {item['name']}: v{_clip(str(version), 32)} actor="
             f"{_clip(str(actor.get('username', '?')), 64)}:"
-            f"{actor.get('uid', '?')} clock={clock}"
+            f"{actor.get('uid', '?')} "
+            + (f"principal={principal} " if principal is not None else "")
+            + f"clock={clock}"
         )
         for warning in item["warnings"]:
             print(f"warn {item['name']}: {_clip(str(warning), 240)}")
     if not enabled:
         print("fail cluster: no enabled nodes; ask an administrator to enable one")
     return 0 if ready else 3
+
+
+def _warn_inconsistent_actor_principals(checks: Sequence[dict]) -> None:
+    healthy = [
+        item
+        for item in checks
+        if item.get("enabled") is True
+        and item.get("status") == "ready"
+        and isinstance(item.get("actor"), dict)
+    ]
+    mapped = {
+        str(item["principal"])
+        for item in healthy
+        if item.get("principal") is not None
+    }
+    if not mapped:
+        return
+    if len(mapped) > 1:
+        detail = ",".join(sorted(mapped))
+        warning = (
+            "this SSH identity maps to different cluster principals "
+            f"({detail}); usage will be split"
+        )
+        for item in healthy:
+            item["warnings"].append(warning)
+        return
+    principal = next(iter(mapped))
+    for item in healthy:
+        if item.get("principal") is None:
+            item["warnings"].append(
+                "this SSH identity is not mapped to cluster principal "
+                f"{principal}; usage from this node will remain separate"
+            )
 
 
 def _context_has_pending_job(payload: dict) -> bool:
@@ -1736,11 +1781,21 @@ def _print_cluster_mutation(
         return 0
     reservation = payload.get("reservation", {})
     short_id = reservation.get("short_id") or str(reservation.get("id", ""))[:8]
+    status = _cluster_mutation_status(payload, action)
     print(
-        f"{_clip(str(payload.get('status', payload.get('kind', 'updated'))), 16)}: "
+        f"{status}: "
         f"{reply.node.name}/{_clip(str(short_id), 64)}"
     )
     return 0
+
+
+def _cluster_mutation_status(payload: dict, action: str) -> str:
+    if action == "cancel":
+        return "cancelled"
+    status = payload.get("status")
+    if status == "exists":
+        return "unchanged"
+    return str(status) if status in {"updated", "queued"} else "updated"
 
 
 def _parallel(
@@ -2449,6 +2504,19 @@ def _gpu_text(value: object) -> str:
     return ",".join(map(str, indices)) if indices else "-"
 
 
+def _idle_gpu_text(gpus: Sequence[dict]) -> str:
+    states = []
+    for gpu in gpus:
+        live = gpu.get("live")
+        status = live.get("status") if isinstance(live, dict) else None
+        if status not in {"idle", "busy"}:
+            return "?"
+        states.append(status)
+    if not states:
+        return "?"
+    return str(sum(status == "idle" for status in states))
+
+
 def _reservation_mode_text(reservation: dict) -> str:
     mode = reservation.get("mode")
     if mode == "shared":
@@ -2524,6 +2592,37 @@ def _principal_for(config: ClusterConfig, node_id: str, uid: object) -> Optional
         ):
             return str(principal["id"])
     return None
+
+
+def _context_with_principals(config: ClusterConfig, reply: NodeReply) -> Optional[dict]:
+    payload = reply.payload
+    if not isinstance(payload, dict):
+        return payload
+    context = dict(payload)
+    actor = payload.get("actor")
+    if isinstance(actor, dict):
+        principal = _principal_for(config, reply.node.node_id, actor.get("uid"))
+        if principal is not None:
+            context["actor"] = {**actor, "principal": principal}
+    reservations = payload.get("reservations")
+    if isinstance(reservations, list):
+        enriched = []
+        for reservation in reservations:
+            if not isinstance(reservation, dict):
+                enriched.append(reservation)
+                continue
+            principal = _principal_for(
+                config,
+                reply.node.node_id,
+                reservation.get("uid"),
+            )
+            enriched.append(
+                {**reservation, "principal": principal}
+                if principal is not None
+                else reservation
+            )
+        context["reservations"] = enriched
+    return context
 
 
 def _is_booking_command(argv: Sequence[str]) -> bool:

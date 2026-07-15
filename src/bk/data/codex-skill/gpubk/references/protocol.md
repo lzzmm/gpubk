@@ -147,7 +147,9 @@ Cluster responses use `schema_version: "gpubk.cluster.v1"`. The root-owned catal
 binds a display name and priority to an expected stable node ID. Every remote Agent,
 usage, recommendation, and booking response includes `node.id`; a mismatch fails
 closed. `cluster-context` returns each node's ordinary `bk.agent.v1` context without
-flattening node-local GPU indexes. `cluster-recommendation` ranks by start, node
+flattening node-local GPU indexes. When configured, additive `principal` fields enrich
+actors and reservations while preserving their authoritative node-local UID and username.
+`cluster-recommendation` ranks by start, node
 priority, and node name after validating duration, exact start, and any echoed request
 fields. Each node entry includes `rejected_reason` and `write_compatible`.
 When at least one candidate is write-compatible, `selected_node` is the same first
@@ -165,7 +167,9 @@ Cluster edit and cancel accept caller-supplied stable operation IDs and return a
 `cluster-mutation-result` containing the owning node and unchanged destination result.
 `cluster-check` reports per-node reachability, stable identity, actor attribution,
 clock skew, schedulable GPU count, required write capabilities, and the current remote
-actor's worker state. With `--jobs`, scheduled-job capabilities and a running worker are
+actor's worker state and optional global principal. Incomplete or inconsistent mappings
+are warnings because they split reporting but do not weaken node-local authorization.
+With `--jobs`, scheduled-job capabilities and a running worker are
 required on every enabled node. Without it, a pending scheduled command and stopped worker
 is a warning rather than a reservation-readiness failure. Its `ready` field is false when
 no enabled node is usable. `cluster-node-probe` is a pre-catalog, read-only SSH discovery

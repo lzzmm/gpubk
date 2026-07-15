@@ -12,6 +12,8 @@ from .cluster import (
     ClusterConfig,
     NodeReply,
     _clock_skew_seconds,
+    _idle_gpu_text,
+    _principal_for,
     _reservation_memory_text,
     _reservation_mode_text,
     _reservation_request_text,
@@ -87,13 +89,7 @@ def render_cluster_lines(
             if skew is None or skew > MAX_CLOCK_SKEW_SECONDS:
                 state = "clock-skew"
             gpus = str(policy.get("gpu_count", len(advice)))
-            idle = str(
-                sum(
-                    1
-                    for item in advice
-                    if _mapping(item.get("live")).get("status") == "idle"
-                )
-            )
+            idle = _idle_gpu_text(advice)
             mine = str(
                 sum(
                     1
@@ -175,7 +171,7 @@ def render_cluster_lines(
             lines.append(_fit("", width))
             lines.append(
                 _fit(
-                    "  ID       User             Mode     Req     VRAM GPU      Start -> End",
+                    "  ID       Identity         Mode     Req     VRAM GPU      Start -> End",
                     width,
                 )
             )
@@ -198,9 +194,14 @@ def render_cluster_lines(
                     if focus == FOCUS_RESERVATIONS and index == selected_reservation
                     else " "
                 )
+                identity = _principal_for(
+                    config,
+                    node.node_id,
+                    reservation.get("uid"),
+                ) or str(reservation.get("username", "?"))
                 lines.append(
                     _fit(
-                        f"{marker} {short_id:<8} {str(reservation.get('username', '?')):<16} "
+                        f"{marker} {short_id:<8} {identity:<16} "
                         f"{_reservation_mode_text(reservation):<6} "
                         f"{_reservation_request_text(reservation):>5} "
                         f"{_reservation_memory_text(reservation):>8} "
@@ -336,6 +337,11 @@ def _cluster_tui_main(screen, config: ClusterConfig) -> None:
                         _reservation_detail_lines(
                             config.nodes[state.selected_node],
                             reservations[state.selected_reservation],
+                            principal=_principal_for(
+                                config,
+                                config.nodes[state.selected_node].node_id,
+                                reservations[state.selected_reservation].get("uid"),
+                            ),
                         ),
                     )
             elif key in {ord("b"), ord("?")}:
@@ -390,6 +396,8 @@ def _selected_reservations(
 def _reservation_detail_lines(
     node: ClusterNode,
     reservation: dict,
+    *,
+    principal: str | None = None,
 ) -> list[str]:
     short_id = reservation.get("short_id") or str(reservation.get("id", ""))[:8]
     qualified = f"{node.name}/{short_id}"
@@ -401,6 +409,7 @@ def _reservation_detail_lines(
         f"ID: {qualified}",
         f"Full UUID: {reservation.get('id', '?')}",
         f"Owner: {owner} - {access}",
+        *([f"Cluster identity: {principal}"] if principal is not None else []),
         f"Mode: {_reservation_mode_text(reservation)}",
         f"Capacity request: {_reservation_request_text(reservation)}",
         f"Expected VRAM/GPU: {_reservation_memory_text(reservation)}",

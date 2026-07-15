@@ -99,10 +99,21 @@ class ClusterTuiTests(unittest.TestCase):
         )
         self.assertEqual(len(lines), 14)
         self.assertTrue(any("gpu-a" in line for line in lines))
+        node_row = next(line for line in lines if line.startswith(">gpu-a"))
+        self.assertRegex(node_row, r"\s+\?\s+0\s+")
 
     def test_reservation_focus_shows_capacity_memory_and_selected_marker(self):
         node = ClusterNode("gpu-a", "a" * 20, "local", None, "/usr/bin/bk", 0, 8)
-        config = ClusterConfig(Path("/cluster.json"), (node,))
+        config = ClusterConfig(
+            Path("/cluster.json"),
+            (node,),
+            (
+                {
+                    "id": "lab-user",
+                    "members": [{"node_id": node.node_id, "uid": 1003}],
+                },
+            ),
+        )
         reservation = {
             "id": "12345678-1234-1234-1234-123456789abc",
             "short_id": "12345678",
@@ -134,7 +145,9 @@ class ClusterTuiTests(unittest.TestCase):
         selected = next(line for line in lines if line.startswith("> "))
         self.assertIn("3/4", selected)
         self.assertIn("12G", selected)
-        details = _reservation_detail_lines(node, reservation)
+        self.assertIn("lab-user", selected)
+        details = _reservation_detail_lines(node, reservation, principal="lab-user")
+        self.assertIn("Cluster identity: lab-user", details)
         self.assertIn("Edit:   bk c e gpu-a/12345678 -d 1h", details)
         self.assertIn("Cancel: bk c d gpu-a/12345678", details)
 

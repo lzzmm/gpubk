@@ -1336,6 +1336,63 @@ class ClusterTests(unittest.TestCase):
         self.assertIn("scheduled command is pending", output.getvalue())
         self.assertIn("bk service install worker", output.getvalue())
 
+    def test_cluster_check_warns_when_current_principal_mapping_is_incomplete(self):
+        first = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        second = ClusterNode("gpu-b", "b" * 20, "ssh", "b", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(
+            Path("/cluster.json"),
+            (first, second),
+            (
+                {
+                    "id": "lab-user",
+                    "members": [{"node_id": first.node_id, "uid": 1001}],
+                },
+            ),
+        )
+        capabilities = {
+            "federated_node_identity": True,
+            "idempotent_booking": True,
+            "operation_status": True,
+            "preflight_idempotent_replay": True,
+            "idempotent_edit": True,
+            "idempotent_cancel": True,
+        }
+
+        def context(node):
+            return NodeReply(
+                node,
+                {
+                    "generated_at": to_iso(utc_now()),
+                    "software": {"version": "0.2.1"},
+                    "actor": {"uid": 1001, "username": "alice"},
+                    "policy": {
+                        "gpu_count": 1,
+                        "monitoring": {"collector": {"state": "running"}},
+                    },
+                    "capabilities": capabilities,
+                    "worker": {"state": "not-seen", "running": False},
+                    "reservations": [],
+                },
+                None,
+            )
+
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch(
+                "bk.cluster.query_cluster_contexts",
+                return_value=[context(first), context(second)],
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(run_cluster_cli(["check", "--json"]), 0)
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["summary"]["warnings"], 1)
+        self.assertEqual(result["nodes"][0]["principal"], "lab-user")
+        self.assertIsNone(result["nodes"][1]["principal"])
+        self.assertIn("will remain separate", result["nodes"][1]["warnings"][0])
+
     def test_status_adds_job_column_only_when_a_scheduled_command_exists(self):
         node = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
         config = ClusterConfig(Path("/cluster.json"), (node,))
@@ -1609,6 +1666,119 @@ class ClusterTests(unittest.TestCase):
             self.assertEqual(run_cluster_cli(["status"]), 0)
         self.assertIn("malformed", output.getvalue())
         self.assertIn("healthy", output.getvalue())
+
+    def test_cluster_status_does_not_report_unknown_telemetry_as_zero_idle(self):
+        node = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        payload = {
+            "generated_at": to_iso(utc_now()),
+            "software": {"version": "0.2.1"},
+            "policy": {"gpu_count": 2},
+            "gpu_advice": {
+                "gpus": [
+                    {"index": 0, "live": {"status": "idle"}},
+                    {"index": 1, "live": {"status": "unknown"}},
+                ]
+            },
+            "reservations": [],
+            "actor": {"uid": 1001, "username": "alice"},
+        }
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch(
+                "bk.cluster.query_cluster_contexts",
+                return_value=[NodeReply(node, payload, None)],
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(run_cluster_cli(["status"]), 0)
+        row = next(
+            line for line in output.getvalue().splitlines() if line.startswith("gpu-a")
+        )
+        self.assertRegex(row, r"\s+2\s+\?\s+0\s+")
+
+    def test_cluster_status_applies_principals_without_mutating_remote_context(self):
+        node = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(
+            Path("/cluster.json"),
+            (node,),
+            (
+                {
+                    "id": "lab-user",
+                    "members": [{"node_id": node.node_id, "uid": 1001}],
+                },
+            ),
+        )
+        reservation = {
+            "short_id": "12345678",
+            "uid": 1001,
+            "username": "alice",
+            "mode": "shared",
+            "gpus": [0],
+            "start_at": "2030-01-01T00:00:00Z",
+            "end_at": "2030-01-01T00:30:00Z",
+        }
+        payload = {
+            "generated_at": to_iso(utc_now()),
+            "software": {"version": "0.2.1"},
+            "policy": {"gpu_count": 1},
+            "actor": {"uid": 1001, "username": "alice"},
+            "reservations": [reservation],
+        }
+        reply = NodeReply(node, payload, None)
+        human = StringIO()
+        structured = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster.query_cluster_contexts", return_value=[reply]),
+            redirect_stdout(human),
+        ):
+            self.assertEqual(run_cluster_cli(["status"]), 0)
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster.query_cluster_contexts", return_value=[reply]),
+            redirect_stdout(structured),
+        ):
+            self.assertEqual(run_cluster_cli(["status", "--json"]), 0)
+
+        self.assertIn("lab-user", human.getvalue())
+        context = json.loads(structured.getvalue())["nodes"][0]["context"]
+        self.assertEqual(context["actor"]["principal"], "lab-user")
+        self.assertEqual(context["reservations"][0]["principal"], "lab-user")
+        self.assertNotIn("principal", payload["actor"])
+        self.assertNotIn("principal", reservation)
+
+    def test_human_cluster_cancel_uses_a_stable_status_label(self):
+        node = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        capabilities = {
+            "federated_node_identity": True,
+            "idempotent_cancel": True,
+            "operation_status": True,
+        }
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch(
+                "bk.cluster._invoke",
+                return_value=NodeReply(node, {"capabilities": capabilities}, None),
+            ),
+            mock.patch(
+                "bk.cluster._invoke_idempotent_write",
+                return_value=NodeReply(
+                    node,
+                    {
+                        "kind": "cancellation_result",
+                        "reservation": {"short_id": "12345678"},
+                    },
+                    None,
+                ),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(run_cluster_cli(["d", "gpu-a/12345678"]), 0)
+        self.assertEqual(output.getvalue(), "cancelled: gpu-a/12345678\n")
 
     def test_stale_preflight_rejection_never_fails_over_to_another_node(self):
         first = ClusterNode("first", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)

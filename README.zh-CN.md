@@ -593,6 +593,11 @@ bk c 1 30m -t "tomorrow 9"  # 本地自然时间，精确开始
 bk c 1 2h -- python /absolute/path/train.py
 ```
 
+身份映射只用于展示与统计，不参与授权：真正能修改什么仍由 SSH 身份和目标节点上的数字
+UID 决定。映射后的 principal 会显示在实时预约表、TUI 详情、用量汇总和结构化 cluster
+context 中。若当前用户只在部分节点完成映射，或被映射成不同 principal，`bk c check`
+会给出 warning，避免历史积累后才发现统计被拆成多个人。
+
 纯远端客户端把前两行替换为 `bk c probe gpu-a gpu-a`，执行它打印的 add 命令后，再
 probe/add `gpu-b`。首次建档使用 create-only 原子发布；若并发出现 catalog，会拒绝覆盖。
 

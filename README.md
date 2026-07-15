@@ -704,6 +704,12 @@ bk c 1 30m -t "tomorrow 9"  # exact friendly local start
 bk c 1 2h -- python /absolute/path/train.py
 ```
 
+The mapping is reporting metadata, not authorization: SSH and the destination's
+numeric UID still decide what a caller may change. Mapped principals appear in live
+reservation rows, TUI details, usage aggregation, and structured cluster contexts.
+`bk c check` warns when the current caller is mapped on only some nodes or to different
+principals, so incomplete reporting setup is visible before collecting history.
+
 For a remote-only client, replace the first two lines with `bk c probe gpu-a gpu-a`
 and run its printed add command, then probe and add `gpu-b`. Catalog creation is
 create-only and refuses to replace a file that appears concurrently.

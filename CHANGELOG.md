@@ -4,6 +4,12 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.1 - 2026-07-15
 
+- Distinguish unknown live telemetry from zero idle GPUs in cluster views, and print
+  a clear `cancelled` label after human cluster cancellation commands.
+- Show configured global principals in live cluster reservation views and enrich
+  structured cluster contexts without changing node-local UID authorization.
+- Make `bk c check` report incomplete or inconsistent current-user principal mappings
+  before they silently split cross-node usage summaries.
 - Verify rendered broker and monitor units with the host's real `systemd-analyze`
   parser on Linux CI, while keeping the test explicitly skipped on non-systemd hosts.
 - Keep `bk c rec` and `bk c` destination selection consistent during rolling upgrades:

@@ -142,6 +142,9 @@ contain the independently managed single-host configuration.
   JSON keeps the same warnings inside the destination `result.warnings` array.
 - `bk c` keeps the reservation table compact for reservation-only use and adds a `Job`
   column automatically when any scheduled command is present.
+- When a node-local UID is mapped, live CLI/TUI reservation rows show the global
+  principal as their identity. Structured cluster contexts add the same `principal`
+  field while retaining the original numeric UID and username.
 - Node-qualified IDs use `NODE/SHORT_ID`; the stored booking UUID is unchanged.
 - Ties are resolved by start time, configured node priority, live-load confidence,
   then node name. A remote broker performs the final locked validation.
@@ -192,6 +195,9 @@ Numeric UIDs are node-local and usernames are display labels only. The client ch
 that each response's stable node ID matches the configured endpoint. SSH determines
 the actual remote actor; the client records that actor and applies explicit mappings
 for reporting. Unknown mappings remain separate instead of being guessed or merged.
+Mappings never grant reservation permissions. `bk c check` warns when the current
+caller's identities are only partly mapped or map to different principals, because
+that would split usage reports even though booking remains safe.
 
 ## Storage and NFS
 

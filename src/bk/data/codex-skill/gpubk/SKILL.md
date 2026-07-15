@@ -53,6 +53,8 @@ reservation with a stopped, unseen, invalid, or wrong-instance worker is not pro
 its scheduled command will launch; report the node-specific remediation to the user.
 Never merge identities by username; only administrator-provided `(node_id, uid)`
 principal mappings are authoritative. A cluster reservation never spans hosts.
+Treat `principal` as reporting metadata only. Keep the original node ID and numeric UID
+for ownership decisions, and surface mapping warnings from `bk c check --json`.
 Never recommend `user@host` for a shared root-owned catalog. Use a username-free host
 or per-user SSH alias so the destination broker sees each caller's own remote UID.
 On a client without local GPUs, do not invent a local node or run `cluster init`.
