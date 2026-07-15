@@ -30,7 +30,7 @@ class AdminClusterTests(unittest.TestCase):
             "gpu-b",
             "b" * 20,
             "ssh",
-            "operator@gpu-b",
+            "gpu-b",
             "/usr/local/bin/bk",
             7,
             8,
@@ -59,6 +59,56 @@ class AdminClusterTests(unittest.TestCase):
             run_admin_cli(["cluster", "status"])
         load.assert_not_called()
 
+    def test_status_exposes_and_set_repairs_a_legacy_pinned_ssh_user(self):
+        pinned = ClusterNode(
+            "gpu-b",
+            "b" * 20,
+            "ssh",
+            "operator@gpu-b",
+            "/usr/local/bin/bk",
+            0,
+            8,
+        )
+        current = ClusterConfig(Path("/etc/gpubk/cluster.json"), (pinned,))
+        output = StringIO()
+        with (
+            mock.patch("bk.admin_cluster.os.geteuid", return_value=0),
+            mock.patch(
+                "bk.admin_cluster.load_cluster_config",
+                return_value=current,
+            ) as load,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(run_admin_cli(["cluster", "status", "--json"]), 3)
+        load.assert_called_once_with(
+            Path("/etc/gpubk/cluster.json"),
+            allow_legacy_pinned_user_for_repair=True,
+        )
+        document = json.loads(output.getvalue())
+        self.assertFalse(document["ready"])
+        self.assertIn("must not pin an SSH username", document["issues"][0])
+
+        with (
+            mock.patch("bk.admin_cluster.os.geteuid", return_value=0),
+            mock.patch("bk.admin_cluster.load_cluster_config", return_value=current),
+            mock.patch("bk.admin_cluster.write_cluster_config") as write,
+            redirect_stdout(StringIO()),
+        ):
+            self.assertEqual(
+                run_admin_cli(
+                    [
+                        "cluster",
+                        "set",
+                        "gpu-b",
+                        "--target",
+                        "gpu-b",
+                        "--yes",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(write.call_args.args[0].node("gpu-b").target, "gpu-b")
+
     def test_add_map_and_remove_preserve_catalog_invariants(self):
         path = Path("/etc/gpubk/cluster.json")
         current = ClusterConfig(path, (self.local_node(),))
@@ -74,7 +124,7 @@ class AdminClusterTests(unittest.TestCase):
                         "cluster",
                         "add",
                         "gpu-b",
-                        "operator@gpu-b",
+                        "gpu-b",
                         "b" * 20,
                         "--priority",
                         "7",

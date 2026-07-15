@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.1 - 2026-07-15
 
+- Prevent a shared root-owned cluster catalog from pinning `user@host`, which would
+  make every local caller act as one remote UID. System catalogs now require a
+  username-free host or per-user SSH alias; administrator status and set operations
+  can still read and repair legacy entries without enabling ordinary cluster writes.
 - Make full managed uninstall recognize and remove a validated standard cluster catalog
   when GPUBK originally created the configuration directory, while preserving catalogs
   in pre-existing directories and continuing to reject unknown privileged files.

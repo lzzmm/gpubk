@@ -4319,7 +4319,7 @@ def _validated_managed_cluster_catalog(
     # Import lazily because admin_cluster imports this module's public entrypoint.
     from .cluster import load_cluster_config
 
-    load_cluster_config(path)
+    load_cluster_config(path, allow_legacy_pinned_user_for_repair=True)
     return path
 
 

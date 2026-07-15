@@ -11,6 +11,9 @@ Supported security boundaries:
 
 - The broker takes client identity from Linux `SO_PEERCRED`; client-supplied UID and username
   fields are not authoritative. Private/direct mode uses the local process UID.
+- A shared root-owned cluster catalog accepts only username-free SSH hosts or aliases. It never
+  pins `user@host`, which would collapse every local caller onto one remote UID. OpenSSH resolves
+  each caller's account and the destination broker authorizes that resulting numeric UID.
 - Broker-backed workers send bounded, per-reservation job patches rather than a writable copy of
   the full ledger. The broker checks a compare-and-swap digest and revalidates every changed field
   against the kernel-authenticated UID before committing it.

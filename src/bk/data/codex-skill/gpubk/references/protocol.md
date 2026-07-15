@@ -172,6 +172,12 @@ omit `enabled` for the default
 true state and use `enabled=false` for maintenance; disabled nodes remain visible in
 context/history but are not contacted or considered for placement.
 
+Root-owned catalog SSH targets are username-free hosts or per-user aliases. A fixed
+`user@host` target is rejected because it would make every local caller act as one remote
+numeric UID. User-owned custom catalogs may pin a username, but probe returns no root
+administrator `add_argv` for such a target. Administrator repair mode may read a legacy
+pinned entry only so status, set, remove, or tracked uninstall can correct it safely.
+
 Reservation references outside their owning node use `NODE/SHORT_ID`. Automatic
 booking never splits a request across nodes. Edit and cancel route back to the node
 prefix. Cross-node usage combines UIDs only when the administrator catalog maps their

@@ -721,6 +721,12 @@ are valid, and that the remote version supports retry-safe writes. Use `--jobs` 
 depending on automatic command launch; ordinary checks also warn when a pending command
 already exists on a node whose worker is not running.
 
+Use a username-free host or per-user SSH alias in the shared root catalog, never
+`user@host`. A fixed username would make every local caller act as that one remote UID.
+Users whose account names differ between nodes should map the common alias in their own
+`~/.ssh/config`. GPUBK rejects pinned usernames in root catalogs; `sudo bk admin cluster
+status` and `cluster set` remain available to repair a legacy entry.
+
 Put a host into maintenance without deleting its endpoint, UID mappings, or archived
 history. Disabled hosts are not contacted and never participate in placement:
 
@@ -737,6 +743,9 @@ Before enabling a real shared catalog, the repository includes one end-to-end ca
 ```bash
 python3 tools/cluster_acceptance.py user@gpu-a user@gpu-b
 ```
+
+Those `user@host` values are private transport arguments for the isolated test, not
+entries for the shared root catalog.
 
 It builds the current checkout as a wheel, installs that exact wheel under each SSH account's
 private temporary cache, uses one simulated GPU and an isolated ledger per host, then

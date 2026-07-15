@@ -184,7 +184,11 @@ def cluster_configured() -> bool:
         return False
 
 
-def load_cluster_config(path: Optional[Path] = None) -> ClusterConfig:
+def load_cluster_config(
+    path: Optional[Path] = None,
+    *,
+    allow_legacy_pinned_user_for_repair: bool = False,
+) -> ClusterConfig:
     if os.environ.get("BK_CLUSTER_DISABLE") == "1":
         raise BookingError("cluster routing is disabled in this child process")
     path = cluster_config_path() if path is None else path
@@ -221,7 +225,11 @@ def load_cluster_config(path: Optional[Path] = None) -> ClusterConfig:
     finally:
         if fd >= 0:
             os.close(fd)
-    return _parse_cluster_config(path, document)
+    config = _parse_cluster_config(path, document)
+    # Trusted maintenance can read legacy entries only to diagnose, reduce, or remove them.
+    if metadata.st_uid == 0 and not allow_legacy_pinned_user_for_repair:
+        _validate_shared_catalog_targets(config)
+    return config
 
 
 def write_cluster_config(config: ClusterConfig, *, require_root: bool = True) -> None:
@@ -230,8 +238,14 @@ def write_cluster_config(config: ClusterConfig, *, require_root: bool = True) ->
     path = config.path
     if not path.is_absolute():
         raise BookingError("cluster catalog path must be absolute")
+    previous = None
     if os.path.lexists(path):
-        load_cluster_config(path)
+        previous = load_cluster_config(
+            path,
+            allow_legacy_pinned_user_for_repair=True,
+        )
+    if require_root:
+        _validate_shared_catalog_update(config, previous=previous)
     parent = path.parent
     metadata = parent.lstat()
     if not stat.S_ISDIR(metadata.st_mode):
@@ -622,6 +636,11 @@ def _cluster_status(config: ClusterConfig, *, json_output: bool = False) -> int:
 
 
 def _cluster_probe(args: argparse.Namespace) -> int:
+    if cluster_config_path() == SYSTEM_CLUSTER_FILE and "@" in args.target:
+        raise BookingError(
+            "the shared system catalog must not pin an SSH username; use a host "
+            "name or per-user SSH alias so every caller keeps their own remote UID"
+        )
     candidate = _parse_node(
         {
             "name": args.name,
@@ -670,6 +689,13 @@ def _cluster_probe(args: argparse.Namespace) -> int:
         actor_uid_text = "?"
     else:
         actor_uid_text = str(actor_uid)
+    warnings = []
+    shared_add_supported = "@" not in str(candidate.target)
+    if not shared_add_supported:
+        warnings.append(
+            "username-qualified target is valid only in a private per-user catalog; "
+            "no shared administrator add command was generated"
+        )
     add_argv = [
         "sudo",
         "bk",
@@ -704,7 +730,8 @@ def _cluster_probe(args: argparse.Namespace) -> int:
         },
         "missing_capabilities": missing,
         "issues": issues,
-        "add_argv": add_argv if not issues else None,
+        "warnings": warnings,
+        "add_argv": add_argv if not issues and shared_add_supported else None,
     }
     if args.json:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
@@ -724,7 +751,9 @@ def _cluster_probe(args: argparse.Namespace) -> int:
         )
         for issue in issues:
             print(f"fail: {issue}")
-        if not issues:
+        for warning in warnings:
+            print(f"warn: {warning}")
+        if not issues and shared_add_supported:
             print("Reviewed add command:")
             print(f"  {shlex.join(add_argv)}")
             print("Then verify this SSH identity with: bk c check")
@@ -1928,6 +1957,51 @@ def _parse_cluster_config(path: Path, document: object) -> ClusterConfig:
     return ClusterConfig(path, nodes, normalized_principals, history_root)
 
 
+def cluster_catalog_issues(config: ClusterConfig) -> tuple[str, ...]:
+    issues = []
+    for node in config.nodes:
+        if node.transport == "ssh" and node.target is not None and "@" in node.target:
+            host = node.target.rsplit("@", 1)[-1]
+            issues.append(
+                f"root-owned cluster node {node.name!r} must not pin an SSH "
+                f"username in {node.target!r}; use a host name or per-user SSH "
+                f"alias such as {host!r} so every caller keeps their own remote UID"
+            )
+    return tuple(issues)
+
+
+def _validate_shared_catalog_targets(config: ClusterConfig) -> None:
+    issues = cluster_catalog_issues(config)
+    if issues:
+        raise BookingError(issues[0])
+
+
+def _validate_shared_catalog_update(
+    config: ClusterConfig,
+    *,
+    previous: Optional[ClusterConfig],
+) -> None:
+    pinned = _pinned_catalog_targets(config)
+    if not pinned:
+        return
+    previous_pinned = _pinned_catalog_targets(previous) if previous is not None else set()
+    if pinned < previous_pinned:
+        return
+    _validate_shared_catalog_targets(config)
+
+
+def _pinned_catalog_targets(
+    config: Optional[ClusterConfig],
+) -> set[tuple[str, str]]:
+    if config is None:
+        return set()
+    return {
+        (node.name, node.target)
+        for node in config.nodes
+        if node.transport == "ssh" and node.target is not None and "@" in node.target
+    }
+
+
 def _parse_node(value: object) -> ClusterNode:
     if not isinstance(value, dict):
         raise BookingError("cluster node must be an object")
@@ -2062,7 +2136,10 @@ def _cluster_probe_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("name", help="short catalog name, such as gpu-b")
-    parser.add_argument("target", help="OpenSSH target or alias, such as user@gpu-b")
+    parser.add_argument(
+        "target",
+        help="username-free OpenSSH host or per-user alias, such as gpu-b",
+    )
     parser.add_argument(
         "--executable",
         default="/usr/local/bin/bk",

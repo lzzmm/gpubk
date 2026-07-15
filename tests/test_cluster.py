@@ -18,6 +18,7 @@ from bk.cluster import (
     _invoke,
     _invoke_idempotent_write,
     _node_command,
+    _validate_shared_catalog_update,
     load_cluster_config,
     run_cluster_cli,
     run_node_cli,
@@ -98,7 +99,7 @@ class ClusterTests(unittest.TestCase):
             "gpu-b",
             "b" * 20,
             "ssh",
-            "alice@gpu-b",
+            "gpu-b",
             "/opt/gpubk/bin/bk",
             0,
             12,
@@ -129,7 +130,7 @@ class ClusterTests(unittest.TestCase):
                 [
                     "probe",
                     "gpu-b",
-                    "alice@gpu-b",
+                    "gpu-b",
                     "--executable",
                     "/opt/gpubk/bin/bk",
                     "--timeout",
@@ -143,7 +144,7 @@ class ClusterTests(unittest.TestCase):
         self.assertIn("Cluster node probe: ready", text)
         self.assertIn("id=" + "b" * 20, text)
         self.assertIn(
-            "sudo bk admin cluster add gpu-b alice@gpu-b " + "b" * 20,
+            "sudo bk admin cluster add gpu-b gpu-b " + "b" * 20,
             text,
         )
         self.assertIn("--executable /opt/gpubk/bin/bk", text)
@@ -162,7 +163,7 @@ class ClusterTests(unittest.TestCase):
                     [
                         "probe",
                         "gpu-b",
-                        "alice@gpu-b",
+                        "gpu-b",
                         "--executable",
                         "/opt/gpubk/bin/bk",
                         "--timeout",
@@ -179,6 +180,63 @@ class ClusterTests(unittest.TestCase):
             document["add_argv"][:5],
             ["sudo", "bk", "admin", "cluster", "add"],
         )
+
+    def test_default_probe_rejects_a_username_pinned_shared_target(self):
+        with (
+            mock.patch.dict(os.environ, {"BK_CLUSTER_CONFIG": ""}),
+            mock.patch("bk.cluster.probe_ssh_node") as probe,
+            self.assertRaisesRegex(BookingError, "must not pin an SSH username"),
+        ):
+            run_cluster_cli(["probe", "gpu-b", "alice@gpu-b"])
+        probe.assert_not_called()
+
+    def test_private_catalog_probe_allows_a_username_qualified_target(self):
+        discovered = ClusterNode(
+            "gpu-b",
+            "b" * 20,
+            "ssh",
+            "alice@gpu-b",
+            "/usr/local/bin/bk",
+            0,
+            8,
+        )
+        payload = {
+            "kind": "context",
+            "generated_at": to_iso(utc_now()),
+            "software": {"version": "0.2.1"},
+            "node": {"id": discovered.node_id},
+            "actor": {"uid": 1001, "username": "alice"},
+            "policy": {"gpu_count": 8},
+            "capabilities": {
+                "federated_node_identity": True,
+                "idempotent_booking": True,
+                "operation_status": True,
+                "preflight_idempotent_replay": True,
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            output = StringIO()
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"BK_CLUSTER_CONFIG": str(Path(tmp) / "private.json")},
+                ),
+                mock.patch(
+                    "bk.cluster.probe_ssh_node",
+                    return_value=NodeReply(discovered, payload, None),
+                ),
+                redirect_stdout(output),
+            ):
+                self.assertEqual(
+                    run_cluster_cli(
+                        ["probe", "gpu-b", "alice@gpu-b", "--json"]
+                    ),
+                    0,
+                )
+        document = json.loads(output.getvalue())
+        self.assertTrue(document["ready"])
+        self.assertIsNone(document["add_argv"])
+        self.assertIn("private per-user catalog", document["warnings"][0])
 
     def test_probe_fails_closed_before_transport_for_unsafe_target(self):
         with (
@@ -564,6 +622,100 @@ class ClusterTests(unittest.TestCase):
             self.assertEqual(loaded.nodes, config.nodes)
             self.assertEqual(loaded.principals, config.principals)
             self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+
+    def test_root_catalog_write_rejects_a_username_pinned_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            node = ClusterNode(
+                "remote",
+                "d" * 20,
+                "ssh",
+                "alice@remote",
+                "/usr/local/bin/bk",
+                0,
+                8,
+            )
+            config = ClusterConfig(Path(tmp) / "cluster.json", (node,))
+            with (
+                mock.patch("bk.cluster.os.geteuid", return_value=0),
+                self.assertRaisesRegex(BookingError, "must not pin an SSH username"),
+            ):
+                write_cluster_config(config)
+
+    def test_root_catalog_migration_only_allows_pinned_targets_to_shrink(self):
+        path = Path("/etc/gpubk/cluster.json")
+        first = ClusterNode(
+            "gpu-a", "a" * 20, "ssh", "alice@gpu-a", "/usr/local/bin/bk", 0, 8
+        )
+        second = ClusterNode(
+            "gpu-b", "b" * 20, "ssh", "alice@gpu-b", "/usr/local/bin/bk", 0, 8
+        )
+        previous = ClusterConfig(path, (first, second))
+        repaired_first = ClusterNode(
+            "gpu-a", "a" * 20, "ssh", "gpu-a", "/usr/local/bin/bk", 0, 8
+        )
+        _validate_shared_catalog_update(
+            ClusterConfig(path, (repaired_first, second)),
+            previous=previous,
+        )
+
+        retargeted = ClusterConfig(
+            path,
+            (
+                first,
+                ClusterNode(
+                    "gpu-b",
+                    "b" * 20,
+                    "ssh",
+                    "bob@gpu-b",
+                    "/usr/local/bin/bk",
+                    0,
+                    8,
+                ),
+            ),
+        )
+        for case, updated, prior in (
+            ("unchanged", previous, previous),
+            ("different pinned user", retargeted, previous),
+            ("new root catalog", previous, None),
+        ):
+            with self.subTest(case=case):
+                with self.assertRaisesRegex(
+                    BookingError,
+                    "must not pin an SSH username",
+                ):
+                    _validate_shared_catalog_update(updated, previous=prior)
+
+    def test_manually_written_root_catalog_rejects_a_username_pinned_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.catalog(
+                Path(tmp),
+                [
+                    {
+                        "name": "remote",
+                        "node_id": "d" * 20,
+                        "transport": "ssh",
+                        "target": "alice@remote",
+                    }
+                ],
+            )
+            real_fstat = os.fstat
+
+            def root_owned(fd: int) -> os.stat_result:
+                values = list(real_fstat(fd))
+                values[4] = 0
+                return os.stat_result(values)
+
+            with mock.patch("bk.cluster.os.fstat", side_effect=root_owned):
+                with self.assertRaisesRegex(
+                    BookingError,
+                    "must not pin an SSH username",
+                ):
+                    load_cluster_config(path)
+                loaded = load_cluster_config(
+                    path,
+                    allow_legacy_pinned_user_for_repair=True,
+                )
+            self.assertEqual(loaded.node("remote").target, "alice@remote")
 
     def test_catalog_round_trips_disabled_node_without_changing_schema(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -43,6 +43,20 @@ a force-link command over an unknown existing path. `admin install --no-start` i
 available for hosts without systemd, but requires the managed processes to already be
 stopped and leaves them stopped.
 
+After upgrading a federated deployment, check the shared catalog before ordinary users
+resume cluster commands:
+
+```bash
+sudo /opt/gpubk/bin/bk admin cluster status
+sudo /opt/gpubk/bin/bk admin cluster set NODE --target HOST_OR_ALIAS --yes
+```
+
+The second command is needed only when status reports a legacy username-qualified target
+such as `alice@gpu-b`. Root-owned catalogs now require a username-free host or per-user
+SSH alias so every caller retains their own remote UID. Administrator status, set, remove,
+and tracked uninstall can read the legacy entry solely to repair or remove it; ordinary
+cluster reads and writes remain blocked until it is corrected.
+
 If the installer originally created `/etc/gpubk`, a standard root-owned
 `/etc/gpubk/cluster.json` created later by `bk admin cluster` is schema-validated and
 removed by the full uninstall. A configuration directory that existed before GPUBK was

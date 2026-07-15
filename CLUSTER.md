@@ -29,7 +29,7 @@ The help is available before a catalog exists. A minimal two-node client setup i
 ```bash
 bk cluster -h
 sudo bk admin cluster init gpu-a --yes
-bk c probe gpu-b user@gpu-b
+bk c probe gpu-b gpu-b
 # Review and run the printed sudo bk admin cluster add ... command.
 sudo bk admin cluster status
 bk cluster
@@ -46,6 +46,14 @@ The catalog contains no credentials.
 Each ordinary user still needs non-interactive SSH access with a previously verified
 host key. `bk cluster status` reports one unreachable account without disabling other
 healthy nodes.
+
+A shared root-owned catalog must use a username-free host or SSH alias such as `gpu-b`,
+never `alice@gpu-b`. Otherwise every caller would be forced to act as Alice's remote
+numeric UID. When account names differ between nodes, each user maps the common alias to
+their own remote account in `~/.ssh/config`. A custom user-owned catalog selected through
+`BK_CLUSTER_CONFIG` may use `user@host`, but it must not be shared. Legacy root catalogs
+with pinned users fail closed for ordinary commands; repair them with `sudo bk admin
+cluster status` followed by `sudo bk admin cluster set NODE --target HOST --yes`.
 
 Before booking, every ordinary user can validate their own route with `bk cluster
 check`. It checks endpoint reachability, stable identity, actor attribution, clock
@@ -250,6 +258,10 @@ hosts before creating the production catalog:
 python3 tools/cluster_acceptance.py user@gpu-a user@gpu-b
 ```
 
+The `user@host` values above are private transport arguments for this isolated test;
+the runner writes only a temporary user-owned catalog and never copies them into the
+shared root catalog.
+
 The runner installs the wheel below each account's private temporary cache and points
 every candidate process at a simulated GPU file, a private data directory, and a private
 job directory. It verifies pre-catalog discovery, distinct stable node identities,
@@ -266,6 +278,8 @@ approved live workload, and restart/reboot checks.
 ## Security boundary
 
 - The system catalog and identity map are root-owned, non-group-writable files.
+- System catalog SSH targets never contain a username; OpenSSH resolves each caller's
+  own account, and the destination broker authorizes that resulting numeric UID.
 - Per-user SSH configuration may choose credentials but cannot redefine node IDs,
   policy, or identity mappings.
 - Remote executable paths and node names are validated; no user string is evaluated

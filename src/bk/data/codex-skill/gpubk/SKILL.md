@@ -53,6 +53,8 @@ reservation with a stopped, unseen, invalid, or wrong-instance worker is not pro
 its scheduled command will launch; report the node-specific remediation to the user.
 Never merge identities by username; only administrator-provided `(node_id, uid)`
 principal mappings are authoritative. A cluster reservation never spans hosts.
+Never recommend `user@host` for a shared root-owned catalog. Use a username-free host
+or per-user SSH alias so the destination broker sees each caller's own remote UID.
 If an operation retry may belong to a disabled node, surface the unresolved routing
 error instead of generating a new operation ID or writing to another node. When the
 original destination is known, retry the exact intent against `bk @NODE` with the same

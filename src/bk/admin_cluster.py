@@ -12,6 +12,7 @@ from typing import Callable, Optional
 from .cluster import (
     ClusterConfig,
     ClusterNode,
+    cluster_catalog_issues,
     cluster_config_path,
     load_cluster_config,
     write_cluster_config,
@@ -50,7 +51,10 @@ def add_admin_cluster_parser(commands) -> None:
         help="add one SSH-reachable GPU node",
     )
     cluster_add.add_argument("name")
-    cluster_add.add_argument("target")
+    cluster_add.add_argument(
+        "target",
+        help="username-free SSH host or per-user alias for the shared catalog",
+    )
     cluster_add.add_argument("node_id")
     cluster_add.add_argument("--executable", default="/usr/local/bin/bk")
     cluster_add.add_argument("--priority", type=int, default=0)
@@ -70,8 +74,8 @@ def add_admin_cluster_parser(commands) -> None:
     cluster_set.add_argument("name", help="configured cluster node name")
     cluster_set.add_argument(
         "--target",
-        metavar="USER@HOST",
-        help="replacement OpenSSH target or host alias (SSH nodes only)",
+        metavar="HOST_OR_ALIAS",
+        help="replacement username-free SSH host or per-user alias",
     )
     cluster_set.add_argument(
         "--executable",
@@ -181,7 +185,10 @@ def run_admin_cluster(args: argparse.Namespace) -> int:
     if args.cluster_action == "init":
         desired = _initial_cluster_config(args, path)
     else:
-        current = load_cluster_config(path)
+        current = load_cluster_config(
+            path,
+            allow_legacy_pinned_user_for_repair=True,
+        )
         if args.cluster_action == "status":
             return print_admin_cluster(current, json_output=args.json)
         desired = _updated_cluster_config(current, args)
@@ -542,8 +549,10 @@ def _confirm_and_write(desired: ClusterConfig, confirmed: bool) -> int:
 
 
 def print_admin_cluster(config: ClusterConfig, *, json_output: bool) -> int:
+    issues = cluster_catalog_issues(config)
     document = {
         "schema_version": "gpubk.cluster.v1",
+        "ready": not issues,
         "path": str(config.path),
         "nodes": [
             {
@@ -560,10 +569,11 @@ def print_admin_cluster(config: ClusterConfig, *, json_output: bool) -> int:
         ],
         "principals": list(config.principals),
         "history_root": str(config.history_root) if config.history_root else None,
+        "issues": list(issues),
     }
     if json_output:
         print(json.dumps(document, ensure_ascii=False, sort_keys=True))
-        return 0
+        return 0 if not issues else 3
     print(f"Cluster catalog: {config.path}")
     for node in config.nodes:
         endpoint = "this host" if node.transport == "local" else node.target
@@ -584,4 +594,10 @@ def print_admin_cluster(config: ClusterConfig, *, json_output: bool) -> int:
             print(f"  {principal['id']}: {members}")
     if config.history_root is not None:
         print(f"History root: {config.history_root}")
-    return 0
+    for issue in issues:
+        print(f"fail: {issue}")
+    if issues:
+        print(
+            "repair with: sudo bk admin cluster set NODE --target HOST_OR_ALIAS --yes"
+        )
+    return 0 if not issues else 3
