@@ -1,5 +1,4 @@
 import re
-import tomllib
 import unittest
 from pathlib import Path
 
@@ -44,8 +43,10 @@ class SingleSourceOfTruthTests(unittest.TestCase):
         self.assertEqual(offenders, [])
 
     def test_repository_links_follow_pyproject_metadata(self):
-        project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-        repository = project["project"]["urls"]["Repository"]
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        repositories = re.findall(r'^Repository\s*=\s*"([^"]+)"$', pyproject, re.MULTILINE)
+        self.assertEqual(len(repositories), 1)
+        repository = repositories[0]
         expected_path = repository.removeprefix("https://github.com/")
         expected_owner, expected_name = expected_path.split("/", 1)
 
