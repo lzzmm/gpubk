@@ -1334,18 +1334,7 @@ def select_cuda_python(
     if requested != "auto":
         candidates = [requested]
     else:
-        candidates = [
-            remote_python,
-            "python3",
-            "python",
-            str(Path.home() / "miniconda3" / "bin" / "python"),
-            str(Path.home() / "anaconda3" / "bin" / "python"),
-            "/opt/conda/bin/python",
-        ]
-        for variable in ("CONDA_PREFIX", "VIRTUAL_ENV"):
-            prefix = os.environ.get(variable)
-            if prefix:
-                candidates.insert(0, str(Path(prefix) / "bin" / "python"))
+        candidates = cuda_python_candidates(remote_python)
     resolved: list[str] = []
     for candidate in candidates:
         executable = find_command(candidate)
@@ -1356,7 +1345,7 @@ def select_cuda_python(
         "print(json.dumps({'cuda': bool(torch.cuda.is_available())}))"
     )
     for executable in resolved:
-        outcome = execute([executable, "-c", probe], timeout=30)
+        outcome = execute([executable, "-c", probe], timeout=15)
         payload = parse_json_output(outcome)
         if outcome.returncode == 0 and payload is not None and payload.get("cuda") is True:
             report.add(
@@ -1375,6 +1364,56 @@ def select_cuda_python(
         details={"tested": resolved},
     )
     return None
+
+
+def cuda_python_candidates(remote_python: str) -> list[str]:
+    candidates: list[str] = []
+
+    def add(value: str) -> None:
+        if value and value not in candidates:
+            candidates.append(value)
+
+    for variable in ("CONDA_PREFIX", "VIRTUAL_ENV"):
+        prefix = os.environ.get(variable)
+        if prefix:
+            add(str(Path(prefix) / "bin" / "python"))
+    add(remote_python)
+    add("python3")
+    add("python")
+
+    roots = [
+        Path.home() / "miniconda3",
+        Path.home() / "anaconda3",
+        Path.home() / "miniforge3",
+        Path.home() / "mambaforge",
+        Path("/opt/conda"),
+    ]
+    for root in roots:
+        add(str(root / "bin" / "python"))
+        try:
+            environments = sorted((root / "envs").glob("*/bin/python"))
+        except OSError:
+            environments = []
+        for executable in environments:
+            add(str(executable))
+
+    conda_commands = [find_command("conda")]
+    conda_commands.extend(
+        str(root / "bin" / "conda")
+        for root in roots
+        if (root / "bin" / "conda").is_file()
+    )
+    for conda in dict.fromkeys(item for item in conda_commands if item):
+        outcome = execute([conda, "env", "list", "--json"], timeout=15)
+        payload = parse_json_output(outcome)
+        environments = payload.get("envs") if isinstance(payload, dict) else None
+        if isinstance(environments, list):
+            for environment in environments:
+                if isinstance(environment, str):
+                    add(str(Path(environment) / "bin" / "python"))
+
+    # Keep automatic acceptance bounded even on hosts with many stale environments.
+    return candidates[:24]
 
 
 def acquire_sudo(report: AcceptanceReport, requested: bool) -> bool:

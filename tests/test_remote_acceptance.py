@@ -463,6 +463,41 @@ class RemoteAcceptanceRunnerTests(unittest.TestCase):
         self.assertEqual(report.checks[-1]["id"], "live.cuda-python")
         self.assertEqual(report.checks[-1]["status"], "pass")
 
+    def test_auto_live_python_discovers_named_conda_environments(self):
+        report = REMOTE.AcceptanceReport(
+            run_id="run-1", version="1.2.3", live_workload_requested=True
+        )
+        cuda_python = "/home/user/miniconda3/envs/torch/bin/python"
+
+        def resolve(value):
+            return value if value == cuda_python else None
+
+        def run(argv, **_kwargs):
+            return REMOTE.CommandOutcome(
+                argv=tuple(argv),
+                returncode=0,
+                stdout=json.dumps({"cuda": True}),
+                stderr="",
+                duration_ms=1,
+            )
+
+        with (
+            mock.patch.object(
+                REMOTE,
+                "cuda_python_candidates",
+                return_value=["python3", cuda_python],
+            ),
+            mock.patch.object(REMOTE, "find_command", side_effect=resolve),
+            mock.patch.object(REMOTE, "execute", side_effect=run),
+        ):
+            selected = REMOTE.select_cuda_python(
+                report,
+                requested="auto",
+                remote_python="/opt/gpubk/bin/python",
+            )
+
+        self.assertEqual(selected, cuda_python)
+
     def test_live_manual_check_is_only_completed_after_a_pass(self):
         report = REMOTE.AcceptanceReport(
             run_id="run-1", version="1.2.3", live_workload_requested=True
