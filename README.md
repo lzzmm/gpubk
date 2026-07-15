@@ -584,10 +584,15 @@ absolute, otherwise `$HOME/.codex/skills/gpubk`. `--force` refuses a symbolic
 link or an active working-directory tree and restores the previous Skill if the
 staged replacement fails.
 
-The MCP server provides context, recommendation, create, list, edit, cancel,
-private-spec cleanup, and private job-log tools. It listens on stdio only; each
-user runs their own process. Tool schemas include read-only, idempotent,
-destructive, and closed-world annotations.
+The MCP server provides single-host context, recommendation, create, list, edit,
+cancel, private-spec cleanup, and private job-log tools. When a trusted cluster
+catalog exists, it also exposes `bk://cluster/context` plus cluster readiness,
+recommendation, single-node booking, personal usage, node-qualified edit, and
+idempotent cancellation tools. With no catalog these tools are absent, keeping
+single-host discovery small.
+It listens on stdio only; each user runs their own process. Cluster calls use that
+user's SSH identity and the same versioned, bounded CLI routing path as `bk c`.
+Tool schemas include read-only, idempotent, destructive, and closed-world annotations.
 
 An administrator may also set `BK_ALLOCATOR_COMMAND` to a trusted local program
 that reads `bk.allocator.v1` JSON and returns a GPU ordering. Its output is

@@ -17,6 +17,14 @@ Prefer GPUBK MCP tools when available:
 4. Use `edit_my_gpu_booking` with a new stable operation ID when the user approves a change.
 5. Use `get_my_gpu_usage` for current-UID historical utilization; do not infer it from reservation duration.
 
+If `get_gpu_cluster_context` is present, a trusted catalog is configured. For a
+cross-node request, call `check_gpu_cluster_readiness` once in the session (with
+`require_jobs=true` before scheduled launch), use `recommend_cluster_gpu_booking`, then
+`create_cluster_gpu_booking` after approval. Preserve the returned node name in
+`NODE/ID`; use that qualified ID with `edit_my_cluster_gpu_booking` or
+`cancel_my_cluster_gpu_booking`. Reuse the same operation ID only for an exact retry
+and never reroute an uncertain write.
+
 Otherwise use the JSON CLI:
 
 ```bash

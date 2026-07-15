@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import List, Optional
 
 from . import __version__
+from .cluster import cluster_configured
+from .cluster_mcp import ClusterMcpBackend
 from .config import Config, load_config
 from .fileio import open_existing_regular
 from .identity import current_actor
@@ -34,6 +36,9 @@ from .storage import LedgerStore
 from .timeparse import parse_duration_seconds, parse_memory_mb, parse_start, to_iso, utc_now
 from .usage_api import UsageQueryService
 from .worker import JobSpecCleanupResult, cleanup_job_specs
+
+
+_AUTO_CLUSTER_BACKEND = object()
 
 
 class BkMcpBackend:
@@ -322,7 +327,11 @@ class BkMcpBackend:
         return _resolve_token(mine, token)
 
 
-def create_mcp_server(backend: Optional[BkMcpBackend] = None):
+def create_mcp_server(
+    backend: Optional[BkMcpBackend] = None,
+    *,
+    cluster_backend: object = _AUTO_CLUSTER_BACKEND,
+):
     try:
         from mcp.server.fastmcp import FastMCP
         from mcp.types import ToolAnnotations
@@ -330,12 +339,18 @@ def create_mcp_server(backend: Optional[BkMcpBackend] = None):
         raise RuntimeError("MCP support is optional; install with: pip install 'gpubk[mcp]'") from exc
 
     api = backend or BkMcpBackend()
+    if cluster_backend is _AUTO_CLUSTER_BACKEND:
+        cluster_api = ClusterMcpBackend() if cluster_configured() else None
+    else:
+        cluster_api = cluster_backend
     mcp = FastMCP(
         "GPUBK",
         json_response=True,
         instructions=(
             "Inspect context or call recommend before booking. "
             "Create and edit writes require a stable operation_id. "
+            "When cluster tools are present, use them for cross-node placement and "
+            "keep node-qualified reservation IDs. Never reroute an uncertain retry. "
             "Never invent a UID; identity is the MCP process UID."
         ),
     )
@@ -498,6 +513,137 @@ def create_mcp_server(backend: Optional[BkMcpBackend] = None):
             "First inspect bk://context, then call recommend_gpu_booking. Explain live-load and memory warnings. "
             "Only call create_gpu_booking after the user approves, and reuse one stable operation_id on retries."
         )
+
+    if cluster_api is not None:
+
+        @mcp.resource("bk://cluster/context")
+        def resource_cluster_context() -> str:
+            """Versioned context for every configured cluster node."""
+            return json.dumps(
+                cluster_api.context(), ensure_ascii=False, sort_keys=True
+            )
+
+        @mcp.tool(annotations=read_only, structured_output=True)
+        def get_gpu_cluster_context() -> dict[str, object]:
+            """Read all configured nodes without flattening node-local GPU indexes."""
+            return cluster_api.context()
+
+        @mcp.tool(annotations=read_only, structured_output=True)
+        def check_gpu_cluster_readiness(
+            require_jobs: bool = False,
+        ) -> dict[str, object]:
+            """Check node identity, clocks, writes, and optionally scheduled-job workers."""
+            return cluster_api.check(require_jobs=require_jobs)
+
+        @mcp.tool(annotations=read_only, structured_output=True)
+        def recommend_cluster_gpu_booking(
+            count: int,
+            duration: str,
+            mode: str = "shared",
+            start: Optional[str] = None,
+            gpus: Optional[List[int]] = None,
+            exclude_gpus: Optional[List[int]] = None,
+            expected_memory: Optional[str] = None,
+            share: Optional[int] = None,
+        ) -> dict[str, object]:
+            """Rank nodes for one-host placement; an explicit ISO start is exact."""
+            return cluster_api.recommend(
+                count=count,
+                duration=duration,
+                mode=mode,
+                start=start,
+                gpus=gpus,
+                exclude_gpus=exclude_gpus,
+                expected_memory=expected_memory,
+                share=share,
+            )
+
+        @mcp.tool(annotations=idempotent_write, structured_output=True)
+        def create_cluster_gpu_booking(
+            count: int,
+            duration: str,
+            operation_id: str,
+            mode: str = "shared",
+            start: Optional[str] = None,
+            gpus: Optional[List[int]] = None,
+            exclude_gpus: Optional[List[int]] = None,
+            expected_memory: Optional[str] = None,
+            share: Optional[int] = None,
+            command: Optional[List[str]] = None,
+        ) -> dict[str, object]:
+            """Idempotently place one booking on one cluster node as this process UID."""
+            return cluster_api.book(
+                count=count,
+                duration=duration,
+                operation_id=operation_id,
+                mode=mode,
+                start=start,
+                gpus=gpus,
+                exclude_gpus=exclude_gpus,
+                expected_memory=expected_memory,
+                share=share,
+                command=command,
+            )
+
+        @mcp.tool(annotations=read_only, structured_output=True)
+        def get_my_cluster_gpu_usage(
+            since: str = "24h",
+            resolution: str = "auto",
+            limit: int = 1000,
+        ) -> dict[str, object]:
+            """Aggregate sampled usage for this SSH identity across enabled nodes."""
+            return cluster_api.usage(since=since, resolution=resolution, limit=limit)
+
+        @mcp.tool(annotations=idempotent_write, structured_output=True)
+        def edit_my_cluster_gpu_booking(
+            reservation_id: str,
+            operation_id: str,
+            duration: Optional[str] = None,
+            mode: Optional[str] = None,
+            start: Optional[str] = None,
+            gpus: Optional[List[int]] = None,
+            exclude_gpus: Optional[List[int]] = None,
+            count: Optional[int] = None,
+            expected_memory: Optional[str] = None,
+            allow_queue: bool = False,
+            share: Optional[int] = None,
+        ) -> dict[str, object]:
+            """Idempotently edit NODE/ID on its owning node without failover."""
+            return cluster_api.edit(
+                reservation_id=reservation_id,
+                operation_id=operation_id,
+                duration=duration,
+                mode=mode,
+                start=start,
+                gpus=gpus,
+                exclude_gpus=exclude_gpus,
+                count=count,
+                expected_memory=expected_memory,
+                allow_queue=allow_queue,
+                share=share,
+            )
+
+        @mcp.tool(annotations=idempotent_cleanup, structured_output=True)
+        def cancel_my_cluster_gpu_booking(
+            reservation_id: str,
+            operation_id: str,
+        ) -> dict[str, object]:
+            """Idempotently cancel NODE/ID on its owning node without failover."""
+            return cluster_api.cancel(reservation_id, operation_id)
+
+        @mcp.prompt()
+        def plan_cluster_gpu_experiment(
+            count: int,
+            duration: str,
+            expected_memory: str = "unknown",
+        ) -> str:
+            return (
+                f"Plan a cluster GPU experiment needing {count} GPU(s) for {duration}, "
+                f"expected memory {expected_memory} per GPU. Inspect bk://cluster/context, "
+                "then call recommend_cluster_gpu_booking. Keep the selected node attached "
+                "to the reservation ID. Only write after approval, reuse one operation_id "
+                "for exact retries, and never reroute an uncertain write."
+            )
 
     return mcp
 

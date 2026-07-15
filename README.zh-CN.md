@@ -489,8 +489,12 @@ bk skill install            # 安装 wheel 内置的 Codex Skill
 `$HOME/.codex/skills/gpubk`。`--force` 会拒绝符号链接和当前工作目录所在的目录树；
 暂存替换失败时会恢复原有 Skill。
 
-MCP 提供 context、recommend、create、list、edit、cancel、私有 spec 清理和私有
-任务日志工具。它只使用 stdio，不监听网络端口；每位用户运行自己的 MCP 进程。工具
+MCP 默认提供单机 context、recommend、create、list、edit、cancel、私有 spec 清理和
+私有任务日志工具。检测到可信 cluster catalog 后，还会增加 `bk://cluster/context`，以及
+跨节点 recommend、单节点预约、个人用量、带节点 ID 的 edit 和幂等 cancel 工具；没有
+catalog 时这些入口完全不出现。它只使用 stdio，不监听网络端口；每位用户运行自己的
+MCP 进程。集群入口还包含可选 worker 校验的 readiness check；所有调用沿用该用户的
+SSH 身份和 `bk c` 同一条有界、版本化路由路径。工具
 schema 标明 read-only、idempotent、destructive 和 closed-world 属性。
 
 管理员还可以通过 `BK_ALLOCATOR_COMMAND` 配置受信任的本地程序。它读取

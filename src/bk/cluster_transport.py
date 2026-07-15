@@ -315,6 +315,17 @@ def _run_node_process(
         selector.close()
 
 
+def run_bounded_command(
+    argv: Sequence[str],
+    *,
+    environment: Optional[dict] = None,
+    timeout_seconds: float,
+) -> tuple[int, bytes, bytes]:
+    """Run a trusted argv with the same bounds and cleanup as cluster transport."""
+
+    return _run_node_process(argv, environment, timeout_seconds)
+
+
 def _wait_for_node_process(
     process: subprocess.Popen,
     argv: Sequence[str],

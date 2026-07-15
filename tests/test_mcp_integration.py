@@ -26,7 +26,10 @@ class McpProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 gpu_count=2,
                 job_log_dir=Path(tmp) / "jobs",
             )
-            app = create_mcp_server(BkMcpBackend(config, LedgerStore(data_dir)))
+            app = create_mcp_server(
+                BkMcpBackend(config, LedgerStore(data_dir)),
+                cluster_backend=None,
+            )
             future = datetime.now(timezone.utc) + timedelta(days=1)
             timestamp = int(future.timestamp())
             remainder = timestamp % 300
@@ -156,6 +159,134 @@ class McpProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cancelled.structuredContent["reservation"]["status"], "cancelled")
             self.assertEqual(cleanup.structuredContent["kind"], "job-spec-cleanup")
             self.assertEqual(log_cleanup.structuredContent["kind"], "job-log-cleanup")
+
+    async def test_cluster_tools_are_registered_only_when_a_backend_is_enabled(self):
+        class FakeClusterBackend:
+            def __init__(self):
+                self.calls = []
+
+            def _result(self, kind, *arguments):
+                self.calls.append((kind, arguments))
+                return {"schema_version": "gpubk.cluster.v1", "kind": kind}
+
+            def context(self):
+                return self._result("cluster-context")
+
+            def check(self, require_jobs=False):
+                return self._result("cluster-check", require_jobs)
+
+            def recommend(self, **kwargs):
+                return self._result("cluster-recommendation", kwargs)
+
+            def book(self, **kwargs):
+                return self._result("cluster-booking-result", kwargs)
+
+            def usage(self, **kwargs):
+                return self._result("cluster-usage", kwargs)
+
+            def edit(self, **kwargs):
+                return self._result("cluster-mutation-result", kwargs)
+
+            def cancel(self, reservation_id, operation_id):
+                return self._result(
+                    "cluster-mutation-result", reservation_id, operation_id
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            local = BkMcpBackend(Config(data_dir=data_dir), LedgerStore(data_dir))
+            cluster = FakeClusterBackend()
+            app = create_mcp_server(local, cluster_backend=cluster)
+
+            async with create_connected_server_and_client_session(
+                app, raise_exceptions=True
+            ) as session:
+                tools = await session.list_tools()
+                by_name = {item.name: item for item in tools.tools}
+                resources = await session.list_resources()
+                prompts = await session.list_prompts()
+                context = await session.read_resource(AnyUrl("bk://cluster/context"))
+                recommendation = await session.call_tool(
+                    "recommend_cluster_gpu_booking",
+                    {"count": 2, "duration": "1h", "expected_memory": "12g"},
+                )
+                readiness = await session.call_tool(
+                    "check_gpu_cluster_readiness", {"require_jobs": True}
+                )
+                booking = await session.call_tool(
+                    "create_cluster_gpu_booking",
+                    {
+                        "count": 2,
+                        "duration": "1h",
+                        "operation_id": "cluster-create-1",
+                        "command": ["python", "train.py"],
+                    },
+                )
+                usage = await session.call_tool(
+                    "get_my_cluster_gpu_usage", {"since": "7d"}
+                )
+                edit = await session.call_tool(
+                    "edit_my_cluster_gpu_booking",
+                    {
+                        "reservation_id": "gpu-a/123456",
+                        "operation_id": "cluster-edit-1",
+                        "duration": "2h",
+                    },
+                )
+                cancel = await session.call_tool(
+                    "cancel_my_cluster_gpu_booking",
+                    {
+                        "reservation_id": "gpu-a/123456",
+                        "operation_id": "cluster-cancel-1",
+                    },
+                )
+
+            cluster_names = {
+                "get_gpu_cluster_context",
+                "check_gpu_cluster_readiness",
+                "recommend_cluster_gpu_booking",
+                "create_cluster_gpu_booking",
+                "get_my_cluster_gpu_usage",
+                "edit_my_cluster_gpu_booking",
+                "cancel_my_cluster_gpu_booking",
+            }
+            self.assertTrue(cluster_names.issubset(by_name))
+            self.assertTrue(by_name["get_gpu_cluster_context"].annotations.readOnlyHint)
+            self.assertTrue(
+                by_name["check_gpu_cluster_readiness"].annotations.readOnlyHint
+            )
+            self.assertTrue(
+                by_name["recommend_cluster_gpu_booking"].annotations.readOnlyHint
+            )
+            self.assertTrue(
+                by_name["create_cluster_gpu_booking"].annotations.idempotentHint
+            )
+            self.assertTrue(
+                by_name["edit_my_cluster_gpu_booking"].annotations.idempotentHint
+            )
+            self.assertTrue(
+                by_name["cancel_my_cluster_gpu_booking"].annotations.destructiveHint
+            )
+            self.assertTrue(
+                by_name["cancel_my_cluster_gpu_booking"].annotations.idempotentHint
+            )
+            self.assertIn(
+                "bk://cluster/context",
+                {str(resource.uri) for resource in resources.resources},
+            )
+            self.assertIn(
+                "plan_cluster_gpu_experiment",
+                {prompt.name for prompt in prompts.prompts},
+            )
+            self.assertIn('"kind": "cluster-context"', context.contents[0].text)
+            self.assertEqual(
+                recommendation.structuredContent["kind"], "cluster-recommendation"
+            )
+            self.assertEqual(readiness.structuredContent["kind"], "cluster-check")
+            self.assertEqual(booking.structuredContent["kind"], "cluster-booking-result")
+            self.assertEqual(usage.structuredContent["kind"], "cluster-usage")
+            self.assertEqual(edit.structuredContent["kind"], "cluster-mutation-result")
+            self.assertEqual(cancel.structuredContent["kind"], "cluster-mutation-result")
 
 
 if __name__ == "__main__":

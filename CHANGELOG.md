@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.1 - 2026-07-15
 
+- Expose optional cluster context, readiness, recommendation, booking, personal usage,
+  edit, and cancellation through MCP only when a catalog exists. Cluster MCP writes require
+  stable operation IDs, retain node-qualified ownership, reuse the versioned CLI routing
+  path, and run with bounded output, timeout, and process-group cleanup.
 - Keep cluster TUI shutdown responsive when a node process closes its output pipes
   before exiting, and avoid starting queued SSH work after cancellation is already set.
 - Recover safe interrupted cluster-history exports under the per-node lock, while

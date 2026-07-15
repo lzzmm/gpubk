@@ -133,13 +133,30 @@ memory, scans at most 64 MiB, skips malformed records, and never accepts a UID a
 - `read_my_job_log`: bounded current-UID private log tail.
 - `get_my_gpu_usage`: versioned current-UID summaries, samples, and optional audit events.
 
+When a trusted cluster catalog exists, MCP additionally exposes:
+
+- `get_gpu_cluster_context` and the `bk://cluster/context` resource.
+- `check_gpu_cluster_readiness`: identity, clock, write, and optional worker readiness.
+- `recommend_cluster_gpu_booking`: read-only one-host placement across nodes.
+- `create_cluster_gpu_booking`: idempotent one-node write; `operation_id` is required.
+- `get_my_cluster_gpu_usage`: sampled usage for the current SSH identity on each node.
+- `edit_my_cluster_gpu_booking`: idempotent edit of a required `NODE/ID`.
+- `cancel_my_cluster_gpu_booking`: idempotent destructive cancellation of `NODE/ID`.
+
+These tools are absent when no catalog exists. They invoke the same versioned cluster
+CLI path as `bk c` with bounded output, timeout, and process cleanup; they do not
+implement a second scheduler. Job commands are argv lists and execute on the selected
+host, so no caller-local working directory is accepted. Cluster create, edit, and
+cancel retries must reuse the exact operation ID and must never fail over after an
+uncertain response.
+
 The MCP server runs over local stdio and inherits the launching user's UID. It never accepts UID as a tool argument.
 Historical usage also has a read-only `bk://usage/me/recent` resource. External visualizers should consume
 `gpubk.usage.v1` through `bk.usage_api.UsageQueryService` rather than parse compact storage partitions.
 Tools expose standard MCP annotations: context, recommendation, listing, and log reads are
-read-only; create and edit are idempotent writes because they require operation IDs; cancel is
-destructive and non-idempotent; private-spec cleanup is destructive but idempotent; all tools are
-closed-world local operations.
+read-only; create and edit are idempotent writes because they require operation IDs; local cancel is
+destructive and non-idempotent; cluster cancel requires an operation ID and is idempotent;
+private-spec cleanup is destructive but idempotent. All tools are closed-world operations.
 
 ## Cluster Federation
 

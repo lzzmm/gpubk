@@ -16,6 +16,13 @@ SSH calls; it does not add a central scheduler or a listening network service.
 Every GPU host can therefore continue operating locally when the cluster client,
 another node, or NFS is unavailable.
 
+The optional stdio MCP server follows the same boundary. When a catalog is present,
+it advertises cluster context, readiness, recommendation, booking, personal usage,
+edit, and cancel tools; otherwise those tools are absent. Calls run as the MCP process user,
+reuse the versioned `bk c` routing path, and remain subject to strict SSH host keys,
+remote numeric-UID authorization, stable operation IDs, bounded output, and timeouts.
+No MCP network listener or separate cluster scheduler is introduced.
+
 The supported first deployment is:
 
 1. Install and validate ordinary GPUBK independently on every GPU host.
