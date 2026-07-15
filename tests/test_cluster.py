@@ -14,6 +14,7 @@ from bk.cluster import (
     ClusterNode,
     NodeReply,
     _aggregate_cluster_usage,
+    delete_cluster_config,
     _find_cluster_operation_node,
     _invoke,
     _invoke_idempotent_write,
@@ -656,6 +657,38 @@ class ClusterTests(unittest.TestCase):
                     create_only=True,
                 )
             self.assertEqual(load_cluster_config(path).nodes, (first,))
+
+    def test_catalog_delete_refuses_a_changed_file_and_removes_the_reviewed_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cluster.json"
+            first = ClusterNode(
+                "first",
+                "a" * 20,
+                "ssh",
+                "first",
+                "/usr/local/bin/bk",
+                0,
+                8,
+            )
+            second = ClusterNode(
+                "second",
+                "b" * 20,
+                "ssh",
+                "second",
+                "/usr/local/bin/bk",
+                0,
+                8,
+            )
+            reviewed = ClusterConfig(path, (first,))
+            write_cluster_config(reviewed, require_root=False)
+            with self.assertRaisesRegex(BookingError, "changed after review"):
+                delete_cluster_config(
+                    ClusterConfig(path, (second,)),
+                    require_root=False,
+                )
+            self.assertTrue(path.exists())
+            delete_cluster_config(reviewed, require_root=False)
+            self.assertFalse(path.exists())
 
     def test_system_catalog_rejects_a_caller_owned_file(self):
         with tempfile.TemporaryDirectory() as tmp:

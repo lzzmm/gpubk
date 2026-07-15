@@ -337,6 +337,28 @@ def write_cluster_config(
             temporary_path.unlink()
 
 
+def delete_cluster_config(
+    config: ClusterConfig,
+    *,
+    require_root: bool = True,
+) -> None:
+    if require_root and os.geteuid() != 0:
+        raise BookingError("cluster catalog deletion must run as root")
+    current = load_cluster_config(
+        config.path,
+        allow_legacy_pinned_user_for_repair=True,
+    )
+    if current != config:
+        raise BookingError(
+            "cluster catalog changed after review; inspect it again before deleting"
+        )
+    try:
+        config.path.unlink()
+    except FileNotFoundError as exc:
+        raise BookingError(f"cluster catalog no longer exists: {config.path}") from exc
+    fsync_directory(config.path.parent)
+
+
 def run_cluster_cli(argv: Sequence[str]) -> int:
     action, args = _normalize_cluster_action(argv)
     if action in {"-h", "--help", "help"}:
@@ -2337,6 +2359,7 @@ Node maintenance (administrator):
   bk c probe NODE NEW_SSH_TARGET
   sudo bk admin cluster set NODE --target NEW_SSH_TARGET --yes
   sudo bk admin cluster disable NODE --yes
+  sudo bk admin cluster delete --yes  # remove routing only; node data stays
 
 Everyday commands:
   bk c                       show all configured nodes and reservations

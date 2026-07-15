@@ -218,6 +218,35 @@ class AdminClusterTests(unittest.TestCase):
             self.assertEqual(configured.nodes[0].target, "gpu-a")
             self.assertTrue(write.call_args.kwargs["create_only"])
 
+    def test_delete_requires_review_and_removes_only_the_catalog(self):
+        current = ClusterConfig(
+            Path("/etc/gpubk/cluster.json"),
+            (self.remote_node(),),
+        )
+        output = StringIO()
+        with (
+            mock.patch("bk.admin_cluster.os.geteuid", return_value=0),
+            mock.patch("bk.admin_cluster.load_cluster_config", return_value=current),
+            mock.patch("bk.admin_cluster.delete_cluster_config") as delete,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                run_admin_cli(["cluster", "delete", "--yes"]),
+                0,
+            )
+        delete.assert_called_once_with(current)
+        self.assertIn("reservations", output.getvalue())
+
+        with (
+            mock.patch("bk.admin_cluster.os.geteuid", return_value=0),
+            mock.patch("bk.admin_cluster.load_cluster_config", return_value=current),
+            mock.patch("bk.admin_cluster.delete_cluster_config") as delete,
+            redirect_stdout(StringIO()),
+            redirect_stderr(StringIO()),
+        ):
+            self.assertEqual(run_admin_cli(["cluster", "destroy"]), 1)
+        delete.assert_not_called()
+
     def test_disable_and_enable_preserve_node_identity_mappings_and_history(self):
         path = Path("/etc/gpubk/cluster.json")
         remote = self.remote_node()

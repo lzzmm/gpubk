@@ -11,6 +11,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Require the standard system cluster catalog and its parent to remain root-owned and
   non-writable by ordinary users, and sanitize and bound remote SSH error text at the
   transport boundary before it reaches terminal output.
+- Add an explicit, reviewed `bk admin cluster delete` lifecycle command that removes
+  only the client-side routing catalog while preserving every GPU host and data store.
 - Prevent a shared root-owned cluster catalog from pinning `user@host`, which would
   make every local caller act as one remote UID. System catalogs now require a
   username-free host or per-user SSH alias; administrator status and set operations

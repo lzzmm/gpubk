@@ -15,6 +15,7 @@ from .cluster import (
     ClusterNode,
     cluster_catalog_issues,
     cluster_config_path,
+    delete_cluster_config,
     load_cluster_config,
     write_cluster_config,
 )
@@ -115,6 +116,14 @@ def add_admin_cluster_parser(commands) -> None:
     cluster_remove.add_argument("--cluster-file", type=Path)
     cluster_remove.add_argument("--yes", action="store_true")
 
+    cluster_delete = cluster_commands.add_parser(
+        "delete",
+        aliases=["destroy"],
+        help="delete cluster routing without touching any node data",
+    )
+    cluster_delete.add_argument("--cluster-file", type=Path)
+    cluster_delete.add_argument("--yes", action="store_true")
+
     for action, help_text in (
         ("disable", "temporarily remove one node from live cluster routing"),
         ("enable", "return one configured node to live cluster routing"),
@@ -198,6 +207,8 @@ def run_admin_cluster(args: argparse.Namespace) -> int:
         )
         if args.cluster_action == "status":
             return print_admin_cluster(current, json_output=args.json)
+        if args.cluster_action in {"delete", "destroy"}:
+            return _confirm_and_delete(current, args.yes)
         desired = _updated_cluster_config(current, args)
     return _confirm_and_write(desired, args.yes, create_only=create_only)
 
@@ -579,6 +590,24 @@ def _confirm_and_write(
         _ensure_cluster_catalog_parent(desired.path)
     write_cluster_config(desired, create_only=create_only)
     print(f"cluster catalog updated: {desired.path}")
+    return 0
+
+
+def _confirm_and_delete(current: ClusterConfig, confirmed: bool) -> int:
+    print_admin_cluster(current, json_output=False)
+    if not confirmed:
+        if not sys.stdin.isatty():
+            print("bk: pass --yes to delete the cluster catalog", file=sys.stderr)
+            return 1
+        if input("Delete this cluster catalog? [y/N]: ").strip().lower() not in {
+            "y",
+            "yes",
+        }:
+            print("No changes made.")
+            return 1
+    delete_cluster_config(current)
+    print(f"cluster catalog deleted: {current.path}")
+    print("GPU hosts, reservations, usage history, and SSH configuration were unchanged.")
     return 0
 
 

@@ -104,6 +104,17 @@ stable identity, principal mappings, and archived history remain in the version-
 catalog. Old catalogs have no `enabled` field and therefore continue to treat every
 node as enabled.
 
+To stop using federation on one client, explicitly delete its routing catalog:
+
+```bash
+sudo bk admin cluster delete --yes
+```
+
+This removes only that client's catalog. It does not connect to GPU hosts or change
+reservations, ledgers, workers, usage history, the optional archive, or SSH settings.
+The parent configuration directory is retained because it may predate cluster setup or
+contain the independently managed single-host configuration.
+
 ## User model
 
 - With no cluster catalog, GPUBK stays in single-host mode. Node selectors, node

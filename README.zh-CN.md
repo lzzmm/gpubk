@@ -625,6 +625,10 @@ sudo bk admin cluster disable gpu-b --yes
 sudo bk admin cluster enable gpu-b --yes
 ```
 
+如果这台客户端不再使用联邦，执行 `sudo bk admin cluster delete --yes`。它只删除本机
+路由 catalog，不会连接或修改任何 GPU 主机、预约、台账、使用历史、归档、worker 或 SSH
+配置。
+
 面向人的集群表格使用执行命令一侧的本地时区；带 `--json` 的结构化输出仍统一使用 UTC。
 
 正式启用共享目录前，可以先从本仓库执行一次端到端候选版本验收：

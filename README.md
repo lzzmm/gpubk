@@ -741,6 +741,10 @@ sudo bk admin cluster disable gpu-b --yes
 sudo bk admin cluster enable gpu-b --yes
 ```
 
+To stop federation on this client, run `sudo bk admin cluster delete --yes`. It removes
+only the local routing catalog; no GPU host, reservation, ledger, usage history, archive,
+worker, or SSH configuration is changed.
+
 Human cluster tables use the caller's local timezone. Structured `--json` documents
 continue to use canonical UTC timestamps.
 
