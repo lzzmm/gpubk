@@ -129,6 +129,7 @@ TIMELINE_DEFAULT_WINDOW_SECONDS = 2 * 60 * 60
 TIMELINE_MAX_SLOTS = 240
 TIMELINE_AUTO_STEPS = (300, 600, 900, 1800, 3600, 7200, 14400, 28800, 43200, 86400)
 TIMELINE_AUTO_FACTORS = (1, 2, 3, 4, 6, 12, 24, 48, 96, 144, 288)
+MANAGED_PYTHON = Path("/opt/gpubk/bin/python")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -147,6 +148,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             if head in {"-V", "--version", "version"}:
                 print(f"bk {__version__}")
                 return 0
+            if head in {"update", "upgrade"}:
+                return _update_command(argv[1:])
             if head == "skill":
                 return _skill_command(argv[1:])
             if head == "admin":
@@ -381,6 +384,9 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
         return True
     if head in {"doctor", "dr"}:
         _doctor_command(args[1:], config, store)
+        return True
+    if head in {"update", "upgrade"}:
+        _update_command(args[1:])
         return True
     if head in {"config", "cfg"}:
         _config_command(args[1:], config, store)
@@ -1838,6 +1844,107 @@ def _service_command(argv: List[str], config: Config) -> int:
             "Linux boot/logout persistence (admin): "
             f"sudo loginctl enable-linger {username}"
         )
+    return 0
+
+
+def _update_command(argv: List[str]) -> int:
+    """Guide or apply the conservative upgrade path for a managed server."""
+    parser = argparse.ArgumentParser(
+        prog="bk update",
+        description="Guide a non-destructive GPUBK server upgrade.",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="stop GPUBK services, upgrade the package, reconcile services, and verify",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="do not ask before applying the upgrade (requires --apply)",
+    )
+    parser.add_argument(
+        "--extras",
+        choices=("gpu", "mcp", "all", "none"),
+        default="gpu",
+        help="package extras to retain during upgrade (default: gpu)",
+    )
+    args = parser.parse_args(argv)
+    if args.yes and not args.apply:
+        parser.error("--yes requires --apply")
+
+    managed_python = MANAGED_PYTHON
+    package = "gpubk" if args.extras == "none" else f"gpubk[{args.extras}]"
+    apply_command = f"sudo bk update --apply --extras {args.extras}"
+    if not managed_python.is_file():
+        print("GPUBK update guide")
+        print("No managed /opt/gpubk installation was found on this machine.")
+        print("For a first shared-server deployment, run: sudo bk admin init")
+        return 2
+
+    if not args.apply:
+        print("GPUBK update guide")
+        print(f"  installed command: {shlex.quote(str(managed_python))} -m bk")
+        print(f"  package:           {package}")
+        print("\nThis upgrade will:")
+        print("  1. Stop only the GPUBK broker and monitor services.")
+        print("  2. Upgrade the isolated /opt/gpubk Python environment.")
+        print("  3. Reconcile the tracked command link and system services.")
+        print("  4. Start the services again and run a strict deployment check.")
+        print("\nIt preserves /etc/gpubk policy, /var/lib/gpubk history, and user GPU jobs.")
+        print(f"\nAdministrator command: {apply_command}")
+        return 0
+
+    if os.geteuid() != 0:
+        raise BookingError(f"server upgrades require root; run: {apply_command}")
+    if not args.yes:
+        answer = input(
+            "Apply this GPUBK upgrade? Policy, history, and GPU jobs are preserved. [y/N]: "
+        ).strip().lower()
+        if answer not in {"y", "yes"}:
+            print("Upgrade cancelled.")
+            return 0
+
+    stopped = False
+    try:
+        print("Stopping GPUBK broker and monitor services...")
+        subprocess.run(
+            ["systemctl", "stop", "gpubk-broker.service", "gpubk-monitor.service"],
+            check=True,
+        )
+        stopped = True
+        print(f"Upgrading {package} in /opt/gpubk...")
+        subprocess.run(
+            [str(managed_python), "-m", "pip", "install", "--upgrade", package],
+            check=True,
+        )
+        print("Reconciling GPUBK command and services...")
+        subprocess.run(
+            [str(managed_python), "-m", "bk", "admin", "install", "--yes"],
+            check=True,
+        )
+        print("Verifying deployment...")
+        subprocess.run(
+            [
+                str(managed_python),
+                "-m",
+                "bk",
+                "doctor",
+                "--probe",
+                "--require-monitor",
+                "--strict",
+            ],
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        if stopped:
+            print("Upgrade did not complete; attempting to restore GPUBK services...", file=sys.stderr)
+            subprocess.run(
+                ["systemctl", "start", "gpubk-broker.service", "gpubk-monitor.service"],
+                check=False,
+            )
+        raise BookingError(f"upgrade failed: {exc}") from exc
+    print(f"Upgrade complete: {managed_python} -m bk --version")
     return 0
 
 
@@ -4244,6 +4351,8 @@ def _print_help(config: Optional[Config] = None, file=None) -> None:
     if _is_administrator(config):
         admin_help = """
 ADMINISTRATION (current administrator only)
+  bk update                       preview the safe server-upgrade steps
+  sudo bk update --apply           apply them with one confirmation
   sudo bk admin install              guided install and service startup
   sudo bk admin init                 initialize a shared server
   sudo bk admin services install     install tracked boot services

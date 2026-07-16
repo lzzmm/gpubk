@@ -11,7 +11,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from bk.cli import _maybe_print_preset_suggestion, _run_with_booking_deadline, main as bk_main
+from bk.cli import (
+    _maybe_print_preset_suggestion,
+    _run_with_booking_deadline,
+    _update_command,
+    main as bk_main,
+)
 from bk.collector_status import collector_document
 from bk.fileio import ensure_directory
 from bk.usage_store import UsageAuditStore
@@ -129,6 +134,22 @@ class CliTests(unittest.TestCase):
             ordinary = self.run_bk(["doctor", "--json"], data_dir)
             self.assertEqual(ordinary.returncode, 2)
             self.assertIn("JSONDecodeError", ordinary.stdout)
+
+    def test_update_prints_a_non_destructive_managed_server_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            managed_python = Path(tmp) / "gpubk" / "bin" / "python"
+            managed_python.parent.mkdir(parents=True)
+            managed_python.write_text("", encoding="utf-8")
+            output = StringIO()
+            with mock.patch("bk.cli.MANAGED_PYTHON", managed_python), redirect_stdout(output):
+                result = _update_command([])
+
+            text = output.getvalue()
+            self.assertEqual(result, 0)
+            self.assertIn("GPUBK update guide", text)
+            self.assertIn("broker and monitor", text)
+            self.assertIn("preserves /etc/gpubk policy, /var/lib/gpubk history", text)
+            self.assertIn("sudo bk update --apply --extras gpu", text)
 
     def test_default_command_starts_plain_interactive_shell(self):
         with tempfile.TemporaryDirectory() as tmp:
