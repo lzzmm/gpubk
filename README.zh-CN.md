@@ -97,9 +97,8 @@ Linux 用户或用户组，由执行安装的管理员账号持有部署。
 升级不会删除配置和历史数据：
 
 ```bash
-sudo /opt/gpubk/bin/python -m pip install --upgrade 'gpubk[gpu]'
-sudo /opt/gpubk/bin/bk admin install --yes
-bk doctor --probe --require-monitor --strict
+bk update                    # 先查看会做什么
+sudo bk update --apply       # 确认后自动升级、重启服务、验证
 ```
 
 升级会保留数据和策略。涉及删除或所有权变更时，应先使用 `--dry-run` 预览。

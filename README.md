@@ -103,9 +103,8 @@ group by default; the administrator who installs it owns the deployment.
 Upgrade an existing installation without deleting policy or history:
 
 ```bash
-sudo /opt/gpubk/bin/python -m pip install --upgrade 'gpubk[gpu]'
-sudo /opt/gpubk/bin/bk admin install --yes
-bk doctor --probe --require-monitor --strict
+bk update                    # preview the safe upgrade plan
+sudo bk update --apply       # confirm once; upgrade, restart, and verify
 ```
 
 The installer preserves data and policy during upgrades. Preview destructive or
