@@ -2297,6 +2297,47 @@ class CliTests(unittest.TestCase):
             self.assertIn("28.0GiB free", result.stdout)
             self.assertIn("run: bk run -- COMMAND", result.stdout)
 
+    def test_gpu_shortcut_lists_multiple_active_reservations_separately(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            env = {"BK_GPU_COUNT": "2", "BK_MAX_SHARED_USERS": "4"}
+            shared = self.run_bk(["1", "30m", "--gpu", "0"], data_dir, env)
+            exclusive = self.run_bk(["x", "1", "1h", "--gpu", "1"], data_dir, env)
+            result = self.run_bk(["g"], data_dir, env)
+            run_first = self.run_bk(["run", "1"], data_dir, env)
+
+            self.assertEqual(shared.returncode, 0, shared.stderr)
+            self.assertEqual(exclusive.returncode, 0, exclusive.stderr)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(run_first.returncode, 0, run_first.stderr)
+            self.assertIn("2 active reservations", result.stdout)
+            self.assertIn("S1/4", result.stdout)
+            self.assertIn(" X ", result.stdout)
+            self.assertIn("run one: bk run NUMBER -- COMMAND", result.stdout)
+            self.assertIn("run all: bk run -- COMMAND", result.stdout)
+            self.assertIn("earliest reservation ends", result.stdout)
+            first_id = shared.stdout.split()[1]
+            self.assertIn(first_id, run_first.stdout)
+
+    def test_gpu_shortcut_warns_about_another_users_exclusive_gpu(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            env = {"BK_GPU_COUNT": "2"}
+            created = self.run_bk(["x", "1", "30m", "--gpu", "0"], data_dir, env)
+            self.assertEqual(created.returncode, 0, created.stderr)
+            ledger_path = data_dir / "ledger.json"
+            ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+            ledger["reservations"][0]["uid"] = os.getuid() + 1
+            ledger["reservations"][0]["username"] = "other-user"
+            ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
+
+            result = self.run_bk(["g"], data_dir, env)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("avoid GPU 0", result.stdout)
+            self.assertIn("exclusive to other-user", result.stdout)
+            self.assertIn("GPU 1 | suggested now", result.stdout)
+
     def test_common_booking_flags_have_short_forms(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

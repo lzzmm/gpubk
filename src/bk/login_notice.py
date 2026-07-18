@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Mapping, Optional, Sequence
 
 from .models import STATUS_ACTIVE
+from .scheduler import exclusive_blocks_for_uid
 from .terminal import style
 from .timeparse import parse_iso
 from .worker_guidance import WORKER_FOREGROUND_COMMAND
@@ -67,6 +68,12 @@ def build_login_summary(
                     {**notice, "reservation_id": str(reservation.get("id", ""))}
                 )
     notifications.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
+    exclusive_blocks = exclusive_blocks_for_uid(
+        ledger,
+        uid,
+        now=current,
+        until=horizon,
+    )
     return {
         "schema_version": LOGIN_NOTICE_SCHEMA_VERSION,
         "kind": "login-notice",
@@ -76,6 +83,7 @@ def build_login_summary(
         "upcoming": [_public_item(item) for item in upcoming],
         "overdue": overdue,
         "notifications": notifications[:5],
+        "exclusive_blocks": [_public_item(item) for item in exclusive_blocks],
         "worker": worker,
     }
 
@@ -85,8 +93,16 @@ def render_login_summary(summary: dict, *, color: bool = False) -> str:
     upcoming = summary.get("upcoming", [])
     overdue = summary.get("overdue", [])
     notifications = summary.get("notifications", [])
+    exclusive_blocks = summary.get("exclusive_blocks", [])
     worker = summary.get("worker")
-    if not active and not upcoming and not overdue and not notifications and not worker:
+    if (
+        not active
+        and not upcoming
+        and not overdue
+        and not notifications
+        and not exclusive_blocks
+        and not worker
+    ):
         return ""
 
     labels = []
@@ -98,8 +114,22 @@ def render_login_summary(summary: dict, *, color: bool = False) -> str:
         labels.append(f"{len(overdue)} overdue occupancy")
     if notifications:
         labels.append(f"{len(notifications)} notice{'s' if len(notifications) != 1 else ''}")
-    lines = [style(f"GPUBK: {', '.join(labels)}", "heading", enabled=color)]
     generated_at = parse_iso(summary["generated_at"])
+    exclusive_now = [
+        item
+        for item in exclusive_blocks
+        if parse_iso(item["start_at"]) <= generated_at
+    ]
+    exclusive_upcoming = [item for item in exclusive_blocks if item not in exclusive_now]
+    if exclusive_now:
+        unavailable = {int(gpu) for item in exclusive_now for gpu in item.get("gpus", [])}
+        labels.append(f"{len(unavailable)} GPU{'s' if len(unavailable) != 1 else ''} exclusive")
+    if exclusive_upcoming:
+        labels.append(
+            f"{len(exclusive_upcoming)} upcoming exclusive"
+            f"{'s' if len(exclusive_upcoming) != 1 else ''}"
+        )
+    lines = [style(f"GPUBK: {', '.join(labels)}", "heading", enabled=color)]
     if active:
         lines.append(style(_active_line(active[0], generated_at), "success", enabled=color))
         if len(active) > 1:
@@ -120,6 +150,14 @@ def render_login_summary(summary: dict, *, color: bool = False) -> str:
         )
         if len(notifications) > 1:
             lines[-1] += f"  (+{len(notifications) - 1} more; run `bk n`)"
+    for item in exclusive_now[:3]:
+        lines.append(style(_exclusive_line(item, generated_at, active=True), "error", enabled=color))
+    if len(exclusive_now) > 3:
+        lines.append(f"  (+{len(exclusive_now) - 3} more active exclusive reservations; run `bk st`)")
+    if exclusive_upcoming:
+        lines.append(style(_exclusive_line(exclusive_upcoming[0], generated_at, active=False), "warning", enabled=color))
+        if len(exclusive_upcoming) > 1:
+            lines[-1] += f"  (+{len(exclusive_upcoming) - 1} later; run `bk tl`)"
     if isinstance(worker, dict):
         if worker.get("running") is not True:
             lines.append(
@@ -214,6 +252,7 @@ def _public_item(reservation: dict) -> dict:
         "gpus": [int(gpu) for gpu in reservation.get("gpus", [])],
         "start_at": str(reservation["start_at"]),
         "end_at": str(reservation["end_at"]),
+        "username": str(reservation.get("username", "unknown")),
     }
 
 
@@ -247,6 +286,29 @@ def _overdue_line(item: dict) -> str:
     return (
         f"  ALERT GPU {item['gpu']} still has your PID {pids} after reservation "
         f"{str(item.get('reservation_id', ''))[:6]} ended at {ended}"
+    )
+
+
+def _exclusive_line(item: dict, now: datetime, *, active: bool) -> str:
+    gpus = _gpu_text(item.get("gpus", []))
+    owner = str(item.get("username", "another user"))[:16]
+    if active:
+        end = parse_iso(item["end_at"])
+        return (
+            f"  AVOID {gpus}: exclusive to {owner} until "
+            f"{end.astimezone().strftime('%H:%M')} ({_relative_text(end - now)} left); use `bk g`"
+        )
+    start = parse_iso(item["start_at"])
+    local_start = start.astimezone()
+    local_now = now.astimezone()
+    when = (
+        local_start.strftime("%H:%M")
+        if local_start.date() == local_now.date()
+        else local_start.strftime("%a %m-%d %H:%M")
+    )
+    return (
+        f"  SOON  {gpus}: exclusive to {owner} at {when} "
+        f"(in {_relative_text(start - now)}); use `bk tl`"
     )
 
 

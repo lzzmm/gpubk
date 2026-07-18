@@ -876,6 +876,34 @@ def list_active(ledger: dict, now: Optional[datetime] = None) -> List[dict]:
     return ReservationIndex.from_ledger(ledger, now or utc_now()).records()
 
 
+def exclusive_blocks_for_uid(
+    ledger: dict,
+    uid: int,
+    *,
+    now: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+) -> List[dict]:
+    """Return active/future exclusive reservations owned by another UID."""
+    current = now or utc_now()
+    horizon = until or current
+    blocks = [
+        reservation
+        for reservation in list_active(ledger, current)
+        if reservation.get("mode") == MODE_EXCLUSIVE
+        and int(reservation.get("uid", -1)) != uid
+        and parse_iso(reservation["start_at"]) <= horizon
+    ]
+    return sorted(
+        blocks,
+        key=lambda item: (
+            parse_iso(item["start_at"]) > current,
+            parse_iso(item["start_at"]),
+            parse_iso(item["end_at"]),
+            str(item.get("id", "")),
+        ),
+    )
+
+
 def find_available_gpus(
     ledger: dict,
     config: Config,
