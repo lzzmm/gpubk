@@ -1085,7 +1085,8 @@ storage. `bk admin uninstall --purge-data` removes the tracked deployment; use
 `bk admin data clear` when keeping the installation but starting with empty history.
 
 An administrator may add a short reservation reminder to interactive login
-shells:
+shells. The guided server installer enables this by default unless the administrator
+declines it:
 
 ```bash
 sudo bk admin login-hook install --yes
@@ -1095,10 +1096,12 @@ sudo bk admin login-hook status
 The hook runs `bk login --hook` only once per login, only when stdout is a
 terminal, and through a one-second `timeout`. It reads the committed ledger
 without taking a write lock or probing NVML. Color terminals distinguish current
-and upcoming reservations. A fresh trustworthy monitor also enables a red alert
-when this UID still occupies a GPU after its reservation expired. With no active or next-24-hour
-reservation it prints nothing; failures are suppressed so SSH login cannot be
-blocked. `sudo bk admin login-hook uninstall --yes` removes only the marked
+and upcoming reservations. It also warns every other user about GPUs currently or
+soon reserved exclusively, even when that user has no booking. A fresh trustworthy
+monitor enables a red alert when this UID still occupies a GPU after its reservation
+expired. With no relevant personal reservation, exclusive restriction, or alert it
+prints nothing; failures are suppressed so SSH login cannot be blocked.
+`sudo bk admin login-hook uninstall --yes` removes only the marked
 GPUBK file. A full tracked `sudo bk admin uninstall` also removes that managed hook.
 
 Stop and disable the tracked services before uninstalling. GPUBK verifies each

@@ -11,7 +11,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from itertools import combinations, islice
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from . import __version__
 from .admin_info import administrator_display_lines, administrator_info
@@ -50,6 +50,7 @@ from .presets import (
 )
 from .schedule_index import ReservationIndex
 from .scheduler import (
+    exclusive_blocks_for_uid,
     find_applied_operation,
     find_earliest_slot,
     find_policy_violations,
@@ -1203,11 +1204,7 @@ def _run_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     args = parser.parse_args(run_args)
     actor = _current_actor()
     now = utc_now()
-    current = [
-        item
-        for item in _own_active_reservations(store, actor)
-        if parse_iso(item["start_at"]) <= now < parse_iso(item["end_at"])
-    ]
+    current = _current_own_reservations(store.load(), actor, now)
     selected = _select_current_run_reservations(current, args.reservation)
     if not selected:
         _print_next_run_advice(config, store, actor, now)
@@ -1257,26 +1254,71 @@ def _gpu_command(argv: List[str], config: Config, store: LedgerStore) -> int:
 
     actor = _current_actor()
     now = utc_now()
-    current = [
-        item
-        for item in _own_active_reservations(store, actor)
-        if parse_iso(item["start_at"]) <= now < parse_iso(item["end_at"])
-    ]
+    ledger = store.load()
+    current = _current_own_reservations(ledger, actor, now)
+    exclusive_blocks = exclusive_blocks_for_uid(ledger, actor.uid, now=now)
     advice = build_gpu_advice(config)
     snapshots = {item.index: item for item in advice.snapshots}
+    colors = color_enabled(sys.stdout)
 
     if current:
         gpus = sorted({int(gpu) for item in current for gpu in item.get("gpus", [])})
-        deadline = min(parse_iso(item["end_at"]) for item in current)
-        remaining = max(0, int((deadline - now).total_seconds()))
-        ids = ",".join(_short_id(item) for item in current)
         print(
-            f"GPU {','.join(map(str, gpus))} | yours now | "
-            f"{_duration_compact(remaining)} left | reservation {ids}"
+            style(
+                f"GPU {','.join(map(str, gpus))} | yours now | "
+                f"{len(current)} active reservation{'s' if len(current) != 1 else ''}",
+                "heading",
+                enabled=colors,
+            )
         )
+        header = (
+            f"  {'#':>2} {'ID':<8} {'Mode':<6} {'GPU':<10} "
+            f"{'Until':<5} {'Left':>7} {'VRAM/GPU':>12}"
+        )
+        print(style(header, "muted", enabled=colors))
+        capacities = advice.memory_capacities_mb
+        visible_current = current[:8]
+        for index, reservation in enumerate(visible_current, 1):
+            end = parse_iso(reservation["end_at"])
+            remaining = max(0, int((end - now).total_seconds()))
+            mode = (
+                "X"
+                if reservation.get("mode") == MODE_EXCLUSIVE
+                else (
+                    f"S{reservation_share_units(reservation, config.max_shared_users)}"
+                    f"/{config.max_shared_users}"
+                )
+            )
+            reservation_id = style(f"{_short_id(reservation):<8}", "id", enabled=colors)
+            mode_role = "warning" if mode == "X" else "accent"
+            mode_text = style(f"{mode:<6}", mode_role, enabled=colors)
+            gpu_text = _clip_text(",".join(map(str, reservation.get("gpus", []))), 10)
+            memory = _reservation_memory_column(reservation, config, capacities)
+            print(
+                f"  {index:>2} {reservation_id} {mode_text} {gpu_text:<10} "
+                f"{end.astimezone():%H:%M} {_duration_compact(remaining):>7} {memory:>12}"
+            )
+        if len(current) > len(visible_current):
+            print(
+                style(
+                    f"  +{len(current) - len(visible_current)} more; use `bk l`",
+                    "muted",
+                    enabled=colors,
+                )
+            )
+        print(style("Live GPU state", "muted", enabled=colors))
         for gpu in gpus:
             print(f"  GPU {gpu}: {_gpu_live_summary(gpu, advice, snapshots)}")
-        print("run: bk run -- COMMAND")
+        _print_exclusive_blocks(exclusive_blocks, now, colors=colors)
+        if len(current) == 1:
+            print("run: bk run -- COMMAND")
+        else:
+            earliest = min(parse_iso(item["end_at"]) for item in current)
+            print("run one: bk run NUMBER -- COMMAND")
+            print(
+                "run all: bk run -- COMMAND "
+                f"(stops when the earliest reservation ends at {earliest.astimezone():%H:%M})"
+            )
         return 0
 
     response = recommend_booking(
@@ -1291,6 +1333,7 @@ def _gpu_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         share_units=1,
     )
     recommendation = response["recommendation"]
+    _print_exclusive_blocks(exclusive_blocks, now, colors=colors)
     if recommendation is None:
         print(f"GPU - | no legal 30m slot in the next {config.queue_search_hours}h")
         return 3
@@ -1303,6 +1346,28 @@ def _gpu_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     else:
         print(f"book: bk 1 30m --gpu {gpu} --at \"{start.astimezone():%m-%d %H:%M}\"")
     return 0
+
+
+def _print_exclusive_blocks(
+    reservations: Sequence[dict],
+    now: datetime,
+    *,
+    colors: bool,
+) -> None:
+    if not reservations:
+        return
+    for reservation in reservations[:3]:
+        end = parse_iso(reservation["end_at"])
+        gpus = ",".join(map(str, reservation.get("gpus", [])))
+        owner = str(reservation.get("username", "another user"))[:24]
+        message = (
+            f"avoid GPU {gpus}: exclusive to {owner} until {end.astimezone():%H:%M} "
+            f"({_duration_compact(max(0, int((end - now).total_seconds())))} left)"
+        )
+        print(style(message, "error", enabled=colors))
+    if len(reservations) > 3:
+        message = f"+{len(reservations) - 3} more exclusive reservations; use `bk st`"
+        print(style(message, "muted", enabled=colors))
 
 
 def _gpu_live_summary(gpu: int, advice: GpuAdvice, snapshots: dict) -> str:
@@ -3612,7 +3677,10 @@ def _login_command(argv: List[str], config: Config, store: LedgerStore) -> int:
 
     parser = argparse.ArgumentParser(
         prog="bk login",
-        description="Show this UID's current and near-term reservations without writing state.",
+        description=(
+            "Show this UID's near-term reservations and GPUs reserved exclusively "
+            "by others, without writing state."
+        ),
     )
     parser.add_argument(
         "--within",
@@ -4218,6 +4286,23 @@ def _own_active_reservations(store: LedgerStore, actor: Actor) -> List[dict]:
     return [item for item in list_active(store.load()) if int(item.get("uid")) == actor.uid]
 
 
+def _current_own_reservations(
+    ledger: dict,
+    actor: Actor,
+    now: datetime,
+) -> List[dict]:
+    current = [
+        item
+        for item in list_active(ledger, now)
+        if int(item.get("uid", -1)) == actor.uid
+        and parse_iso(item["start_at"]) <= now < parse_iso(item["end_at"])
+    ]
+    return sorted(
+        current,
+        key=lambda item: (parse_iso(item["end_at"]), str(item.get("id", ""))),
+    )
+
+
 def _own_job_reservations(store: LedgerStore, actor: Actor) -> List[dict]:
     result = [
         item
@@ -4404,7 +4489,7 @@ BOOK
 
 VIEW
   bk info                         administrator account and contact
-  bk login                        active and next booking
+  bk login                        own bookings and exclusive warnings
   bk g                            GPU you can use now, or one suggestion
   bk st                           compact live status
   bk tl [window] [--step auto]   fine-grained aligned timeline

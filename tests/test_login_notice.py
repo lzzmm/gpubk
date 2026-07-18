@@ -27,12 +27,13 @@ def reservation(
     *,
     status: str = "active",
     gpus=(0,),
+    mode: str = "shared",
 ) -> dict:
     return {
         "id": reservation_id,
         "uid": uid,
         "username": f"user-{uid}",
-        "mode": "shared",
+        "mode": mode,
         "gpus": list(gpus),
         "start_at": iso(start),
         "end_at": iso(end),
@@ -78,6 +79,65 @@ class LoginNoticeTests(unittest.TestCase):
         )
 
         self.assertEqual(render_login_summary(summary), "")
+
+    def test_login_warns_about_another_users_active_exclusive_gpu(self):
+        now = datetime(2030, 1, 1, 10, 0, tzinfo=timezone.utc)
+        summary = build_login_summary(
+            {
+                "reservations": [
+                    reservation(
+                        "exclusive-booking",
+                        1002,
+                        now - timedelta(minutes=5),
+                        now + timedelta(minutes=55),
+                        gpus=(2, 3),
+                        mode="exclusive",
+                    )
+                ]
+            },
+            1001,
+            now=now,
+            within_seconds=86400,
+        )
+
+        rendered = render_login_summary(summary)
+        self.assertEqual(len(summary["exclusive_blocks"]), 1)
+        self.assertIn("2 GPUs exclusive", rendered)
+        self.assertIn("AVOID GPU 2,3", rendered)
+        self.assertIn("exclusive to user-1002", rendered)
+        self.assertIn("use `bk g`", rendered)
+
+    def test_login_shows_only_the_nearest_future_exclusive_detail(self):
+        now = datetime(2030, 1, 1, 10, 0, tzinfo=timezone.utc)
+        ledger = {
+            "reservations": [
+                reservation(
+                    "first",
+                    1002,
+                    now + timedelta(hours=1),
+                    now + timedelta(hours=2),
+                    gpus=(4,),
+                    mode="exclusive",
+                ),
+                reservation(
+                    "second",
+                    1003,
+                    now + timedelta(hours=3),
+                    now + timedelta(hours=4),
+                    gpus=(5,),
+                    mode="exclusive",
+                ),
+            ]
+        }
+
+        rendered = render_login_summary(
+            build_login_summary(ledger, 1001, now=now, within_seconds=86400)
+        )
+
+        self.assertIn("2 upcoming exclusives", rendered)
+        self.assertIn("SOON  GPU 4", rendered)
+        self.assertIn("(+1 later; run `bk tl`)", rendered)
+        self.assertNotIn("SOON  GPU 5", rendered)
 
     def test_scheduled_job_login_notice_explains_worker_and_logout_risk(self):
         now = datetime(2030, 1, 1, 10, 0, tzinfo=timezone.utc)

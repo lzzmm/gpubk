@@ -927,7 +927,8 @@ bk doctor --probe --require-monitor --strict
 历史重新开始，使用 `bk admin data clear`；若要移除整个受跟踪部署，使用
 `bk admin uninstall --purge-data`。
 
-管理员可以选择在用户交互式登录时显示一条很短的预约提醒：
+管理员可以在用户交互式登录时显示一条很短的预约提醒；服务器安装向导默认启用，管理员
+也可以在安装时选择关闭：
 
 ```bash
 sudo bk admin login-hook install --yes
@@ -935,9 +936,10 @@ sudo bk admin login-hook status
 ```
 
 该钩子每次登录最多运行一次，并且仅在标准输出是终端时通过一秒 `timeout` 执行
-`bk login --hook`。它只读已提交台账，不申请写锁，也不探测 NVML。用户没有正在进行或
-未来 24 小时内的预约时完全无输出。终端支持颜色时会区分当前和即将开始的预约；若新鲜
-且可信的 monitor 仍看到当前 UID 在预约过期后占用 GPU，则显示红色告警。所有错误都会
+`bk login --hook`。它只读已提交台账，不申请写锁，也不探测 NVML。终端支持颜色时会
+区分当前和即将开始的预约；即使用户自己没有预约，也会提醒其避开当前或即将被其他用户
+独占的 GPU。若新鲜且可信的 monitor 仍看到当前 UID 在预约过期后占用 GPU，则显示红色
+告警。没有相关预约、独占限制或告警时完全无输出。所有错误都会
 被抑制，因此不会阻塞 SSH 登录。
 `sudo bk admin login-hook uninstall --yes` 只删除带 GPUBK 标记的受管文件；完整执行
 `sudo bk admin uninstall` 也会自动清理该钩子。

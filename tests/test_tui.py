@@ -24,6 +24,9 @@ from bk.tui import (
     HELP_PAGES,
     MIXED_COLOR_PAIRS,
     NOW_CHAR,
+    SHARED_END_CHAR,
+    SHARED_SHORT_CHAR,
+    SHARED_START_CHAR,
     SPLIT_CHAR,
     TuiState,
     WEAVE_CHARS,
@@ -1539,6 +1542,56 @@ class TuiAddPreviewTests(unittest.TestCase):
         )
 
         self.assertEqual(cell[:2], (BAR_CHAR, color_map["one"]))
+
+    def test_short_shared_reservation_has_a_visible_two_edge_marker(self):
+        short = reservation(
+            "short",
+            os.getuid(),
+            MODE_SHARED,
+            [0],
+            self.start + timedelta(minutes=10),
+            self.start + timedelta(minutes=15),
+        )
+        color_map = _reservation_color_map([short])
+
+        cell = _cell_for_gpu(
+            0,
+            color_map,
+            [short],
+            self.start,
+            self.start + timedelta(hours=1),
+            None,
+            shared_limit=4,
+        )
+
+        self.assertEqual(cell[:2], (SHARED_SHORT_CHAR, color_map["short"]))
+        self.assertTrue(cell[2] & curses.A_BOLD)
+
+    def test_shared_reservation_marks_start_and_end_when_compressed(self):
+        shared = reservation(
+            "edges",
+            os.getuid(),
+            MODE_SHARED,
+            [0],
+            self.start + timedelta(minutes=10),
+            self.start + timedelta(minutes=70),
+        )
+        color_map = _reservation_color_map([shared])
+
+        starts = _cell_for_gpu(
+            0, color_map, [shared], self.start, self.start + timedelta(hours=1), None
+        )
+        ends = _cell_for_gpu(
+            0,
+            color_map,
+            [shared],
+            self.start + timedelta(hours=1),
+            self.start + timedelta(hours=2),
+            None,
+        )
+
+        self.assertEqual(starts[:2], (SHARED_START_CHAR, color_map["edges"]))
+        self.assertEqual(ends[:2], (SHARED_END_CHAR, color_map["edges"]))
 
     def test_shared_weave_gives_each_reservation_equal_area_per_period(self):
         for count in (3, 4, 5, 6, 8):
