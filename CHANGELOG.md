@@ -2,6 +2,17 @@
 
 All notable changes are documented here. The project follows Semantic Versioning once a public release is published.
 
+## 0.2.5 - 2026-07-18
+
+- Keep short shared reservations visible in compressed TUI timelines, including clear
+  interval boundaries at the minimum booking duration.
+- Improve `bk g` for multiple active reservations and warn users about GPUs blocked by
+  another user's active exclusive reservation in both direct guidance and login notices.
+- Add guided managed-upgrade checks for server administrators.
+- Remove the obsolete TestPyPI promotion path so releases have one audited route from an
+  annotated `main` tag to PyPI and the matching immutable GitHub Release.
+- Test package upgrades from the immediately preceding public release before publication.
+
 ## 0.2.4 - 2026-07-16
 
 - Publish final releases directly to the protected PyPI environment, retaining
