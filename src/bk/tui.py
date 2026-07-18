@@ -73,6 +73,9 @@ MIN_SHORT_ID_WIDTH = 6
 MAX_SHORT_ID_WIDTH = 12
 BAR_CHAR = "█"
 SHARED_CHAR = "▓"
+SHARED_START_CHAR = "╺"
+SHARED_END_CHAR = "╸"
+SHARED_SHORT_CHAR = "◆"
 SPLIT_CHAR = "▀"
 LOWER_SPLIT_CHAR = "▄"
 WEAVE_CHARS = ("▚", "▞")
@@ -1408,20 +1411,28 @@ def _cell_for_gpu(
     shared_style: str = "capacity",
 ) -> Tuple[str, int, int]:
     if reservation_index is None:
-        overlapping = sorted(
+        overlapping_spans = sorted(
             [
-                item
+                (
+                    item,
+                    parse_iso(item["start_at"]),
+                    parse_iso(item["end_at"]),
+                )
                 for item in active
                 if gpu in item.get("gpus", [])
                 and parse_iso(item["start_at"]) < end
                 and start < parse_iso(item["end_at"])
             ],
-            key=lambda item: (parse_iso(item["start_at"]), parse_iso(item["end_at"]), str(item.get("id", ""))),
+            key=lambda item: (item[1], item[2], str(item[0].get("id", ""))),
         )
     else:
-        overlapping = [item.record for item in reservation_index.overlapping(gpu, start, end)]
-    if not overlapping:
+        overlapping_spans = [
+            (item.record, item.start, item.end)
+            for item in reservation_index.overlapping(gpu, start, end)
+        ]
+    if not overlapping_spans:
         return FREE_CHAR, COLOR_FREE, 0
+    overlapping = [item[0] for item in overlapping_spans]
     exclusive = _choose_selected_or_first([item for item in overlapping if item.get("mode") == MODE_EXCLUSIVE], selected_id)
     if exclusive is not None:
         if selected_id and exclusive.get("id") == selected_id:
@@ -1431,6 +1442,15 @@ def _cell_for_gpu(
     chosen = _choose_selected_or_first(shared_items, selected_id)
     if chosen is None:
         return FREE_CHAR, COLOR_FREE, 0
+    shared_edge = _shared_edge_cell(
+        [item for item in overlapping_spans if item[0].get("mode") == MODE_SHARED],
+        start,
+        end,
+        color_map,
+        selected_id,
+    )
+    if shared_edge is not None:
+        return shared_edge
     visual_slots = _shared_visual_slots(shared_items, shared_limit)
     occupied_slots = [item for item in visual_slots if item is not None]
     if lane_count <= 1:
@@ -1453,6 +1473,45 @@ def _cell_for_gpu(
         attr |= curses.A_BLINK
     char = SHARED_CHAR if lane_count <= 1 else BAR_CHAR
     return char, _reservation_color(visible, color_map), attr
+
+
+def _shared_edge_cell(
+    shared_spans: Sequence[Tuple[dict, datetime, datetime]],
+    cell_start: datetime,
+    cell_end: datetime,
+    color_map: dict[str, int],
+    selected_id: Optional[str],
+) -> Optional[Tuple[str, int, int]]:
+    """Render an unmissable marker when a compact shared bar meets a cell edge."""
+    cell_duration = cell_end - cell_start
+    edges = []
+    for reservation, reservation_start, reservation_end in shared_spans:
+        # Full-size bars already read clearly. Reserve endpoint markers for a
+        # booking compressed into one time cell, including a 5-minute booking
+        # viewed at a wider zoom level.
+        if reservation_end - reservation_start > cell_duration:
+            continue
+        starts = cell_start <= reservation_start < cell_end
+        ends = cell_start < reservation_end <= cell_end
+        if starts or ends:
+            edges.append((reservation, starts, ends))
+    if not edges:
+        return None
+    selected = next(
+        (item for item in edges if selected_id and item[0].get("id") == selected_id),
+        None,
+    )
+    reservation, starts, ends = selected or edges[0]
+    if starts and ends:
+        char = SHARED_SHORT_CHAR
+    elif starts:
+        char = SHARED_START_CHAR
+    else:
+        char = SHARED_END_CHAR
+    attr = curses.A_BOLD
+    if selected_id and reservation.get("id") == selected_id:
+        attr |= curses.A_BLINK
+    return char, _reservation_color(reservation, color_map), attr
 
 
 def _preview_cell_for_gpu(
