@@ -2,6 +2,17 @@
 
 All notable changes are documented here. The project follows Semantic Versioning once a public release is published.
 
+## 0.2.6 - 2026-07-20
+
+- Wait for the broker socket and first monitor heartbeat during managed upgrades instead
+  of failing on normal service startup latency.
+- Keep reservation boundaries visible in the TUI at every zoom level, including short
+  bookings compressed into one cell.
+- Add `bk g COUNT` for a read-only simultaneous multi-GPU recommendation with live
+  utilization and VRAM details.
+- Accept `bk admin update` and `bk admin upgrade` as compatibility aliases for the
+  canonical update command.
+
 ## 0.2.5 - 2026-07-18
 
 - Keep short shared reservations visible in compressed TUI timelines, including clear
