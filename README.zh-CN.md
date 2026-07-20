@@ -95,6 +95,13 @@ broker 是受保护台账的唯一写入者，monitor 通过 NVML 采集 GPU 状
 通过本机 Unix socket 访问服务。两个服务都会在开机后自动启动。GPUBK 默认不创建
 Linux 用户或用户组，由执行安装的管理员账号持有部署。
 
+安排检修时运行一条引导命令即可。默认会发布橙色 warning 公告并禁止未来两小时的新预约，
+但绝不会停止已经运行的 GPU 进程：
+
+```bash
+sudo bk admin maintain
+```
+
 升级不会删除配置和历史数据：
 
 ```bash

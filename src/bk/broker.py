@@ -118,14 +118,74 @@ class BrokerLedgerStore(LedgerStore):
             {"reservation_id": str(reservation_id), "reason": reason},
         )
         if not isinstance(result, dict):
-            raise BookingError("broker returned an invalid administrator cancellation result")
+            raise BookingError(
+                "broker returned an invalid administrator cancellation result"
+            )
+        return result
+
+    def broker_publish_announcement(
+        self,
+        actor: Actor,
+        message: str,
+        level: str,
+        expires_in_seconds: int,
+        starts_at,
+    ) -> dict:
+        del actor
+        payload = {
+            "message": message,
+            "level": level,
+            "expires_in_seconds": expires_in_seconds,
+        }
+        if starts_at is not None:
+            payload["starts_at"] = to_iso(starts_at)
+        result = self._broker.call("announcement.publish", payload)
+        if not isinstance(result, dict):
+            raise BookingError("broker returned an invalid announcement")
+        return result
+
+    def broker_remove_announcement(self, actor: Actor, token: str) -> dict:
+        del actor
+        result = self._broker.call("announcement.remove", {"id": token})
+        if not isinstance(result, dict):
+            raise BookingError("broker returned an invalid announcement")
+        return result
+
+    def broker_edit_announcement(
+        self,
+        actor: Actor,
+        token: str,
+        message: Optional[str],
+        level: Optional[str],
+        expires_in_seconds: Optional[int],
+        starts_at,
+        expires_at,
+    ) -> dict:
+        del actor
+        payload = {"id": token}
+        if message is not None:
+            payload["message"] = message
+        if level is not None:
+            payload["level"] = level
+        if expires_in_seconds is not None:
+            payload["expires_in_seconds"] = expires_in_seconds
+        if starts_at is not None:
+            payload["starts_at"] = to_iso(starts_at)
+        if expires_at is not None:
+            payload["expires_at"] = to_iso(expires_at)
+        result = self._broker.call("announcement.edit", payload)
+        if not isinstance(result, dict):
+            raise BookingError("broker returned an invalid announcement")
         return result
 
     def transaction(self, mutator):
         try:
             return self._patch_transaction(mutator)
         except BookingError as exc:
-            if str(exc) != f"unsupported broker operation: {BROKER_JOB_PATCH_OPERATION}":
+            if (
+                str(exc)
+                != f"unsupported broker operation: {BROKER_JOB_PATCH_OPERATION}"
+            ):
                 raise
         return self._legacy_transaction(mutator)
 
@@ -509,6 +569,80 @@ class BrokerServer:
                 reservation_id,
                 actor,
                 reason,
+            )
+        if operation == "announcement.publish":
+            _require_keys(
+                payload,
+                {"message", "level", "expires_in_seconds", "starts_at"},
+                required={"message", "level", "expires_in_seconds"},
+                label="announcement payload",
+            )
+            message = _string(payload.get("message"), "message")
+            level = _string(payload.get("level"), "level")
+            expiry = payload.get("expires_in_seconds")
+            if isinstance(expiry, bool) or not isinstance(expiry, int):
+                raise BookingError("expires_in_seconds must be an integer")
+            starts_raw = payload.get("starts_at")
+            starts_at = parse_iso(starts_raw) if isinstance(starts_raw, str) else None
+            from .announcements import publish_announcement
+
+            return publish_announcement(
+                self.store,
+                self.config,
+                actor,
+                message,
+                level,
+                expiry,
+                starts_at=starts_at,
+            )
+        if operation == "announcement.remove":
+            _require_keys(
+                payload, {"id"}, required={"id"}, label="announcement removal"
+            )
+            token = _string(payload.get("id"), "id")
+            from .announcements import remove_announcement
+
+            return remove_announcement(self.store, self.config, actor, token)
+        if operation == "announcement.edit":
+            _require_keys(
+                payload,
+                {
+                    "id",
+                    "message",
+                    "level",
+                    "expires_in_seconds",
+                    "starts_at",
+                    "expires_at",
+                },
+                required={"id"},
+                label="announcement edit",
+            )
+            token = _string(payload.get("id"), "id")
+            message = _optional_string(payload.get("message"), "message")
+            level = _optional_string(payload.get("level"), "level")
+            expiry = payload.get("expires_in_seconds")
+            if expiry is not None and (
+                isinstance(expiry, bool) or not isinstance(expiry, int)
+            ):
+                raise BookingError("expires_in_seconds must be an integer")
+            starts_raw = payload.get("starts_at")
+            starts_at = parse_iso(starts_raw) if isinstance(starts_raw, str) else None
+            expires_raw = payload.get("expires_at")
+            expires_at = (
+                parse_iso(expires_raw) if isinstance(expires_raw, str) else None
+            )
+            from .announcements import edit_announcement
+
+            return edit_announcement(
+                self.store,
+                self.config,
+                actor,
+                token,
+                message=message,
+                level=level,
+                expires_in_seconds=expiry,
+                starts_at=starts_at,
+                expires_at=expires_at,
             )
         raise BookingError(f"unsupported broker operation: {operation}")
 
@@ -1035,9 +1169,7 @@ def _decode_booking_request(payload: dict, actor: Actor) -> BookingRequest:
         preferred_gpus=_optional_int_list(
             payload.get("preferred_gpus"), "preferred_gpus"
         ),
-        excluded_gpus=_optional_int_list(
-            payload.get("excluded_gpus"), "excluded_gpus"
-        ),
+        excluded_gpus=_optional_int_list(payload.get("excluded_gpus"), "excluded_gpus"),
         op_id=_optional_string(payload.get("op_id"), "op_id"),
         allow_queue=_boolean(payload.get("allow_queue", False), "allow_queue"),
         job_spec_id=_optional_string(payload.get("job_spec_id"), "job_spec_id"),
@@ -1088,9 +1220,7 @@ def _decode_edit_request(payload: dict, actor: Actor) -> EditRequest:
         preferred_gpus=_optional_int_list(
             payload.get("preferred_gpus"), "preferred_gpus"
         ),
-        excluded_gpus=_optional_int_list(
-            payload.get("excluded_gpus"), "excluded_gpus"
-        ),
+        excluded_gpus=_optional_int_list(payload.get("excluded_gpus"), "excluded_gpus"),
         count=_optional_integer(payload.get("count"), "count"),
         allow_queue=_boolean(payload.get("allow_queue", False), "allow_queue"),
         expected_memory_mb=_optional_integer(

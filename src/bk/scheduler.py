@@ -1234,6 +1234,12 @@ def booking_policy_conflict(
     now: Optional[datetime] = None,
 ) -> str:
     current = (now or utc_now()).astimezone(timezone.utc).replace(microsecond=0)
+    duration_hours = (end - start).total_seconds() / 3600
+    if duration_hours > config.max_booking_duration_hours:
+        return (
+            f"reservation duration exceeds the administrator maximum of "
+            f"{config.max_booking_duration_hours} hours"
+        )
     horizon = current + timedelta(days=config.booking_horizon_days)
     if end > horizon:
         return (

@@ -31,6 +31,7 @@ from bk.tui import (
     TuiState,
     WEAVE_CHARS,
     _build_add_preview,
+    _blackout_overlaps,
     _capacity_text,
     _cell_for_gpu,
     _clear_now_label_slot,
@@ -123,6 +124,29 @@ def reservation(rid, uid, mode, gpus, start, end):
 
 
 class TuiAddPreviewTests(unittest.TestCase):
+    def test_blackout_band_overlaps_every_gpu_timeline_row(self):
+        blocked = (
+            (
+                (self.start + timedelta(minutes=10)).isoformat(),
+                (self.start + timedelta(minutes=40)).isoformat(),
+                "maintenance",
+            ),
+        )
+        self.assertTrue(
+            _blackout_overlaps(
+                blocked,
+                self.start + timedelta(minutes=15),
+                self.start + timedelta(minutes=20),
+            )
+        )
+        self.assertFalse(
+            _blackout_overlaps(
+                blocked,
+                self.start + timedelta(minutes=45),
+                self.start + timedelta(minutes=50),
+            )
+        )
+
     def setUp(self):
         self.config = Config(data_dir=Path("/tmp/bk-tui-test"), gpu_count=2, max_shared_users=2)
         self.start = ceil_5m(utc_now() + timedelta(days=1))

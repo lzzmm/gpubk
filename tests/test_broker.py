@@ -19,6 +19,7 @@ from bk.broker import (
     _edit_request_payload,
     _ledger_digest,
 )
+from bk.announcements import edit_announcement, publish_announcement, remove_announcement
 from bk.config import (
     BROKER_ALL_SOCKET_MODE,
     BROKER_DIR_MODE,
@@ -250,6 +251,47 @@ class BrokerTests(unittest.TestCase):
 
             self.assertEqual(cancelled["cancel_operation"]["kind"], "administrator")
             self.assertEqual(cancelled["notifications"][0]["actor_uid"], 0)
+
+    def test_broker_authenticates_global_announcements_from_peer_uid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = {"uid": 1001}
+            config, server = self.setup_broker(Path(tmp), peer)
+            store = BrokerLedgerStore(config)
+            with RunningBroker(server, config.broker_socket):
+                with self.assertRaisesRegex(BookingError, "requires sudo"):
+                    publish_announcement(
+                        store,
+                        config,
+                        Actor(0, "forged-root"),
+                        "fake maintenance",
+                        "critical",
+                        3600,
+                    )
+                peer["uid"] = 0
+                published = publish_announcement(
+                    store,
+                    config,
+                    Actor(1001, "forged-user"),
+                    "Cooling maintenance",
+                    "warning",
+                    3600,
+                )
+                self.assertEqual(published["actor_uid"], 0)
+                edited = edit_announcement(
+                    store,
+                    config,
+                    Actor(1001, "forged-user"),
+                    published["id"][:8],
+                    message="Updated maintenance",
+                )
+                self.assertEqual(edited["message"], "Updated maintenance")
+                removed = remove_announcement(
+                    store,
+                    config,
+                    Actor(1001, "forged-user"),
+                    published["id"][:8],
+                )
+                self.assertEqual(removed["id"], published["id"])
 
     def test_worker_transaction_can_update_only_its_own_job_state(self):
         with tempfile.TemporaryDirectory() as tmp:

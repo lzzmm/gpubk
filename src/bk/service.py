@@ -603,6 +603,7 @@ def build_agent_context(
             "shared_memory_reserve_mb": config.shared_memory_reserve_mb,
             "queue_search_hours": config.queue_search_hours,
             "booking_horizon_days": config.booking_horizon_days,
+            "max_booking_duration_hours": config.max_booking_duration_hours,
             "booking_blackouts": [
                 {"start_at": start, "end_at": end, "reason": reason}
                 for start, end, reason in config.booking_blackouts

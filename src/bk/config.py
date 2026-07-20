@@ -30,6 +30,7 @@ MAX_GPU_COUNT = 1024
 MAX_SHARED_UNITS = 10_000
 MAX_QUEUE_SEARCH_HOURS = 10 * 365 * 24
 MAX_BOOKING_HORIZON_DAYS = 10 * 365
+MAX_BOOKING_DURATION_HOURS = 10 * 365 * 24
 MAX_BOOKING_BLACKOUTS = 512
 MAX_BLACKOUT_REASON_LENGTH = 512
 MAX_RETENTION_DAYS = 100 * 365
@@ -62,6 +63,7 @@ CONFIG_ENV_MAP = {
     "max_shared_users": "BK_MAX_SHARED_USERS",
     "queue_search_hours": "BK_QUEUE_SEARCH_HOURS",
     "booking_horizon_days": "BK_BOOKING_HORIZON_DAYS",
+    "max_booking_duration_hours": "BK_MAX_BOOKING_DURATION_HOURS",
     "booking_blackouts": "BK_BOOKING_BLACKOUTS",
     "ledger_retention_days": "BK_LEDGER_RETENTION_DAYS",
     "usage_load_window_minutes": "BK_USAGE_LOAD_WINDOW_MINUTES",
@@ -120,6 +122,7 @@ class Config:
     max_shared_users: int = 2
     queue_search_hours: int = 168
     booking_horizon_days: int = 30
+    max_booking_duration_hours: int = 30 * 24
     booking_blackouts: Tuple[Tuple[str, str, str], ...] = ()
     ledger_retention_days: int = 90
     usage_load_window_minutes: int = 120
@@ -180,6 +183,15 @@ class Config:
             raise ValueError(
                 "booking_horizon_days must be between 1 and "
                 f"{MAX_BOOKING_HORIZON_DAYS}"
+            )
+        if (
+            isinstance(self.max_booking_duration_hours, bool)
+            or not isinstance(self.max_booking_duration_hours, int)
+            or not 1 <= self.max_booking_duration_hours <= MAX_BOOKING_DURATION_HOURS
+        ):
+            raise ValueError(
+                "max_booking_duration_hours must be between 1 and "
+                f"{MAX_BOOKING_DURATION_HOURS}"
             )
         object.__setattr__(
             self, "slot_minutes", validate_slot_minutes(self.slot_minutes)
@@ -851,6 +863,12 @@ def load_config() -> Config:
             "booking_horizon_days",
             30,
             maximum=MAX_BOOKING_HORIZON_DAYS,
+        ),
+        max_booking_duration_hours=_int_value(
+            raw,
+            "max_booking_duration_hours",
+            30 * 24,
+            maximum=MAX_BOOKING_DURATION_HOURS,
         ),
         booking_blackouts=validate_booking_blackouts(
             raw.get("booking_blackouts")

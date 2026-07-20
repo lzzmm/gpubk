@@ -924,10 +924,10 @@ windows. Repeat `--blackout` to define more than one window:
 
 ```bash
 sudo systemctl stop gpubk-broker.service gpubk-monitor.service
-sudo bk admin gpu-policy --booking-horizon-days 30 \
+sudo bk admin gpu-policy --booking-horizon-days 30 --max-booking-hours 72 \
   --blackout 2026-08-01T00:00:00+08:00 2026-08-01T12:00:00+08:00 maintenance \
   --dry-run
-sudo bk admin gpu-policy --booking-horizon-days 30 \
+sudo bk admin gpu-policy --booking-horizon-days 30 --max-booking-hours 72 \
   --blackout 2026-08-01T00:00:00+08:00 2026-08-01T12:00:00+08:00 maintenance \
   --yes
 sudo systemctl start gpubk-broker.service gpubk-monitor.service
@@ -940,6 +940,50 @@ edit history remain in the ledger retention window:
 ```bash
 sudo bk admin cancel RESERVATION_ID --reason "cooling maintenance" --yes
 ```
+
+Publish expiring global announcements without stopping services:
+
+For the usual maintenance case, the guided command provides safe defaults and
+creates both the announcement and the optional booking blackout. Press Enter to
+accept `Server maintenance`, `now`, `2h`, `warning`, and blocked reservations:
+
+```bash
+sudo bk admin maintain
+```
+
+For scripting or editing individual records, use the explicit commands:
+
+```bash
+sudo bk admin notice publish "Cooling maintenance tonight at 22:00" \
+  --level warning --starts "tomorrow 22:00" --until "tomorrow 23:30" --yes
+sudo bk admin notice publish "GPUs must stop now for emergency maintenance" \
+  --level critical --expires 2h --yes
+sudo bk admin notice list
+sudo bk admin notice edit NOTICE_ID --message "Maintenance moved to 23:00" \
+  --until "tomorrow 03:00" --yes
+sudo bk admin notice remove NOTICE_ID --yes
+```
+
+`info` appears in `bk n`; `warning` also appears in status and the TUI;
+`critical` additionally appears at interactive login. Warning and critical
+announcements use an amber accent rather than an error-red background.
+
+Maintain one blackout without rewriting the complete list. These commands
+restart only GPUBK's broker and monitor; running GPU workloads are untouched:
+
+```bash
+sudo bk admin blackout add "tomorrow 22:00" "tomorrow 23:30" \
+  "cooling maintenance" --announce --yes
+sudo bk admin blackout list
+sudo bk admin blackout edit BLACKOUT_ID --end "tomorrow 23:55" --reason "extended maintenance" --yes
+sudo bk admin blackout remove BLACKOUT_ID --yes
+```
+
+The CLI timeline renders blocked cells as `##`. The TUI uses an amber maintenance
+band across every GPU and shows the nearest visible blackout's time and reason.
+Omit `--announce` to create only the blackout, or pass `--announce critical` to
+choose another announcement level. Its start, deadline, and message are derived
+from the blackout so the two views cannot disagree.
 
 For a reversible foreground trial before enabling system services, start the
 broker in a second terminal as the selected owner, without `sudo`:

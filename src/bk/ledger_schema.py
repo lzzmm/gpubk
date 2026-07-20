@@ -18,6 +18,7 @@ MAX_RESERVATION_ID_LENGTH = 128
 MAX_USERNAME_LENGTH = 256
 MAX_EDIT_OPERATIONS_PER_RESERVATION = 256
 MAX_NOTIFICATIONS_PER_RESERVATION = 128
+MAX_ANNOUNCEMENTS = 256
 
 
 def validate_ledger_document(data: object) -> None:
@@ -32,6 +33,7 @@ def validate_ledger_document(data: object) -> None:
     transaction_id = data.get("last_transaction_id")
     if transaction_id is not None:
         _bounded_text(transaction_id, "last_transaction_id", 128)
+    _validate_announcements(data.get("announcements", []))
 
     seen_ids: set[str] = set()
     seen_operations: set[tuple[int, str]] = set()
@@ -232,6 +234,36 @@ def _validate_notifications(value: object, reservation_path: str) -> None:
         )
         _bounded_text(item.get("reason"), f"{item_path}.reason", 512)
         _bounded_text(item.get("message"), f"{item_path}.message", 1024)
+
+
+def _validate_announcements(value: object) -> None:
+    if not isinstance(value, list) or len(value) > MAX_ANNOUNCEMENTS:
+        raise ValueError(f"announcements must contain at most {MAX_ANNOUNCEMENTS} items")
+    seen = set()
+    for index, item in enumerate(value):
+        path = f"announcements[{index}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{path} must be an object")
+        announcement_id = _bounded_text(item.get("id"), f"{path}.id", 128)
+        if announcement_id in seen:
+            raise ValueError(f"{path}.id is duplicated")
+        seen.add(announcement_id)
+        if item.get("level") not in {"info", "warning", "critical"}:
+            raise ValueError(f"{path}.level is unsupported")
+        _bounded_text(item.get("message"), f"{path}.message", 1024)
+        created = _timestamp(item.get("created_at"), f"{path}.created_at")
+        if item.get("updated_at") is not None:
+            _timestamp(item.get("updated_at"), f"{path}.updated_at")
+        starts = _timestamp(item.get("starts_at"), f"{path}.starts_at")
+        expires = _timestamp(item.get("expires_at"), f"{path}.expires_at")
+        if expires <= starts or created > expires:
+            raise ValueError(f"{path} has an invalid time window")
+        _uid(item.get("actor_uid"), f"{path}.actor_uid")
+        _bounded_text(
+            item.get("actor_username"),
+            f"{path}.actor_username",
+            MAX_USERNAME_LENGTH,
+        )
 
 
 def _register_operation_id(

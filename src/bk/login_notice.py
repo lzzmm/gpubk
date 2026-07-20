@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Mapping, Optional, Sequence
 
 from .models import STATUS_ACTIVE
+from .announcements import active_announcements
 from .scheduler import exclusive_blocks_for_uid
 from .terminal import style
 from .timeparse import parse_iso
@@ -74,6 +75,11 @@ def build_login_summary(
         now=current,
         until=horizon,
     )
+    announcements = [
+        item
+        for item in active_announcements(ledger, now=current)
+        if item.get("level") == "critical"
+    ]
     return {
         "schema_version": LOGIN_NOTICE_SCHEMA_VERSION,
         "kind": "login-notice",
@@ -83,6 +89,7 @@ def build_login_summary(
         "upcoming": [_public_item(item) for item in upcoming],
         "overdue": overdue,
         "notifications": notifications[:5],
+        "announcements": announcements[:3],
         "exclusive_blocks": [_public_item(item) for item in exclusive_blocks],
         "worker": worker,
     }
@@ -93,6 +100,7 @@ def render_login_summary(summary: dict, *, color: bool = False) -> str:
     upcoming = summary.get("upcoming", [])
     overdue = summary.get("overdue", [])
     notifications = summary.get("notifications", [])
+    announcements = summary.get("announcements", [])
     exclusive_blocks = summary.get("exclusive_blocks", [])
     worker = summary.get("worker")
     if (
@@ -100,6 +108,7 @@ def render_login_summary(summary: dict, *, color: bool = False) -> str:
         and not upcoming
         and not overdue
         and not notifications
+        and not announcements
         and not exclusive_blocks
         and not worker
     ):
@@ -114,6 +123,8 @@ def render_login_summary(summary: dict, *, color: bool = False) -> str:
         labels.append(f"{len(overdue)} overdue occupancy")
     if notifications:
         labels.append(f"{len(notifications)} notice{'s' if len(notifications) != 1 else ''}")
+    if announcements:
+        labels.append(f"{len(announcements)} critical announcement{'s' if len(announcements) != 1 else ''}")
     generated_at = parse_iso(summary["generated_at"])
     exclusive_now = [
         item
@@ -150,6 +161,14 @@ def render_login_summary(summary: dict, *, color: bool = False) -> str:
         )
         if len(notifications) > 1:
             lines[-1] += f"  (+{len(notifications) - 1} more; run `bk n`)"
+    for announcement in announcements:
+        lines.append(
+            style(
+                "  CRITICAL " + str(announcement.get("message", "administrator announcement")),
+                "warning",
+                enabled=color,
+            )
+        )
     for item in exclusive_now[:3]:
         lines.append(style(_exclusive_line(item, generated_at, active=True), "error", enabled=color))
     if len(exclusive_now) > 3:
