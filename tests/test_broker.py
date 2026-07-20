@@ -240,6 +240,15 @@ class BrokerTests(unittest.TestCase):
                         Actor(0, "forged-root"),
                         "maintenance",
                     )
+                peer["uid"] = config.broker_uid
+                with self.assertRaisesRegex(BookingError, "requires sudo"):
+                    cancel_booking_as_admin(
+                        store,
+                        config,
+                        created.reservation["id"],
+                        Actor(0, "forged-root"),
+                        "service owner must not be administrator",
+                    )
                 peer["uid"] = 0
                 cancelled = cancel_booking_as_admin(
                     store,

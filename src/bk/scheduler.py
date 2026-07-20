@@ -372,10 +372,7 @@ def cancel_booking_as_admin(
     broker_cancel = getattr(store, "broker_admin_cancel_booking", None)
     if callable(broker_cancel):
         return broker_cancel(reservation_id, actor, reason)
-    administrator_uids = {0}
-    if config.broker_uid is not None:
-        administrator_uids.add(config.broker_uid)
-    if actor.uid not in administrator_uids:
+    if actor.uid != 0:
         raise BookingError("permission denied: administrator cancellation requires sudo")
     reason = _admin_cancellation_reason(reason)
     operation_signature = _operation_signature(
