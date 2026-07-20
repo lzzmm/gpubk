@@ -292,6 +292,11 @@ class BrokerTests(unittest.TestCase):
                     published["id"][:8],
                 )
                 self.assertEqual(removed["id"], published["id"])
+                self.assertEqual(removed["archived_by_uid"], 0)
+                self.assertEqual(
+                    LedgerStore(config.data_dir).load()["announcements"][0]["id"],
+                    published["id"],
+                )
 
     def test_worker_transaction_can_update_only_its_own_job_state(self):
         with tempfile.TemporaryDirectory() as tmp:

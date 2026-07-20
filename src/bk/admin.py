@@ -592,9 +592,10 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     cancel_parser.add_argument("--json", action="store_true")
     notice_parser = commands.add_parser(
         "notice",
-        help="publish, list, or remove expiring administrator announcements",
+        help="guided or explicit administrator announcements with archive history",
     )
-    notice_commands = notice_parser.add_subparsers(dest="notice_action", required=True)
+    notice_parser.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
+    notice_commands = notice_parser.add_subparsers(dest="notice_action")
     notice_publish = notice_commands.add_parser(
         "publish", help="publish an announcement"
     )
@@ -638,11 +639,13 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     notice_edit.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
     notice_edit.add_argument("--yes", action="store_true")
     notice_edit.add_argument("--json", action="store_true")
-    notice_remove = notice_commands.add_parser("remove", help="remove one announcement")
-    notice_remove.add_argument("id", help="full or unique short announcement ID")
-    notice_remove.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
-    notice_remove.add_argument("--yes", action="store_true")
-    notice_remove.add_argument("--json", action="store_true")
+    notice_archive = notice_commands.add_parser(
+        "archive", aliases=["remove"], help="hide an announcement but retain its audit history"
+    )
+    notice_archive.add_argument("id", help="full or unique short announcement ID")
+    notice_archive.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
+    notice_archive.add_argument("--yes", action="store_true")
+    notice_archive.add_argument("--json", action="store_true")
     blackout_parser = commands.add_parser(
         "blackout", help="list, add, edit, or remove maintenance booking blocks"
     )
@@ -1009,15 +1012,17 @@ def _run_admin_notice(args: argparse.Namespace) -> int:
             os.environ["BK_CONFIG_FILE"] = previous
     from .announcements import (
         active_announcements,
+        archive_announcement,
         edit_announcement,
         publish_announcement,
-        remove_announcement,
     )
     from .broker import ledger_store_for_config
     from .identity import current_actor
 
     store = ledger_store_for_config(config)
     actor = current_actor()
+    if args.notice_action is None:
+        return _run_admin_notice_guide(args, config)
     if args.notice_action == "list":
         retained = store.load().get("announcements", [])
         if args.json:
@@ -1036,7 +1041,9 @@ def _run_admin_notice(args: argparse.Namespace) -> int:
             return 0
         print("ID       Level     State    Expires                 Message")
         for item in reversed(retained[-50:]):
-            if item.get("id") in active_ids:
+            if item.get("archived_at") is not None:
+                state = "archived"
+            elif item.get("id") in active_ids:
                 state = "active"
             elif parse_iso(str(item.get("starts_at"))) > now:
                 state = "scheduled"
@@ -1133,17 +1140,56 @@ def _run_admin_notice(args: argparse.Namespace) -> int:
         return 0
     if not args.yes:
         if not sys.stdin.isatty():
-            raise BookingError("pass --yes to remove this announcement")
-        answer = input(f"Remove announcement {args.id}? [y/N]: ").strip().lower()
+            raise BookingError("pass --yes to archive this announcement")
+        answer = input(f"Archive announcement {args.id}? [y/N]: ").strip().lower()
         if answer not in {"y", "yes"}:
             print("No changes made.")
             return 1
-    item = remove_announcement(store, config, actor, args.id)
+    item = archive_announcement(store, config, actor, args.id)
     if args.json:
         print(json.dumps(item, ensure_ascii=False, sort_keys=True))
     else:
-        print(f"removed: {item['id'][:8]}")
+        print(f"archived: {item['id'][:8]} (history retained)")
     return 0
+
+
+def _run_admin_notice_guide(args: argparse.Namespace, config: Config) -> int:
+    if not sys.stdin.isatty():
+        raise BookingError("guided announcement needs an interactive terminal")
+    print("GPUBK announcement guide")
+    message = _ask("Message", "Server announcement", enabled=True)
+    level = _ask_choice(
+        "Level", "warning", ("info", "warning", "critical"), enabled=True
+    )
+    starts = _ask("Starts", "now", enabled=True)
+    duration = _ask("Duration", "24h", enabled=True)
+    starts_at = _announcement_start(starts, config)
+    _seconds, deadline = _announcement_expiry(
+        argparse.Namespace(expires=duration, until=None),
+        config,
+        starts_at=starts_at,
+    )
+    print("\nReview")
+    print(f"  message: {message}")
+    print(f"  level:   {level}")
+    print(f"  starts:  {format_local(to_iso(starts_at or utc_now()))}")
+    print(f"  ends:    {deadline}")
+    if not _ask_bool("Publish this announcement", False, enabled=True):
+        print("No changes made.")
+        return 1
+    return _run_admin_notice(
+        argparse.Namespace(
+            notice_action="publish",
+            message=message,
+            level=level,
+            starts=starts,
+            expires=duration,
+            until=None,
+            config_file=args.config_file,
+            yes=True,
+            json=False,
+        )
+    )
 
 
 def _announcement_expiry(

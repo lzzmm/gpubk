@@ -64,6 +64,28 @@ class TtyInput(StringIO):
 
 
 class AdminMaintenanceTests(unittest.TestCase):
+    def test_guided_announcement_uses_safe_defaults(self):
+        config = Config(data_dir=Path("/tmp/gpubk-test"), gpu_count=2)
+        answers = ["", "", "", "", "y"]
+        with (
+            mock.patch("bk.admin.os.geteuid", return_value=0),
+            mock.patch.object(admin_module.sys.stdin, "isatty", return_value=True),
+            mock.patch("bk.admin.load_config", return_value=config),
+            mock.patch("builtins.input", side_effect=answers),
+            mock.patch("bk.admin._run_admin_notice") as run_notice,
+        ):
+            run_notice.side_effect = lambda args: 0 if args.notice_action == "publish" else 1
+            status = admin_module._run_admin_notice_guide(
+                mock.Mock(config_file=Path("/etc/gpubk/config.json")), config
+            )
+
+        self.assertEqual(status, 0)
+        publish_args = run_notice.call_args.args[0]
+        self.assertEqual(publish_args.message, "Server announcement")
+        self.assertEqual(publish_args.level, "warning")
+        self.assertEqual(publish_args.starts, "now")
+        self.assertEqual(publish_args.expires, "24h")
+
     def test_blackout_can_publish_a_matching_announcement(self):
         config = Config(data_dir=Path("/tmp/gpubk-test"), gpu_count=2)
         plan = mock.Mock()

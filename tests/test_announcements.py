@@ -5,6 +5,7 @@ from pathlib import Path
 
 from bk.announcements import (
     active_announcements,
+    archive_announcement,
     edit_announcement,
     publish_announcement,
     remove_announcement,
@@ -24,7 +25,7 @@ class AnnouncementTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_publish_list_expire_and_remove(self):
+    def test_publish_list_expire_and_archive(self):
         item = publish_announcement(
             self.store,
             self.config,
@@ -50,11 +51,28 @@ class AnnouncementTests(unittest.TestCase):
         self.assertEqual(edited["message"], "Updated cooling maintenance")
         self.assertEqual(edited["level"], "critical")
 
-        removed = remove_announcement(
+        archived = archive_announcement(
             self.store, self.config, self.admin, item["id"][:8]
         )
-        self.assertEqual(removed["id"], item["id"])
-        self.assertEqual(self.store.load().get("announcements"), [])
+        self.assertEqual(archived["id"], item["id"])
+        self.assertEqual(archived["archived_by_uid"], 0)
+        retained = self.store.load().get("announcements")
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(retained[0]["message"], "Updated cooling maintenance")
+        self.assertEqual(active_announcements({"announcements": retained}), [])
+
+        repeated = archive_announcement(
+            self.store, self.config, self.admin, item["id"][:8]
+        )
+        self.assertEqual(repeated["archived_at"], archived["archived_at"])
+        with self.assertRaisesRegex(BookingError, "cannot be edited"):
+            edit_announcement(
+                self.store,
+                self.config,
+                self.admin,
+                item["id"][:8],
+                message="Must not change archived history",
+            )
 
     def test_ordinary_user_cannot_publish_or_remove(self):
         user = Actor(uid=1001, username="alice")

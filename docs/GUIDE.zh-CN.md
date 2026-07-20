@@ -805,6 +805,13 @@ sudo bk admin cancel RESERVATION_ID --reason "机房散热维护" --yes
 sudo bk admin maintain
 ```
 
+只发公告、不设置禁约时，可以运行公告向导。一路回车采用 `Server announcement`、
+warning、立即开始、持续 24 小时：
+
+```bash
+sudo bk admin notice
+```
+
 脚本调用或单独编辑某条记录时，再使用下面的精确命令：
 
 ```bash
@@ -815,11 +822,13 @@ sudo bk admin notice publish "紧急检修，请立即停止 GPU 任务" \
 sudo bk admin notice list
 sudo bk admin notice edit NOTICE_ID --message "检修推迟到 23:00" \
   --until "tomorrow 03:00" --yes
-sudo bk admin notice remove NOTICE_ID --yes
+sudo bk admin notice archive NOTICE_ID --yes
 ```
 
 `info` 只进入 `bk n`；`warning` 还会显示在状态页和 TUI；`critical` 再额外进入登录提示。
 warning 与 critical 都使用橙色/琥珀色强调，不使用大面积错误红色。
+归档会立即隐藏公告，但不会物理删除：原正文、时间窗、归档时间和归档管理员继续保留在
+台账中，追加式操作日志还会保存一份当时快照。旧命令 `remove` 仅作为 `archive` 的兼容别名。
 
 单独维护一个禁约窗口时，不必整体重写列表。以下命令只重启 GPUBK 的 broker 和 monitor，
 不会停止用户正在运行的 GPU 进程：

@@ -109,6 +109,10 @@ never stopped:
 sudo bk admin maintain
 ```
 
+Use `sudo bk admin notice` for a guided announcement without a blackout. Notices
+are archived with their original content and administrator audit metadata rather
+than deleted.
+
 Upgrade an existing installation without deleting policy or history:
 
 ```bash

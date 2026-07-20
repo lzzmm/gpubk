@@ -4,20 +4,19 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from .config import Config
+from .config import MAX_ANNOUNCEMENT_HISTORY, Config
 from .models import Actor, BookingError
 from .timeparse import parse_iso, to_iso, utc_now
 
 
 ANNOUNCEMENT_LEVELS = ("info", "warning", "critical")
-MAX_ANNOUNCEMENTS = 256
-
-
 def active_announcements(ledger: dict, *, now: Optional[datetime] = None) -> list[dict]:
     current = (now or utc_now()).astimezone(timezone.utc).replace(microsecond=0)
     visible = []
     for item in ledger.get("announcements", []):
         if not isinstance(item, dict):
+            continue
+        if item.get("archived_at") is not None:
             continue
         try:
             starts = parse_iso(str(item["starts_at"]))
@@ -72,13 +71,20 @@ def publish_announcement(
         existing = ledger.get("announcements", [])
         if not isinstance(existing, list):
             raise BookingError("invalid announcement history")
-        ledger["announcements"] = [*existing[-(MAX_ANNOUNCEMENTS - 1) :], announcement]
-        return ledger, announcement, [], True
+        if len(existing) >= MAX_ANNOUNCEMENT_HISTORY:
+            raise BookingError(
+                "announcement archive is full; back up server data before migrating history"
+            )
+        ledger["announcements"] = [*existing, announcement]
+        return ledger, announcement, [_audit_log("announcement.publish", actor, announcement)], True
 
     return store.transaction(mutate)
 
 
-def remove_announcement(store, config: Config, actor: Actor, token: str) -> dict:
+def archive_announcement(store, config: Config, actor: Actor, token: str) -> dict:
+    broker_archive = getattr(store, "broker_archive_announcement", None)
+    if callable(broker_archive):
+        return broker_archive(actor, token)
     broker_remove = getattr(store, "broker_remove_announcement", None)
     if callable(broker_remove):
         return broker_remove(actor, token)
@@ -95,12 +101,19 @@ def remove_announcement(store, config: Config, actor: Actor, token: str) -> dict
         if len(matches) > 1:
             raise BookingError("announcement ID prefix is ambiguous")
         target = matches[0]
-        ledger["announcements"] = [
-            item for item in ledger.get("announcements", []) if item is not target
-        ]
-        return ledger, target, [], True
+        if target.get("archived_at") is not None:
+            return ledger, target, [], False
+        target["archived_at"] = to_iso(utc_now())
+        target["archived_by_uid"] = actor.uid
+        target["archived_by_username"] = actor.username
+        return ledger, target, [_audit_log("announcement.archive", actor, target)], True
 
     return store.transaction(mutate)
+
+
+def remove_announcement(store, config: Config, actor: Actor, token: str) -> dict:
+    """Backward-compatible alias; announcements are archived, never deleted."""
+    return archive_announcement(store, config, actor, token)
 
 
 def edit_announcement(
@@ -155,6 +168,8 @@ def edit_announcement(
         if len(matches) > 1:
             raise BookingError("announcement ID prefix is ambiguous")
         target = matches[0]
+        if target.get("archived_at") is not None:
+            raise BookingError("archived announcement cannot be edited")
         if message is not None:
             target["message"] = message
         if level is not None:
@@ -174,7 +189,7 @@ def edit_announcement(
         if effective_expiry - effective_start > timedelta(days=365):
             raise BookingError("announcement window must not exceed 365 days")
         target["updated_at"] = to_iso(utc_now())
-        return ledger, target, [], True
+        return ledger, target, [_audit_log("announcement.edit", actor, target)], True
 
     return store.transaction(mutate)
 
@@ -203,3 +218,15 @@ def _message(value: str) -> str:
     if any(ord(char) < 32 and char not in "\t" for char in normalized):
         raise BookingError("announcement message contains control characters")
     return normalized
+
+
+def _audit_log(action: str, actor: Actor, announcement: dict) -> dict:
+    return {
+        "timestamp": to_iso(utc_now()),
+        "action": action,
+        "uid": actor.uid,
+        "username": actor.username,
+        "announcement_id": announcement["id"],
+        "announcement": dict(announcement),
+        "result": "ok",
+    }

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from .config import MAX_GPU_COUNT, MAX_UID
+from .config import MAX_ANNOUNCEMENT_HISTORY, MAX_GPU_COUNT, MAX_UID
 from .models import (
     MODE_EXCLUSIVE,
     MODE_SHARED,
@@ -18,7 +18,6 @@ MAX_RESERVATION_ID_LENGTH = 128
 MAX_USERNAME_LENGTH = 256
 MAX_EDIT_OPERATIONS_PER_RESERVATION = 256
 MAX_NOTIFICATIONS_PER_RESERVATION = 128
-MAX_ANNOUNCEMENTS = 256
 
 
 def validate_ledger_document(data: object) -> None:
@@ -237,8 +236,10 @@ def _validate_notifications(value: object, reservation_path: str) -> None:
 
 
 def _validate_announcements(value: object) -> None:
-    if not isinstance(value, list) or len(value) > MAX_ANNOUNCEMENTS:
-        raise ValueError(f"announcements must contain at most {MAX_ANNOUNCEMENTS} items")
+    if not isinstance(value, list) or len(value) > MAX_ANNOUNCEMENT_HISTORY:
+        raise ValueError(
+            f"announcements must contain at most {MAX_ANNOUNCEMENT_HISTORY} items"
+        )
     seen = set()
     for index, item in enumerate(value):
         path = f"announcements[{index}]"
@@ -264,6 +265,14 @@ def _validate_announcements(value: object) -> None:
             f"{path}.actor_username",
             MAX_USERNAME_LENGTH,
         )
+        if item.get("archived_at") is not None:
+            _timestamp(item.get("archived_at"), f"{path}.archived_at")
+            _uid(item.get("archived_by_uid"), f"{path}.archived_by_uid")
+            _bounded_text(
+                item.get("archived_by_username"),
+                f"{path}.archived_by_username",
+                MAX_USERNAME_LENGTH,
+            )
 
 
 def _register_operation_id(

@@ -951,6 +951,13 @@ accept `Server maintenance`, `now`, `2h`, `warning`, and blocked reservations:
 sudo bk admin maintain
 ```
 
+For an announcement without a blackout, run the announcement guide. Press Enter
+to accept `Server announcement`, `warning`, `now`, and `24h`:
+
+```bash
+sudo bk admin notice
+```
+
 For scripting or editing individual records, use the explicit commands:
 
 ```bash
@@ -961,12 +968,16 @@ sudo bk admin notice publish "GPUs must stop now for emergency maintenance" \
 sudo bk admin notice list
 sudo bk admin notice edit NOTICE_ID --message "Maintenance moved to 23:00" \
   --until "tomorrow 03:00" --yes
-sudo bk admin notice remove NOTICE_ID --yes
+sudo bk admin notice archive NOTICE_ID --yes
 ```
 
 `info` appears in `bk n`; `warning` also appears in status and the TUI;
 `critical` additionally appears at interactive login. Warning and critical
 announcements use an amber accent rather than an error-red background.
+Archiving hides an announcement immediately but never deletes it: the original
+message and window remain in the ledger with the archive time and administrator,
+and the append-only operation log stores another snapshot. `remove` remains a
+compatibility alias for `archive`.
 
 Maintain one blackout without rewriting the complete list. These commands
 restart only GPUBK's broker and monitor; running GPU workloads are untouched:

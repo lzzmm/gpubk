@@ -151,6 +151,13 @@ class BrokerLedgerStore(LedgerStore):
             raise BookingError("broker returned an invalid announcement")
         return result
 
+    def broker_archive_announcement(self, actor: Actor, token: str) -> dict:
+        del actor
+        result = self._broker.call("announcement.archive", {"id": token})
+        if not isinstance(result, dict):
+            raise BookingError("broker returned an invalid announcement")
+        return result
+
     def broker_edit_announcement(
         self,
         actor: Actor,
@@ -595,14 +602,14 @@ class BrokerServer:
                 expiry,
                 starts_at=starts_at,
             )
-        if operation == "announcement.remove":
+        if operation in {"announcement.archive", "announcement.remove"}:
             _require_keys(
                 payload, {"id"}, required={"id"}, label="announcement removal"
             )
             token = _string(payload.get("id"), "id")
-            from .announcements import remove_announcement
+            from .announcements import archive_announcement
 
-            return remove_announcement(self.store, self.config, actor, token)
+            return archive_announcement(self.store, self.config, actor, token)
         if operation == "announcement.edit":
             _require_keys(
                 payload,
