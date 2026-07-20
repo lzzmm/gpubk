@@ -33,6 +33,21 @@ def ceil_5m(value):
 
 
 class SchedulerModeTests(unittest.TestCase):
+    def test_administrator_maximum_booking_duration_is_enforced(self):
+        config = Config(
+            data_dir=self.config.data_dir,
+            gpu_count=1,
+            max_booking_duration_hours=2,
+        )
+        request = self.request(
+            1001,
+            MODE_SHARED,
+            duration_seconds=2 * 3600 + 300,
+        )
+
+        with self.assertRaisesRegex(BookingError, "maximum of 2 hours"):
+            add_booking(self.store, config, request)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.config = Config(data_dir=Path(self.tmp.name), gpu_count=1, max_shared_users=2)

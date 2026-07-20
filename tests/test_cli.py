@@ -2070,6 +2070,33 @@ class CliTests(unittest.TestCase):
             self.assertIn("G0", result.stdout)
             self.assertNotIn("G1", result.stdout)
 
+    def test_timeline_marks_blackout_cells_and_prints_the_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            start = ceil_5m(datetime.now(timezone.utc) + timedelta(hours=1))
+            blocked_end = start + timedelta(minutes=30)
+            env = {
+                "BK_GPU_COUNT": "2",
+                "BK_BOOKING_BLACKOUTS": json.dumps(
+                    [
+                        {
+                            "start_at": iso(start),
+                            "end_at": iso(blocked_end),
+                            "reason": "cooling maintenance",
+                        }
+                    ]
+                ),
+            }
+            result = self.run_bk(
+                ["tl", "1h", "--from", iso(start), "--step", "5m"],
+                Path(tmp),
+                env,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("##", result.stdout)
+            self.assertIn("cooling maintenance", result.stdout)
+            self.assertIn("## administrator blackout", result.stdout)
+
     def test_status_and_default_timeline_fit_a_72_column_terminal(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = {"BK_GPU_COUNT": "8", "COLUMNS": "72"}

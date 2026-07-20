@@ -372,10 +372,7 @@ def cancel_booking_as_admin(
     broker_cancel = getattr(store, "broker_admin_cancel_booking", None)
     if callable(broker_cancel):
         return broker_cancel(reservation_id, actor, reason)
-    administrator_uids = {0}
-    if config.broker_uid is not None:
-        administrator_uids.add(config.broker_uid)
-    if actor.uid not in administrator_uids:
+    if actor.uid != 0:
         raise BookingError("permission denied: administrator cancellation requires sudo")
     reason = _admin_cancellation_reason(reason)
     operation_signature = _operation_signature(
@@ -1234,6 +1231,12 @@ def booking_policy_conflict(
     now: Optional[datetime] = None,
 ) -> str:
     current = (now or utc_now()).astimezone(timezone.utc).replace(microsecond=0)
+    duration_hours = (end - start).total_seconds() / 3600
+    if duration_hours > config.max_booking_duration_hours:
+        return (
+            f"reservation duration exceeds the administrator maximum of "
+            f"{config.max_booking_duration_hours} hours"
+        )
     horizon = current + timedelta(days=config.booking_horizon_days)
     if end > horizon:
         return (

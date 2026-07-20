@@ -8,6 +8,7 @@ from typing import List, Optional, Sequence, Tuple
 
 from .admin_info import administrator_display_lines, administrator_info
 from .advisor import build_gpu_advice
+from .announcements import active_announcements
 from .allocator import AllocatorDecision, apply_external_allocator
 from .config import Config
 from .granularity import DEFAULT_SLOT_MINUTES, ceil_to_slot, floor_to_slot
@@ -37,7 +38,7 @@ from .scheduler import (
 from .service import public_reservation, submit_cancellation
 from .sharing import parse_share_units, reservation_share_units, share_text
 from .storage import LedgerStore
-from .timeparse import format_local_range, parse_iso, parse_memory_mb, utc_now
+from .timeparse import format_local, format_local_range, parse_iso, parse_memory_mb, utc_now
 from .tutorial import TUI_TOUR, mark_onboarding_seen, onboarding_seen
 from .usage import (
     ProcessUsage,
@@ -706,6 +707,45 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
 
     _draw_header(stdscr, config, now, view_start, view_end, width, state)
     _draw_editor_banner(stdscr, 2, width, state, preview, id_width)
+    if not state.editor_active:
+        visible_announcements = [
+            item
+            for item in active_announcements(ledger, now=now)
+            if item.get("level") in {"warning", "critical"}
+        ]
+        visible_blackouts = [
+            item
+            for item in config.booking_blackouts
+            if parse_iso(item[0]) < view_end and view_start < parse_iso(item[1])
+        ]
+        if visible_announcements:
+            announcement = visible_announcements[0]
+            label = str(announcement.get("level", "warning")).upper()
+            message = f" {label}: {announcement.get('message', '')} | bk n for details "
+            _addstr(
+                stdscr,
+                2,
+                0,
+                message[: max(0, width - 1)].ljust(width),
+                width,
+                COLOR_PREVIEW_EXCLUSIVE,
+                curses.A_BOLD,
+            )
+        elif visible_blackouts:
+            blocked_start, blocked_end, reason = visible_blackouts[0]
+            message = (
+                f" BLACKOUT {format_local(blocked_start)} -> "
+                f"{format_local(blocked_end)}: {reason} "
+            )
+            _addstr(
+                stdscr,
+                2,
+                0,
+                message[: max(0, width - 1)].ljust(width),
+                width,
+                COLOR_PREVIEW_EXCLUSIVE,
+                curses.A_BOLD,
+            )
     _draw_time_axis(stdscr, timeline_top, label_width, timeline_width, view_start, view_end, width, now)
     row = timeline_top + 4
     for gpu in visible_gpu_snapshots:
@@ -730,6 +770,7 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
             now,
             state.timeline_style,
             gpu.index in config.disabled_gpus,
+            config.booking_blackouts,
         )
         row += 1
 
@@ -1052,6 +1093,7 @@ def _draw_gpu_row(
     now: Optional[datetime] = None,
     timeline_style: str = "capacity",
     disabled: bool = False,
+    booking_blackouts: Sequence[Tuple[str, str, str]] = (),
 ) -> None:
     view_end = start + timedelta(minutes=slot_minutes * timeline_width)
     if now is not None:
@@ -1106,6 +1148,8 @@ def _draw_gpu_row(
             preview_cell = _preview_cell_for_gpu(gpu.index, left, right, preview, lane, band_rows)
             if preview_cell is not None:
                 char, color, attr = preview_cell
+            elif _blackout_overlaps(booking_blackouts, left, right):
+                char, color, attr = "▒", COLOR_PREVIEW_EXCLUSIVE, curses.A_BOLD
             else:
                 char, color, attr = _cell_for_gpu(
                     gpu.index,
@@ -1123,6 +1167,17 @@ def _draw_gpu_row(
                 )
             char, color, attr = _decorate_timeline_cell(char, color, attr, left, right, now)
             _addstr(stdscr, row + lane, label_width + col, char, width, color, attr)
+
+
+def _blackout_overlaps(
+    blackouts: Sequence[Tuple[str, str, str]],
+    start: datetime,
+    end: datetime,
+) -> bool:
+    return any(
+        parse_iso(blocked_start) < end and start < parse_iso(blocked_end)
+        for blocked_start, blocked_end, _reason in blackouts
+    )
 
 
 def _draw_selected_gpu_lanes(

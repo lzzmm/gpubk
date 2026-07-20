@@ -780,10 +780,10 @@ sudo bk admin gpu-policy --allow-implicit-shared-memory --yes
 
 ```bash
 sudo systemctl stop gpubk-broker.service gpubk-monitor.service
-sudo bk admin gpu-policy --booking-horizon-days 30 \
+sudo bk admin gpu-policy --booking-horizon-days 30 --max-booking-hours 72 \
   --blackout 2026-08-01T00:00:00+08:00 2026-08-01T12:00:00+08:00 机房维护 \
   --dry-run
-sudo bk admin gpu-policy --booking-horizon-days 30 \
+sudo bk admin gpu-policy --booking-horizon-days 30 --max-booking-hours 72 \
   --blackout 2026-08-01T00:00:00+08:00 2026-08-01T12:00:00+08:00 机房维护 \
   --yes
 sudo systemctl start gpubk-broker.service gpubk-monitor.service
@@ -795,6 +795,56 @@ sudo systemctl start gpubk-broker.service gpubk-monitor.service
 ```bash
 sudo bk admin cancel RESERVATION_ID --reason "机房散热维护" --yes
 ```
+
+全局公告不需要停止服务，并且会自动过期：
+
+日常安排检修时，优先使用引导命令。一路回车会采用 `Server maintenance`、立即开始、
+持续 2 小时、warning 公告、同时禁止该时段预约等默认值，最后只确认一次：
+
+```bash
+sudo bk admin maintain
+```
+
+只发公告、不设置禁约时，可以运行公告向导。一路回车采用 `Server announcement`、
+warning、立即开始、持续 24 小时：
+
+```bash
+sudo bk admin notice
+```
+
+脚本调用或单独编辑某条记录时，再使用下面的精确命令：
+
+```bash
+sudo bk admin notice publish "今晚 22:00 进行散热检修" \
+  --level warning --starts "tomorrow 22:00" --until "tomorrow 23:30" --yes
+sudo bk admin notice publish "紧急检修，请立即停止 GPU 任务" \
+  --level critical --expires 2h --yes
+sudo bk admin notice list
+sudo bk admin notice edit NOTICE_ID --message "检修推迟到 23:00" \
+  --until "tomorrow 03:00" --yes
+sudo bk admin notice archive NOTICE_ID --yes
+```
+
+`info` 只进入 `bk n`；`warning` 还会显示在状态页和 TUI；`critical` 再额外进入登录提示。
+warning 与 critical 都使用橙色/琥珀色强调，不使用大面积错误红色。
+归档会立即隐藏公告，但不会物理删除：原正文、时间窗、归档时间和归档管理员继续保留在
+台账中，追加式操作日志还会保存一份当时快照。旧命令 `remove` 仅作为 `archive` 的兼容别名。
+
+单独维护一个禁约窗口时，不必整体重写列表。以下命令只重启 GPUBK 的 broker 和 monitor，
+不会停止用户正在运行的 GPU 进程：
+
+```bash
+sudo bk admin blackout add "tomorrow 22:00" "tomorrow 23:30" \
+  "散热检修" --announce --yes
+sudo bk admin blackout list
+sudo bk admin blackout edit BLACKOUT_ID --end "tomorrow 23:55" --reason "延长检修" --yes
+sudo bk admin blackout remove BLACKOUT_ID --yes
+```
+
+CLI 时间轴使用 `##` 标记禁约格；TUI 会在每张 GPU 上画统一的琥珀色检修带，并在顶部显示
+当前视窗内最近一段禁约的时间和原因。
+不希望发公告时省略 `--announce`；也可写 `--announce critical` 指定级别。公告的开始、
+截止和正文直接取自禁约窗口，避免两处时间或原因不一致。
 
 若想先做可回滚的前台试运行，再启用 systemd 服务，可以用选定的运行账号在第二个终端
 启动 broker，不要加 `sudo`：

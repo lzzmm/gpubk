@@ -2,6 +2,17 @@
 
 All notable changes are documented here. The project follows Semantic Versioning once a public release is published.
 
+## 0.2.7 - 2026-07-20
+
+- Add scheduled administrator announcements with guided creation, explicit start and
+  deadline controls, amber warning presentation, and broker-enforced authorization.
+- Archive announcements with their original content, time window, administrator identity,
+  and append-only audit snapshot instead of deleting them.
+- Add guided maintenance plans and editable booking blackout windows, with optional
+  matching announcements and visible CLI/TUI timeline bands and reasons.
+- Add an administrator maximum for individual reservation duration while preserving the
+  existing booking horizon and automatic queue semantics.
+
 ## 0.2.6 - 2026-07-20
 
 - Wait for the broker socket and first monitor heartbeat during managed upgrades instead

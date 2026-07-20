@@ -42,6 +42,37 @@ def reservation(
 
 
 class LoginNoticeTests(unittest.TestCase):
+    def test_only_critical_global_announcements_appear_at_login(self):
+        now = datetime(2030, 1, 1, 10, 0, tzinfo=timezone.utc)
+        base = {
+            "created_at": iso(now - timedelta(minutes=1)),
+            "starts_at": iso(now - timedelta(minutes=1)),
+            "expires_at": iso(now + timedelta(hours=1)),
+            "actor_uid": 0,
+            "actor_username": "root",
+        }
+        ledger = {
+            "reservations": [],
+            "announcements": [
+                {**base, "id": "info", "level": "info", "message": "FYI"},
+                {
+                    **base,
+                    "id": "critical",
+                    "level": "critical",
+                    "message": "Power maintenance",
+                },
+            ],
+        }
+
+        summary = build_login_summary(
+            ledger, 1001, now=now, within_seconds=24 * 60 * 60
+        )
+        rendered = render_login_summary(summary, color=False)
+
+        self.assertEqual([item["id"] for item in summary["announcements"]], ["critical"])
+        self.assertIn("CRITICAL Power maintenance", rendered)
+        self.assertNotIn("FYI", rendered)
+
     def test_summary_contains_only_this_uids_active_and_near_term_bookings(self):
         now = datetime(2030, 1, 1, 10, 0, tzinfo=timezone.utc)
         ledger = {

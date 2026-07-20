@@ -101,6 +101,18 @@ telemetry, while CLI and TUI clients connect through a local Unix socket. Both
 services start automatically after reboot. GPUBK does not create a Linux user or
 group by default; the administrator who installs it owns the deployment.
 
+Schedule maintenance with one guided command. Its defaults publish an amber
+warning and block new reservations for two hours; existing GPU processes are
+never stopped:
+
+```bash
+sudo bk admin maintain
+```
+
+Use `sudo bk admin notice` for a guided announcement without a blackout. Notices
+are archived with their original content and administrator audit metadata rather
+than deleted.
+
 Upgrade an existing installation without deleting policy or history:
 
 ```bash

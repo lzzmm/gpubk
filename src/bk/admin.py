@@ -18,7 +18,7 @@ import sys
 import tempfile
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator, Optional, Sequence
 
@@ -58,6 +58,7 @@ from .config import (
     CONFIG_VERSION,
     MAX_GPU_COUNT,
     MAX_BOOKING_HORIZON_DAYS,
+    MAX_BOOKING_DURATION_HOURS,
     MAX_SHARED_UNITS,
     SYSTEM_CONFIG_FILE,
     Config,
@@ -71,6 +72,14 @@ from .gpu import detect_gpu_count, snapshot
 from .granularity import DEFAULT_SLOT_MINUTES, validate_slot_minutes
 from .models import Actor, BookingError
 from .systemd import DEFAULT_SYSTEM_UNIT_DIR, system_unit_names
+from .timeparse import (
+    format_local,
+    parse_duration_seconds,
+    parse_friendly_start,
+    parse_iso,
+    to_iso,
+    utc_now,
+)
 from .worker_status import inspect_worker_persistence
 from .worker_guidance import (
     WORKER_ENABLE_COMMAND,
@@ -184,9 +193,7 @@ class AdminInitPlan:
             "slot_minutes": self.slot_minutes,
             "max_shared_users": self.max_shared_users,
             "disabled_gpus": list(self.disabled_gpus),
-            "gpu_priority": {
-                str(gpu): priority for gpu, priority in self.gpu_priority
-            },
+            "gpu_priority": {str(gpu): priority for gpu, priority in self.gpu_priority},
             "require_shared_memory": self.require_shared_memory,
             "service": {
                 "uid": self.service.uid,
@@ -288,6 +295,9 @@ class AdminGpuPolicyPlan:
     current_booking_horizon_days: int = 30
     desired_booking_horizon_days: int = 30
     booking_horizon_days_update: Optional[int] = None
+    current_max_booking_duration_hours: int = 30 * 24
+    desired_max_booking_duration_hours: int = 30 * 24
+    max_booking_duration_hours_update: Optional[int] = None
     current_booking_blackouts: tuple[tuple[str, str, str], ...] = ()
     desired_booking_blackouts: tuple[tuple[str, str, str], ...] = ()
     booking_blackouts_update: Optional[tuple[tuple[str, str, str], ...]] = None
@@ -309,6 +319,7 @@ class AdminGpuPolicyPlan:
                 },
                 "require_shared_memory": self.current_require_shared_memory,
                 "booking_horizon_days": self.current_booking_horizon_days,
+                "max_booking_duration_hours": self.current_max_booking_duration_hours,
                 "booking_blackouts": _public_blackouts(self.current_booking_blackouts),
             },
             "desired": {
@@ -318,6 +329,7 @@ class AdminGpuPolicyPlan:
                 },
                 "require_shared_memory": self.desired_require_shared_memory,
                 "booking_horizon_days": self.desired_booking_horizon_days,
+                "max_booking_duration_hours": self.desired_max_booking_duration_hours,
                 "booking_blackouts": _public_blackouts(self.desired_booking_blackouts),
             },
             "changed": self.changed,
@@ -409,8 +421,12 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         action="store_true",
         help="adopt reviewed untracked unit files during initial service setup",
     )
-    install_parser.add_argument("--yes", action="store_true", help="apply without prompting")
-    install_parser.add_argument("--dry-run", action="store_true", help="show the plan only")
+    install_parser.add_argument(
+        "--yes", action="store_true", help="apply without prompting"
+    )
+    install_parser.add_argument(
+        "--dry-run", action="store_true", help="show the plan only"
+    )
     init_parser = commands.add_parser(
         "init",
         help="preview or initialize shared server configuration",
@@ -455,8 +471,12 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         action="store_false",
     )
     init_parser.set_defaults(require_shared_memory=None)
-    init_parser.add_argument("--yes", action="store_true", help="apply without confirmation")
-    init_parser.add_argument("--dry-run", action="store_true", help="show the plan without writing")
+    init_parser.add_argument(
+        "--yes", action="store_true", help="apply without confirmation"
+    )
+    init_parser.add_argument(
+        "--dry-run", action="store_true", help="show the plan without writing"
+    )
     init_parser.add_argument(
         "--force",
         action="store_true",
@@ -472,9 +492,7 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         nargs="?",
         help="existing non-root account that will own GPUBK state",
     )
-    transfer_parser.add_argument(
-        "--config-file", type=Path, default=SYSTEM_CONFIG_FILE
-    )
+    transfer_parser.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
     transfer_parser.add_argument(
         "--recover",
         action="store_true",
@@ -491,9 +509,7 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         "gpu-policy",
         help="safely update GPU, VRAM, horizon, and blackout policy",
     )
-    policy_parser.add_argument(
-        "--config-file", type=Path, default=SYSTEM_CONFIG_FILE
-    )
+    policy_parser.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
     disabled = policy_parser.add_mutually_exclusive_group()
     disabled.add_argument(
         "--disabled-gpus",
@@ -533,6 +549,11 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         type=int,
         help="maximum future booking horizon (default policy: 30 days)",
     )
+    policy_parser.add_argument(
+        "--max-booking-hours",
+        type=int,
+        help="maximum duration of one reservation in hours (default: 720)",
+    )
     blackouts = policy_parser.add_mutually_exclusive_group()
     blackouts.add_argument(
         "--blackout",
@@ -558,17 +579,115 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         "cancel",
         help="cancel any active reservation with an owner-visible reason",
     )
-    cancel_parser.add_argument("reservation", help="full or unique short reservation ID")
+    cancel_parser.add_argument(
+        "reservation", help="full or unique short reservation ID"
+    )
     cancel_parser.add_argument(
         "--reason",
         required=True,
         help="reason preserved in the reservation, audit log, and user notification",
     )
-    cancel_parser.add_argument(
-        "--config-file", type=Path, default=SYSTEM_CONFIG_FILE
-    )
+    cancel_parser.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
     cancel_parser.add_argument("--yes", action="store_true")
     cancel_parser.add_argument("--json", action="store_true")
+    notice_parser = commands.add_parser(
+        "notice",
+        help="guided or explicit administrator announcements with archive history",
+    )
+    notice_parser.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
+    notice_commands = notice_parser.add_subparsers(dest="notice_action")
+    notice_publish = notice_commands.add_parser(
+        "publish", help="publish an announcement"
+    )
+    notice_publish.add_argument("message")
+    notice_publish.add_argument(
+        "--level", choices=("info", "warning", "critical"), default="warning"
+    )
+    notice_publish.add_argument(
+        "--starts",
+        help='begin showing at a local time such as "tomorrow 20:00" (default: now)',
+    )
+    notice_publish_expiry = notice_publish.add_mutually_exclusive_group()
+    notice_publish_expiry.add_argument(
+        "--expires", help="lifetime such as 2h, 1d, or 7d (default: 24h)"
+    )
+    notice_publish_expiry.add_argument(
+        "--until",
+        help='explicit local deadline, such as "tomorrow 09:00" or "07-21 18:00"',
+    )
+    notice_publish.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
+    notice_publish.add_argument("--yes", action="store_true")
+    notice_publish.add_argument("--json", action="store_true")
+    notice_list = notice_commands.add_parser("list", help="list retained announcements")
+    notice_list.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
+    notice_list.add_argument("--json", action="store_true")
+    notice_edit = notice_commands.add_parser("edit", help="edit one announcement")
+    notice_edit.add_argument("id", help="full or unique short announcement ID")
+    notice_edit.add_argument("--message")
+    notice_edit.add_argument("--level", choices=("info", "warning", "critical"))
+    notice_edit.add_argument(
+        "--starts", help='new local start time, such as "tomorrow 20:00"'
+    )
+    notice_edit_expiry = notice_edit.add_mutually_exclusive_group()
+    notice_edit_expiry.add_argument(
+        "--expires", help="new lifetime from now, such as 2h"
+    )
+    notice_edit_expiry.add_argument(
+        "--until",
+        help='new local deadline, such as "tomorrow 09:00" or "07-21 18:00"',
+    )
+    notice_edit.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
+    notice_edit.add_argument("--yes", action="store_true")
+    notice_edit.add_argument("--json", action="store_true")
+    notice_archive = notice_commands.add_parser(
+        "archive", aliases=["remove"], help="hide an announcement but retain its audit history"
+    )
+    notice_archive.add_argument("id", help="full or unique short announcement ID")
+    notice_archive.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
+    notice_archive.add_argument("--yes", action="store_true")
+    notice_archive.add_argument("--json", action="store_true")
+    blackout_parser = commands.add_parser(
+        "blackout", help="list, add, edit, or remove maintenance booking blocks"
+    )
+    blackout_commands = blackout_parser.add_subparsers(
+        dest="blackout_action", required=True
+    )
+    blackout_list = blackout_commands.add_parser("list", help="list blackout windows")
+    blackout_list.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
+    blackout_list.add_argument("--json", action="store_true")
+    blackout_add = blackout_commands.add_parser("add", help="add one blackout window")
+    blackout_add.add_argument("start")
+    blackout_add.add_argument("end")
+    blackout_add.add_argument("reason")
+    blackout_add.add_argument(
+        "--announce",
+        nargs="?",
+        const="warning",
+        choices=("info", "warning", "critical"),
+        help="also publish the reason for the same window (default level: warning)",
+    )
+    blackout_add.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
+    blackout_add.add_argument("--yes", action="store_true")
+    blackout_edit = blackout_commands.add_parser(
+        "edit", help="edit one blackout window"
+    )
+    blackout_edit.add_argument("id")
+    blackout_edit.add_argument("--start")
+    blackout_edit.add_argument("--end")
+    blackout_edit.add_argument("--reason")
+    blackout_edit.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
+    blackout_edit.add_argument("--yes", action="store_true")
+    blackout_remove = blackout_commands.add_parser(
+        "remove", help="remove one blackout window"
+    )
+    blackout_remove.add_argument("id")
+    blackout_remove.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
+    blackout_remove.add_argument("--yes", action="store_true")
+    maintain_parser = commands.add_parser(
+        "maintain",
+        help="guided maintenance announcement and optional booking blackout",
+    )
+    maintain_parser.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
     uninstall_parser = commands.add_parser(
         "uninstall",
         help="safely remove administrator-managed server state",
@@ -618,7 +737,8 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     data_verify.add_argument("path", type=Path)
     data_verify.add_argument("--json", action="store_true")
     data_clear = data_commands.add_parser(
-        "clear", help="back up first, then atomically replace server data with empty state"
+        "clear",
+        help="back up first, then atomically replace server data with empty state",
     )
     data_clear.add_argument("--backup-to", type=Path)
     data_clear.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
@@ -661,9 +781,7 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     services_status = service_commands.add_parser(
         "status", help="inspect tracked system-level service files"
     )
-    services_status.add_argument(
-        "--config-file", type=Path, default=SYSTEM_CONFIG_FILE
-    )
+    services_status.add_argument("--config-file", type=Path, default=SYSTEM_CONFIG_FILE)
     services_status.add_argument("--json", action="store_true")
     services_uninstall = service_commands.add_parser(
         "uninstall",
@@ -708,7 +826,9 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         "worker-persistence",
         help="inspect or manage logout/reboot persistence for one user's worker",
     )
-    persistence_parser.add_argument("persistence_action", choices=("status", "enable", "disable"))
+    persistence_parser.add_argument(
+        "persistence_action", choices=("status", "enable", "disable")
+    )
     persistence_parser.add_argument("username")
     persistence_parser.add_argument("--yes", action="store_true")
     persistence_parser.add_argument("--json", action="store_true")
@@ -735,6 +855,12 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         return _run_admin_gpu_policy(args)
     if args.action == "cancel":
         return _run_admin_cancel(args)
+    if args.action == "notice":
+        return _run_admin_notice(args)
+    if args.action == "blackout":
+        return _run_admin_blackout(args)
+    if args.action == "maintain":
+        return _run_admin_maintain(args)
 
     interactive = sys.stdin.isatty() and not args.yes and not args.json
     detected_gpu_count = _detected_gpu_count(args.gpu_count)
@@ -826,14 +952,20 @@ def _run_admin_cancel(args: argparse.Namespace) -> int:
     if not matches:
         raise BookingError("reservation not found")
     if len(matches) > 1:
-        raise BookingError("reservation ID prefix is ambiguous; provide more characters")
+        raise BookingError(
+            "reservation ID prefix is ambiguous; provide more characters"
+        )
     target = matches[0]
     if not args.yes:
         if not sys.stdin.isatty():
             raise BookingError("pass --yes to confirm administrator cancellation")
-        answer = input(
-            f"Cancel {str(target['id'])[:8]} owned by {target.get('username')}? [y/N]: "
-        ).strip().lower()
+        answer = (
+            input(
+                f"Cancel {str(target['id'])[:8]} owned by {target.get('username')}? [y/N]: "
+            )
+            .strip()
+            .lower()
+        )
         if answer not in {"y", "yes"}:
             print("No changes made.")
             return 1
@@ -860,13 +992,476 @@ def _run_admin_cancel(args: argparse.Namespace) -> int:
             f"cancelled: {str(reservation['id'])[:8]} owner={reservation.get('username')} "
             f"reason={args.reason.strip()}"
         )
-        print("The owner can see this cancellation with `bk notifications` or `bk l --history`.")
+        print(
+            "The owner can see this cancellation with `bk notifications` or `bk l --history`."
+        )
+    return 0
+
+
+def _run_admin_notice(args: argparse.Namespace) -> int:
+    if os.geteuid() != 0:
+        raise BookingError("administrator announcements must run as root; use sudo")
+    previous = os.environ.get("BK_CONFIG_FILE")
+    os.environ["BK_CONFIG_FILE"] = str(args.config_file)
+    try:
+        config = load_config()
+    finally:
+        if previous is None:
+            os.environ.pop("BK_CONFIG_FILE", None)
+        else:
+            os.environ["BK_CONFIG_FILE"] = previous
+    from .announcements import (
+        active_announcements,
+        archive_announcement,
+        edit_announcement,
+        publish_announcement,
+    )
+    from .broker import ledger_store_for_config
+    from .identity import current_actor
+
+    store = ledger_store_for_config(config)
+    actor = current_actor()
+    if args.notice_action is None:
+        return _run_admin_notice_guide(args, config)
+    if args.notice_action == "list":
+        retained = store.load().get("announcements", [])
+        if args.json:
+            print(
+                json.dumps(
+                    {"announcements": retained}, ensure_ascii=False, sort_keys=True
+                )
+            )
+            return 0
+        active_ids = {
+            item.get("id") for item in active_announcements({"announcements": retained})
+        }
+        now = utc_now()
+        if not retained:
+            print("No administrator announcements.")
+            return 0
+        print("ID       Level     State    Expires                 Message")
+        for item in reversed(retained[-50:]):
+            if item.get("archived_at") is not None:
+                state = "archived"
+            elif item.get("id") in active_ids:
+                state = "active"
+            elif parse_iso(str(item.get("starts_at"))) > now:
+                state = "scheduled"
+            else:
+                state = "expired"
+            print(
+                f"{str(item.get('id', ''))[:8]:<8} {str(item.get('level', '')):<9} "
+                f"{state:<8} {format_local(str(item.get('expires_at'))):<23} "
+                f"{item.get('message', '')}"
+            )
+        return 0
+    if args.notice_action == "publish":
+        starts_at = _announcement_start(args.starts, config)
+        expiry, expiry_label = _announcement_expiry(
+            args,
+            config,
+            default="24h",
+            starts_at=starts_at,
+        )
+        if not args.yes:
+            if not sys.stdin.isatty():
+                raise BookingError("pass --yes to publish this announcement")
+            answer = (
+                input(
+                    f"Publish {args.level} announcement until {expiry_label}? [y/N]: "
+                )
+                .strip()
+                .lower()
+            )
+            if answer not in {"y", "yes"}:
+                print("No changes made.")
+                return 1
+        item = publish_announcement(
+            store,
+            config,
+            actor,
+            args.message,
+            args.level,
+            expiry,
+            starts_at=starts_at,
+        )
+        if args.json:
+            print(json.dumps(item, ensure_ascii=False, sort_keys=True))
+        else:
+            print(
+                f"published: {item['id'][:8]} level={item['level']} "
+                f"expires={format_local(item['expires_at'])}"
+            )
+        return 0
+    if args.notice_action == "edit":
+        if (
+            args.message is None
+            and args.level is None
+            and args.starts is None
+            and args.expires is None
+            and args.until is None
+        ):
+            raise BookingError(
+                "notice edit requires --message, --level, --starts, --expires, or --until"
+            )
+        starts_at = _announcement_start(args.starts, config)
+        expires_at = None
+        if args.expires is not None or args.until is not None:
+            expiry, _expiry_label = _announcement_expiry(
+                args,
+                config,
+                starts_at=starts_at,
+            )
+            expires_at = (starts_at or utc_now()) + timedelta(seconds=expiry)
+        if not args.yes:
+            if not sys.stdin.isatty():
+                raise BookingError("pass --yes to edit this announcement")
+            answer = input(f"Edit announcement {args.id}? [y/N]: ").strip().lower()
+            if answer not in {"y", "yes"}:
+                print("No changes made.")
+                return 1
+        item = edit_announcement(
+            store,
+            config,
+            actor,
+            args.id,
+            message=args.message,
+            level=args.level,
+            starts_at=starts_at,
+            expires_at=expires_at,
+        )
+        if args.json:
+            print(json.dumps(item, ensure_ascii=False, sort_keys=True))
+        else:
+            print(
+                f"updated: {item['id'][:8]} level={item['level']} "
+                f"expires={format_local(item['expires_at'])}"
+            )
+        return 0
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise BookingError("pass --yes to archive this announcement")
+        answer = input(f"Archive announcement {args.id}? [y/N]: ").strip().lower()
+        if answer not in {"y", "yes"}:
+            print("No changes made.")
+            return 1
+    item = archive_announcement(store, config, actor, args.id)
+    if args.json:
+        print(json.dumps(item, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"archived: {item['id'][:8]} (history retained)")
+    return 0
+
+
+def _run_admin_notice_guide(args: argparse.Namespace, config: Config) -> int:
+    if not sys.stdin.isatty():
+        raise BookingError("guided announcement needs an interactive terminal")
+    print("GPUBK announcement guide")
+    message = _ask("Message", "Server announcement", enabled=True)
+    level = _ask_choice(
+        "Level", "warning", ("info", "warning", "critical"), enabled=True
+    )
+    starts = _ask("Starts", "now", enabled=True)
+    duration = _ask("Duration", "24h", enabled=True)
+    starts_at = _announcement_start(starts, config)
+    _seconds, deadline = _announcement_expiry(
+        argparse.Namespace(expires=duration, until=None),
+        config,
+        starts_at=starts_at,
+    )
+    print("\nReview")
+    print(f"  message: {message}")
+    print(f"  level:   {level}")
+    print(f"  starts:  {format_local(to_iso(starts_at or utc_now()))}")
+    print(f"  ends:    {deadline}")
+    if not _ask_bool("Publish this announcement", False, enabled=True):
+        print("No changes made.")
+        return 1
+    return _run_admin_notice(
+        argparse.Namespace(
+            notice_action="publish",
+            message=message,
+            level=level,
+            starts=starts,
+            expires=duration,
+            until=None,
+            config_file=args.config_file,
+            yes=True,
+            json=False,
+        )
+    )
+
+
+def _announcement_expiry(
+    args: argparse.Namespace,
+    config: Config,
+    *,
+    default: Optional[str] = None,
+    starts_at: Optional[datetime] = None,
+) -> tuple[int, str]:
+    duration = getattr(args, "expires", None) or default
+    deadline = getattr(args, "until", None)
+    if deadline is not None:
+        try:
+            expires_at = parse_friendly_start(
+                deadline,
+                now=starts_at,
+                slot_minutes=config.slot_minutes,
+            )
+        except ValueError as exc:
+            raise BookingError(f"invalid announcement deadline: {exc}") from exc
+        seconds = int((expires_at - (starts_at or utc_now())).total_seconds())
+        if seconds < 60:
+            raise BookingError(
+                "announcement deadline must be at least 1 minute from now"
+            )
+        if seconds > 365 * 86400:
+            raise BookingError("announcement deadline must be within 365 days")
+        return seconds, format_local(to_iso(expires_at))
+    if duration is None:
+        raise BookingError("announcement expiry is required")
+    try:
+        seconds = parse_duration_seconds(duration)
+    except ValueError as exc:
+        raise BookingError("announcement expiry must look like 2h, 1d, or 7d") from exc
+    if not 60 <= seconds <= 365 * 86400:
+        raise BookingError("announcement expiry must be between 1 minute and 365 days")
+    expires_at = (starts_at or utc_now()) + timedelta(seconds=seconds)
+    return seconds, format_local(to_iso(expires_at))
+
+
+def _announcement_start(value: Optional[str], config: Config) -> Optional[datetime]:
+    if value is None:
+        return None
+    try:
+        return parse_friendly_start(value, slot_minutes=config.slot_minutes)
+    except ValueError as exc:
+        raise BookingError(f"invalid announcement start: {exc}") from exc
+
+
+def _blackout_id(item: tuple[str, str, str]) -> str:
+    return hashlib.sha256("\0".join(item).encode("utf-8")).hexdigest()[:8]
+
+
+def _run_admin_maintain(args: argparse.Namespace) -> int:
+    if os.geteuid() != 0:
+        raise BookingError("guided maintenance must run as root; use sudo")
+    if not sys.stdin.isatty():
+        raise BookingError("guided maintenance needs an interactive terminal")
+    previous = os.environ.get("BK_CONFIG_FILE")
+    os.environ["BK_CONFIG_FILE"] = str(args.config_file)
+    try:
+        config = load_config()
+    finally:
+        if previous is None:
+            os.environ.pop("BK_CONFIG_FILE", None)
+        else:
+            os.environ["BK_CONFIG_FILE"] = previous
+
+    print("GPUBK maintenance guide")
+    reason = _ask("Reason", "Server maintenance", enabled=True)
+    start_text = _ask("Starts", "now", enabled=True)
+    duration_text = _ask("Duration", "2h", enabled=True)
+    block_bookings = _ask_bool(
+        "Prevent reservations during this window", True, enabled=True
+    )
+    level = _ask_choice(
+        "Announcement level", "warning", ("info", "warning", "critical"), enabled=True
+    )
+    try:
+        starts_at = parse_friendly_start(start_text, slot_minutes=config.slot_minutes)
+        duration_seconds = parse_duration_seconds(duration_text)
+    except ValueError as exc:
+        raise BookingError(f"invalid maintenance time: {exc}") from exc
+    if not 60 <= duration_seconds <= 365 * 86400:
+        raise BookingError("maintenance duration must be between 1 minute and 365 days")
+    ends_at = starts_at + timedelta(seconds=duration_seconds)
+
+    print("\nReview")
+    print(f"  reason:       {reason}")
+    print(
+        f"  window:       {format_local(to_iso(starts_at))} -> {format_local(to_iso(ends_at))}"
+    )
+    print(f"  announcement: {level}")
+    print(f"  reservations: {'blocked' if block_bookings else 'allowed'}")
+    if not _ask_bool("Apply this maintenance plan", False, enabled=True):
+        print("No changes made.")
+        return 1
+
+    if block_bookings:
+        _run_admin_blackout(
+            argparse.Namespace(
+                blackout_action="add",
+                start=to_iso(starts_at),
+                end=to_iso(ends_at),
+                reason=reason,
+                config_file=args.config_file,
+                yes=True,
+                json=False,
+            )
+        )
+    _run_admin_notice(
+        argparse.Namespace(
+            notice_action="publish",
+            message=reason,
+            level=level,
+            starts=to_iso(starts_at),
+            expires=duration_text,
+            until=None,
+            config_file=args.config_file,
+            yes=True,
+            json=False,
+        )
+    )
+    print(
+        "maintenance plan is active; use `sudo bk admin blackout list` and `notice list`"
+    )
+    return 0
+
+
+def _run_admin_blackout(args: argparse.Namespace) -> int:
+    if os.geteuid() != 0:
+        raise BookingError(
+            "administrator blackout maintenance must run as root; use sudo"
+        )
+    previous = os.environ.get("BK_CONFIG_FILE")
+    os.environ["BK_CONFIG_FILE"] = str(args.config_file)
+    try:
+        config = load_config()
+    finally:
+        if previous is None:
+            os.environ.pop("BK_CONFIG_FILE", None)
+        else:
+            os.environ["BK_CONFIG_FILE"] = previous
+    current = list(config.booking_blackouts)
+    if args.blackout_action == "list":
+        if args.json:
+            print(
+                json.dumps(
+                    [
+                        {
+                            "id": _blackout_id(item),
+                            "start_at": item[0],
+                            "end_at": item[1],
+                            "reason": item[2],
+                        }
+                        for item in current
+                    ],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if not current:
+            print("No booking blackout windows.")
+            return 0
+        print("ID       Start                   End                     Reason")
+        for item in current:
+            print(
+                f"{_blackout_id(item):<8} {format_local(item[0]):<23} "
+                f"{format_local(item[1]):<23} {item[2]}"
+            )
+        return 0
+
+    desired = list(current)
+    added_window: Optional[tuple[str, str, str]] = None
+    if args.blackout_action == "add":
+        start = parse_friendly_start(args.start, slot_minutes=config.slot_minutes)
+        end = parse_friendly_start(
+            args.end, now=start, slot_minutes=config.slot_minutes
+        )
+        added_window = (to_iso(start), to_iso(end), args.reason.strip())
+        desired.append(added_window)
+    else:
+        matches = [item for item in current if _blackout_id(item).startswith(args.id)]
+        if not matches:
+            raise BookingError("blackout window not found")
+        if len(matches) > 1:
+            raise BookingError("blackout ID prefix is ambiguous")
+        target = matches[0]
+        position = desired.index(target)
+        if args.blackout_action == "remove":
+            desired.pop(position)
+        else:
+            if args.start is None and args.end is None and args.reason is None:
+                raise BookingError("blackout edit requires --start, --end, or --reason")
+            start = (
+                parse_friendly_start(args.start, slot_minutes=config.slot_minutes)
+                if args.start is not None
+                else parse_friendly_start(
+                    target[0], slot_minutes=config.slot_minutes, allow_past=True
+                )
+            )
+            end = (
+                parse_friendly_start(
+                    args.end, now=start, slot_minutes=config.slot_minutes
+                )
+                if args.end is not None
+                else parse_friendly_start(
+                    target[1], slot_minutes=config.slot_minutes, allow_past=True
+                )
+            )
+            desired[position] = (
+                to_iso(start),
+                to_iso(end),
+                args.reason.strip() if args.reason is not None else target[2],
+            )
+    try:
+        desired_blackouts = validate_booking_blackouts(desired)
+    except ValueError as exc:
+        raise BookingError(str(exc)) from exc
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise BookingError("pass --yes to update blackout windows")
+        answer = (
+            input(
+                f"Apply blackout change ({len(current)} -> {len(desired_blackouts)} windows)? [y/N]: "
+            )
+            .strip()
+            .lower()
+        )
+        if answer not in {"y", "yes"}:
+            print("No changes made.")
+            return 1
+
+    systemctl = shutil.which("systemctl")
+    if systemctl is None:
+        raise BookingError("systemctl is required for managed blackout updates")
+    _run_systemctl(systemctl, "stop", "gpubk-broker.service", "gpubk-monitor.service")
+    try:
+        plan = inspect_admin_gpu_policy(
+            _absolute_path(args.config_file), booking_blackouts=desired_blackouts
+        )
+        apply_admin_gpu_policy(plan)
+    finally:
+        _run_systemctl(
+            systemctl, "start", "gpubk-broker.service", "gpubk-monitor.service"
+        )
+    print(f"updated blackout windows: {len(current)} -> {len(desired_blackouts)}")
+    print("services restarted; existing GPU processes were not touched")
+    announce_level = getattr(args, "announce", None)
+    if added_window is not None and announce_level is not None:
+        _run_admin_notice(
+            argparse.Namespace(
+                notice_action="publish",
+                message=added_window[2],
+                level=announce_level,
+                starts=added_window[0],
+                expires=None,
+                until=added_window[1],
+                config_file=args.config_file,
+                yes=True,
+                json=False,
+            )
+        )
     return 0
 
 
 def _run_admin_data(args: argparse.Namespace) -> int:
     if os.geteuid() != 0:
-        raise BookingError("administrator data maintenance must run as root; use sudo bk admin data")
+        raise BookingError(
+            "administrator data maintenance must run as root; use sudo bk admin data"
+        )
     action = args.data_action
     if action == "verify":
         result = verify_data_backup(args.path)
@@ -1001,7 +1596,11 @@ def _run_admin_login_hook(args: argparse.Namespace) -> int:
 
     verb = "install" if action == "install" else "remove"
     if args.json and args.dry_run:
-        print(json.dumps({**inspection, "status": "dry-run", "action": verb}, sort_keys=True))
+        print(
+            json.dumps(
+                {**inspection, "status": "dry-run", "action": verb}, sort_keys=True
+            )
+        )
         return 0
     if not args.json:
         print(f"GPUBK login notice: {verb}")
@@ -1061,13 +1660,19 @@ def _run_admin_worker_persistence(args: argparse.Namespace) -> int:
         if not sys.stdin.isatty():
             raise BookingError("pass --yes for a non-interactive persistence change")
         verb = "Enable" if action == "enable" else "Disable"
-        answer = input(f"{verb} logout/reboot persistence for {actor.username}? [Y/n]: ").strip().lower()
+        answer = (
+            input(f"{verb} logout/reboot persistence for {actor.username}? [Y/n]: ")
+            .strip()
+            .lower()
+        )
         if answer in {"n", "no"}:
             print("No changes made.")
             return 1
     loginctl = shutil.which("loginctl")
     if loginctl is None:
-        raise BookingError("loginctl is unavailable; this host may not use systemd-logind")
+        raise BookingError(
+            "loginctl is unavailable; this host may not use systemd-logind"
+        )
     try:
         result = subprocess.run(
             [loginctl, f"{action}-linger", actor.username],
@@ -1082,8 +1687,7 @@ def _run_admin_worker_persistence(args: argparse.Namespace) -> int:
     if result.returncode:
         detail = (result.stderr or result.stdout).strip().splitlines()
         raise BookingError(
-            f"loginctl {action}-linger failed"
-            + (f": {detail[-1]}" if detail else "")
+            f"loginctl {action}-linger failed" + (f": {detail[-1]}" if detail else "")
         )
     after = inspect_worker_persistence(actor)
     if args.json:
@@ -1094,15 +1698,15 @@ def _run_admin_worker_persistence(args: argparse.Namespace) -> int:
             f"state={after['state']}"
         )
         if action == "enable":
-            print(
-                f"user next: {WORKER_INSTALL_COMMAND}; {WORKER_ENABLE_COMMAND}"
-            )
+            print(f"user next: {WORKER_INSTALL_COMMAND}; {WORKER_ENABLE_COMMAND}")
     return 0
 
 
 def _run_admin_install(args: argparse.Namespace) -> int:
     if os.geteuid() != 0 and not args.dry_run:
-        raise BookingError("administrator install must run as root; use sudo bk admin install")
+        raise BookingError(
+            "administrator install must run as root; use sudo bk admin install"
+        )
     config_file = _absolute_path(args.config_file)
     if os.path.lexists(_manifest_path(config_file)):
         return _run_existing_admin_install(args, config_file)
@@ -1145,7 +1749,9 @@ def _run_admin_install(args: argparse.Namespace) -> int:
     inspection = inspect_admin_init(plan, force=args.force, expected_owner=0)
     login_hook = bool(args.login_hook)
     if interactive and not args.login_hook:
-        login_hook = _ask_bool("Install the interactive login reminder", True, enabled=True)
+        login_hook = _ask_bool(
+            "Install the interactive login reminder", True, enabled=True
+        )
 
     _print_plan(plan, inspection)
     print(f"  Python:  {python_executable}")
@@ -1159,7 +1765,9 @@ def _run_admin_install(args: argparse.Namespace) -> int:
         )
         print(f"  command: {command_path} -> {command_target}{suffix}")
     print(f"  login:   {'install reminder' if login_hook else 'leave unchanged'}")
-    print(f"  services: {'install only' if args.no_start else 'install, enable, and start'}")
+    print(
+        f"  services: {'install only' if args.no_start else 'install, enable, and start'}"
+    )
     print("  jobs:    per-user workers; logout persistence is enabled only when needed")
     if args.dry_run:
         print("Dry run: no files or services changed.")
@@ -1172,7 +1780,9 @@ def _run_admin_install(args: argparse.Namespace) -> int:
 
     systemctl = None if args.no_start else shutil.which("systemctl")
     if not args.no_start and systemctl is None:
-        raise BookingError("systemctl is unavailable; use --no-start and supervise services manually")
+        raise BookingError(
+            "systemctl is unavailable; use --no-start and supervise services manually"
+        )
 
     apply_admin_init(plan, force=args.force)
     if not args.no_command_link:
@@ -1288,8 +1898,7 @@ def _run_existing_admin_install(args: argparse.Namespace, config_file: Path) -> 
         print("  command:  leave system-wide bk unchanged")
     else:
         print(
-            f"  command:  {command_path} -> {command_target} "
-            f"({command_preview.status})"
+            f"  command:  {command_path} -> {command_target} ({command_preview.status})"
         )
     if args.login_hook:
         print("  login:    install or refresh reminder")
@@ -1500,6 +2109,7 @@ def _run_admin_gpu_policy(args: argparse.Namespace) -> int:
             args.clear_priority,
             args.require_shared_memory is not None,
             args.booking_horizon_days is not None,
+            args.max_booking_hours is not None,
             args.blackout is not None,
             args.clear_blackouts,
         )
@@ -1523,7 +2133,9 @@ def _run_admin_gpu_policy(args: argparse.Namespace) -> int:
         if not args.yes:
             if args.json:
                 print(json.dumps(inspection, ensure_ascii=False, sort_keys=True))
-            print("bk: pass --yes to recover this configuration update", file=sys.stderr)
+            print(
+                "bk: pass --yes to recover this configuration update", file=sys.stderr
+            )
             return 1
         result = recover_admin_gpu_policy(config_file)
         if args.json:
@@ -1548,9 +2160,12 @@ def _run_admin_gpu_policy(args: argparse.Namespace) -> int:
         gpu_priority=priority_value,
         require_shared_memory=args.require_shared_memory,
         booking_horizon_days=args.booking_horizon_days,
+        max_booking_duration_hours=args.max_booking_hours,
         booking_blackouts=blackout_value,
     )
-    status = "blocked" if plan.blockers else ("planned" if plan.changed else "unchanged")
+    status = (
+        "blocked" if plan.blockers else ("planned" if plan.changed else "unchanged")
+    )
     public_plan = plan.public_document(status="dry-run" if args.dry_run else status)
     if not args.json:
         _print_gpu_policy_plan(plan)
@@ -1587,12 +2202,14 @@ def _run_admin_gpu_policy(args: argparse.Namespace) -> int:
 def _print_gpu_policy_plan(plan: AdminGpuPolicyPlan) -> None:
     current_disabled = ",".join(map(str, plan.current_disabled_gpus)) or "none"
     desired_disabled = ",".join(map(str, plan.desired_disabled_gpus)) or "none"
-    current_priority = ",".join(
-        f"{gpu}={priority}" for gpu, priority in plan.current_gpu_priority
-    ) or "equal"
-    desired_priority = ",".join(
-        f"{gpu}={priority}" for gpu, priority in plan.desired_gpu_priority
-    ) or "equal"
+    current_priority = (
+        ",".join(f"{gpu}={priority}" for gpu, priority in plan.current_gpu_priority)
+        or "equal"
+    )
+    desired_priority = (
+        ",".join(f"{gpu}={priority}" for gpu, priority in plan.desired_gpu_priority)
+        or "equal"
+    )
     print("GPUBK scheduling policy")
     print(f"  config:            {plan.config_file}")
     print(f"  disabled current:  {current_disabled}")
@@ -1608,6 +2225,11 @@ def _print_gpu_policy_plan(plan: AdminGpuPolicyPlan) -> None:
         "  booking horizon:   "
         f"{plan.current_booking_horizon_days}d -> "
         f"{plan.desired_booking_horizon_days}d"
+    )
+    print(
+        "  maximum duration:  "
+        f"{plan.current_max_booking_duration_hours}h -> "
+        f"{plan.desired_max_booking_duration_hours}h"
     )
     print(
         "  blackout windows:  "
@@ -1636,10 +2258,7 @@ def _print_gpu_policy_recovery(inspection: dict) -> None:
 
 def _print_gpu_policy_restart_hint() -> None:
     print("next: restart the broker and monitor")
-    print(
-        "  systemd: sudo systemctl start "
-        "gpubk-broker.service gpubk-monitor.service"
-    )
+    print("  systemd: sudo systemctl start gpubk-broker.service gpubk-monitor.service")
 
 
 def _run_admin_services(args: argparse.Namespace) -> int:
@@ -1692,7 +2311,11 @@ def _run_admin_services(args: argparse.Namespace) -> int:
     if args.json:
         print(
             json.dumps(
-                {"status": result["status"], "inspection": inspection, "result": result},
+                {
+                    "status": result["status"],
+                    "inspection": inspection,
+                    "result": result,
+                },
                 ensure_ascii=False,
                 sort_keys=True,
             )
@@ -1719,9 +2342,7 @@ def apply_admin_command_link_install(
     require_root: bool = True,
 ) -> dict:
     if require_root and os.geteuid() != 0:
-        raise BookingError(
-            "administrator command-link installation must run as root"
-        )
+        raise BookingError("administrator command-link installation must run as root")
     expected_owner = 0 if require_root else os.geteuid()
     config_file = _absolute_path(config_file)
     manifest_path = _manifest_path(config_file)
@@ -1991,7 +2612,9 @@ def _load_admin_services_manifest(
     try:
         document = json.loads(payload)
     except json.JSONDecodeError as exc:
-        raise BookingError(f"trusted configuration is invalid JSON: {config_file}") from exc
+        raise BookingError(
+            f"trusted configuration is invalid JSON: {config_file}"
+        ) from exc
     if not isinstance(document, dict):
         raise BookingError("trusted configuration must contain a JSON object")
     data_dir = _manifest_absolute_path(manifest, "data_dir")
@@ -2001,7 +2624,10 @@ def _load_admin_services_manifest(
         raise BookingError("trusted configuration data_dir does not match the manifest")
     if document.get("broker_socket") != str(broker_socket):
         raise BookingError("trusted broker socket does not match the manifest")
-    if document.get("broker_uid") != service_uid or document.get("monitor_uid") != service_uid:
+    if (
+        document.get("broker_uid") != service_uid
+        or document.get("monitor_uid") != service_uid
+    ):
         raise BookingError("trusted service UID does not match the install manifest")
     return manifest, document
 
@@ -2023,9 +2649,13 @@ def _validated_manifest_system_services(
     }
     for key, value in expected.items():
         if services[key] != value:
-            raise BookingError(f"tracked system service {key} does not match the install manifest")
+            raise BookingError(
+                f"tracked system service {key} does not match the install manifest"
+            )
     if config_document.get("broker_uid") != services["service_uid"]:
-        raise BookingError("tracked system service UID does not match trusted configuration")
+        raise BookingError(
+            "tracked system service UID does not match trusted configuration"
+        )
     if require_installed and services["phase"] != PHASE_INSTALLED:
         raise BookingError(
             "system service lifecycle is incomplete; finish it before this operation"
@@ -2156,14 +2786,20 @@ def _run_admin_transfer(args: argparse.Namespace) -> int:
     if args.json:
         print(
             json.dumps(
-                {"status": result["status"], "inspection": inspection, "result": result},
+                {
+                    "status": result["status"],
+                    "inspection": inspection,
+                    "result": result,
+                },
                 ensure_ascii=False,
                 sort_keys=True,
             )
         )
     else:
         if args.recover:
-            print("recovered: GPUBK ownership and configuration returned to the prior account")
+            print(
+                "recovered: GPUBK ownership and configuration returned to the prior account"
+            )
         else:
             print(
                 f"transferred: GPUBK broker and monitor ownership now belongs to "
@@ -2173,8 +2809,7 @@ def _run_admin_transfer(args: argparse.Namespace) -> int:
         if result.get("system_services_updated"):
             print("next: sudo systemctl daemon-reload")
             print(
-                "next: sudo systemctl start "
-                "gpubk-broker.service gpubk-monitor.service"
+                "next: sudo systemctl start gpubk-broker.service gpubk-monitor.service"
             )
         else:
             print(
@@ -2227,6 +2862,7 @@ def inspect_admin_gpu_policy(
     gpu_priority: object = None,
     require_shared_memory: Optional[bool] = None,
     booking_horizon_days: Optional[int] = None,
+    max_booking_duration_hours: Optional[int] = None,
     booking_blackouts: object = None,
     expected_owner: int = 0,
 ) -> AdminGpuPolicyPlan:
@@ -2241,7 +2877,9 @@ def inspect_admin_gpu_policy(
     current_require_shared_memory = document.get("require_shared_memory", False)
     if not isinstance(current_require_shared_memory, bool):
         raise BookingError("trusted configuration require_shared_memory is invalid")
-    if require_shared_memory is not None and not isinstance(require_shared_memory, bool):
+    if require_shared_memory is not None and not isinstance(
+        require_shared_memory, bool
+    ):
         raise BookingError("shared memory policy must be a boolean")
     desired_require_shared_memory = (
         current_require_shared_memory
@@ -2267,6 +2905,31 @@ def inspect_admin_gpu_policy(
         current_booking_horizon_days
         if booking_horizon_days is None
         else booking_horizon_days
+    )
+    current_max_booking_duration_hours = document.get(
+        "max_booking_duration_hours", 30 * 24
+    )
+    if (
+        isinstance(current_max_booking_duration_hours, bool)
+        or not isinstance(current_max_booking_duration_hours, int)
+        or not 1 <= current_max_booking_duration_hours <= MAX_BOOKING_DURATION_HOURS
+    ):
+        raise BookingError(
+            "trusted configuration max_booking_duration_hours is invalid"
+        )
+    if max_booking_duration_hours is not None and (
+        isinstance(max_booking_duration_hours, bool)
+        or not isinstance(max_booking_duration_hours, int)
+        or not 1 <= max_booking_duration_hours <= MAX_BOOKING_DURATION_HOURS
+    ):
+        raise BookingError(
+            "maximum booking duration must be between 1 and "
+            f"{MAX_BOOKING_DURATION_HOURS} hours"
+        )
+    desired_max_booking_duration_hours = (
+        current_max_booking_duration_hours
+        if max_booking_duration_hours is None
+        else max_booking_duration_hours
     )
     try:
         current_booking_blackouts = validate_booking_blackouts(
@@ -2314,6 +2977,10 @@ def inspect_admin_gpu_policy(
         desired_document["require_shared_memory"] = desired_require_shared_memory
     if booking_horizon_days is not None:
         desired_document["booking_horizon_days"] = desired_booking_horizon_days
+    if max_booking_duration_hours is not None:
+        desired_document["max_booking_duration_hours"] = (
+            desired_max_booking_duration_hours
+        )
     if booking_blackouts is not None:
         if desired_booking_blackouts:
             desired_document["booking_blackouts"] = _public_blackouts(
@@ -2365,6 +3032,9 @@ def inspect_admin_gpu_policy(
         current_booking_horizon_days=current_booking_horizon_days,
         desired_booking_horizon_days=desired_booking_horizon_days,
         booking_horizon_days_update=booking_horizon_days,
+        current_max_booking_duration_hours=current_max_booking_duration_hours,
+        desired_max_booking_duration_hours=desired_max_booking_duration_hours,
+        max_booking_duration_hours_update=max_booking_duration_hours,
         current_booking_blackouts=current_booking_blackouts,
         desired_booking_blackouts=desired_booking_blackouts,
         booking_blackouts_update=(
@@ -2392,11 +3062,14 @@ def apply_admin_gpu_policy(
         gpu_priority=plan.desired_gpu_priority,
         require_shared_memory=plan.require_shared_memory_update,
         booking_horizon_days=plan.booking_horizon_days_update,
+        max_booking_duration_hours=plan.max_booking_duration_hours_update,
         booking_blackouts=plan.booking_blackouts_update,
         expected_owner=expected_owner,
     )
     if fresh.current_document != plan.current_document:
-        raise BookingError("trusted configuration changed after review; inspect it again")
+        raise BookingError(
+            "trusted configuration changed after review; inspect it again"
+        )
     if fresh.desired_document != plan.desired_document:
         raise BookingError("GPU policy plan changed after review; inspect it again")
     if fresh.blockers:
@@ -2427,9 +3100,13 @@ def apply_admin_gpu_policy(
             CONFIG_FILE_MODE,
         )
         if config_payload != _config_payload(fresh.current_document):
-            raise BookingError("trusted configuration changed while acquiring maintenance locks")
+            raise BookingError(
+                "trusted configuration changed while acquiring maintenance locks"
+            )
         if manifest.get("config_sha256") != _sha256(config_payload):
-            raise BookingError("trusted configuration no longer matches the install manifest")
+            raise BookingError(
+                "trusted configuration no longer matches the install manifest"
+            )
 
         desired_payload = _config_payload(fresh.desired_document)
         journal = _build_config_update_journal(
@@ -2464,6 +3141,11 @@ def apply_admin_gpu_policy(
                         *(
                             ["booking_horizon_days"]
                             if fresh.booking_horizon_days_update is not None
+                            else []
+                        ),
+                        *(
+                            ["max_booking_duration_hours"]
+                            if fresh.max_booking_duration_hours_update is not None
                             else []
                         ),
                         *(
@@ -2668,7 +3350,9 @@ def inspect_admin_uninstall(
     system_services_present = manifest.get("system_services") is not None
     if system_services_present:
         if current_config is None:
-            raise BookingError("trusted configuration is missing while system services are tracked")
+            raise BookingError(
+                "trusted configuration is missing while system services are tracked"
+            )
         try:
             current_document = json.loads(current_config)
         except json.JSONDecodeError as exc:
@@ -3048,8 +3732,7 @@ def recover_admin_transfer(
         )
         if errors:
             raise BookingError(
-                "service-account transfer recovery is incomplete: "
-                + "; ".join(errors)
+                "service-account transfer recovery is incomplete: " + "; ".join(errors)
             )
     journal_path.unlink()
     fsync_directory(journal_path.parent)
@@ -3091,7 +3774,9 @@ def _load_admin_transfer_plan(
     try:
         document = json.loads(config_payload)
     except json.JSONDecodeError as exc:
-        raise BookingError(f"trusted configuration is invalid JSON: {config_file}") from exc
+        raise BookingError(
+            f"trusted configuration is invalid JSON: {config_file}"
+        ) from exc
     if not isinstance(document, dict):
         raise BookingError("trusted configuration must contain a JSON object")
 
@@ -3118,7 +3803,9 @@ def _load_admin_transfer_plan(
 
     broker_gid = document.get("broker_gid")
     if broker_gid is not None and (
-        isinstance(broker_gid, bool) or not isinstance(broker_gid, int) or broker_gid < 0
+        isinstance(broker_gid, bool)
+        or not isinstance(broker_gid, int)
+        or broker_gid < 0
     ):
         raise BookingError("trusted broker_gid is invalid")
     socket_mode = _administrator_mode(
@@ -3214,7 +3901,10 @@ def _build_transfer_journal(
 
 
 def _transfer_plan_from_journal(journal: dict) -> AdminTransferPlan:
-    if not isinstance(journal, dict) or journal.get("schema_version") != TRANSFER_SCHEMA_VERSION:
+    if (
+        not isinstance(journal, dict)
+        or journal.get("schema_version") != TRANSFER_SCHEMA_VERSION
+    ):
         raise BookingError("unsupported or invalid service-account transfer journal")
     config_file = _absolute_path(Path(_journal_string(journal, "config_file")))
     data_dir = _absolute_path(Path(_journal_string(journal, "data_dir")))
@@ -3241,9 +3931,7 @@ def _transfer_plan_from_journal(journal: dict) -> AdminTransferPlan:
     config_snapshot = _validated_transfer_snapshot(journal.get("config_before"))
     manifest_snapshot = _validated_transfer_snapshot(journal.get("manifest_before"))
     try:
-        config_payload = base64.b64decode(
-            config_snapshot["content_b64"], validate=True
-        )
+        config_payload = base64.b64decode(config_snapshot["content_b64"], validate=True)
         manifest_payload = base64.b64decode(
             manifest_snapshot["content_b64"], validate=True
         )
@@ -3273,7 +3961,9 @@ def _transfer_plan_from_journal(journal: dict) -> AdminTransferPlan:
     if _manifest_nonnegative_int(manifest, "service_gid") != from_gid:
         raise BookingError("transfer journal prior service GID is inconsistent")
     if manifest.get("config_sha256") != _sha256(config_payload):
-        raise BookingError("transfer journal prior configuration checksum is inconsistent")
+        raise BookingError(
+            "transfer journal prior configuration checksum is inconsistent"
+        )
     if config_document.get("broker_uid") != from_uid:
         raise BookingError("transfer journal prior broker UID is inconsistent")
     if config_document.get("monitor_uid") != from_uid:
@@ -3338,9 +4028,7 @@ def inspect_admin_transfer(
         target,
         expected_owner=expected_owner,
     )
-    current_pair = {
-        (plan.current_service.uid, plan.current_service.primary_gid)
-    }
+    current_pair = {(plan.current_service.uid, plan.current_service.primary_gid)}
     _validate_transfer_tree(plan.data_dir, current_pair)
     _validate_transfer_directory(
         plan.broker_socket.parent,
@@ -3624,14 +4312,18 @@ def _read_config_update_journal(
     try:
         journal = json.loads(payload)
     except json.JSONDecodeError as exc:
-        raise BookingError(f"configuration update journal is invalid JSON: {path}") from exc
+        raise BookingError(
+            f"configuration update journal is invalid JSON: {path}"
+        ) from exc
     if (
         not isinstance(journal, dict)
         or journal.get("schema_version") != CONFIG_UPDATE_SCHEMA_VERSION
     ):
         raise BookingError(f"unsupported configuration update journal: {path}")
     if journal.get("config_file") != str(config_file):
-        raise BookingError("configuration update journal belongs to another config file")
+        raise BookingError(
+            "configuration update journal belongs to another config file"
+        )
     for key in ("data_dir", "broker_socket"):
         value = journal.get(key)
         if not isinstance(value, str) or _absolute_path(Path(value)) != Path(value):
@@ -3655,9 +4347,13 @@ def _read_config_update_journal(
         config_document = json.loads(config_payload)
         manifest = json.loads(manifest_payload)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise BookingError("configuration update journal contains invalid prior JSON") from exc
+        raise BookingError(
+            "configuration update journal contains invalid prior JSON"
+        ) from exc
     if not isinstance(config_document, dict) or not isinstance(manifest, dict):
-        raise BookingError("configuration update journal prior files must be JSON objects")
+        raise BookingError(
+            "configuration update journal prior files must be JSON objects"
+        )
     if manifest.get("schema_version") != INSTALL_SCHEMA_VERSION:
         raise BookingError("configuration update journal contains an invalid manifest")
     if manifest.get("admin_uid") != expected_owner:
@@ -3667,19 +4363,28 @@ def _read_config_update_journal(
     if manifest.get("config_sha256") != _sha256(config_payload):
         raise BookingError("configuration update journal prior files are inconsistent")
     if manifest.get("data_dir") != journal["data_dir"]:
-        raise BookingError("configuration update journal data directory is inconsistent")
+        raise BookingError(
+            "configuration update journal data directory is inconsistent"
+        )
     if manifest.get("broker_socket") != journal["broker_socket"]:
         raise BookingError("configuration update journal broker socket is inconsistent")
     if manifest.get("service_uid") != journal["service_uid"]:
         raise BookingError("configuration update journal service UID is inconsistent")
     if manifest.get("service_gid") != journal["service_gid"]:
         raise BookingError("configuration update journal service GID is inconsistent")
-    if config_snapshot["uid"] != expected_owner or manifest_snapshot["uid"] != expected_owner:
-        raise BookingError("configuration update journal prior file owner is inconsistent")
+    if (
+        config_snapshot["uid"] != expected_owner
+        or manifest_snapshot["uid"] != expected_owner
+    ):
+        raise BookingError(
+            "configuration update journal prior file owner is inconsistent"
+        )
     if config_snapshot["mode"] != CONFIG_FILE_MODE:
         raise BookingError("configuration update journal prior config mode is invalid")
     if manifest_snapshot["mode"] != INSTALL_MANIFEST_MODE:
-        raise BookingError("configuration update journal prior manifest mode is invalid")
+        raise BookingError(
+            "configuration update journal prior manifest mode is invalid"
+        )
     return journal
 
 
@@ -3711,7 +4416,9 @@ def _read_owned_regular_payload(path: Path, expected_owner: int, mode: int) -> b
     try:
         metadata = os.fstat(fd)
         if metadata.st_uid != expected_owner:
-            raise BookingError(f"managed file must be owned by UID {expected_owner}: {path}")
+            raise BookingError(
+                f"managed file must be owned by UID {expected_owner}: {path}"
+            )
         with os.fdopen(fd, "rb") as handle:
             fd = -1
             return handle.read()
@@ -3731,7 +4438,9 @@ def _transfer_file_snapshot(
     try:
         metadata = os.fstat(fd)
         if metadata.st_uid != expected_owner:
-            raise BookingError(f"managed file owner drifted while preparing transfer: {path}")
+            raise BookingError(
+                f"managed file owner drifted while preparing transfer: {path}"
+            )
         with os.fdopen(fd, "rb") as handle:
             fd = -1
             observed = handle.read()
@@ -3762,7 +4471,9 @@ def _validated_transfer_snapshot(value: object) -> dict:
     try:
         payload = base64.b64decode(encoded, validate=True)
     except (TypeError, ValueError) as exc:
-        raise BookingError("transfer journal snapshot content is not valid base64") from exc
+        raise BookingError(
+            "transfer journal snapshot content is not valid base64"
+        ) from exc
     digest = value.get("sha256")
     if not isinstance(digest, str) or _sha256(payload) != digest:
         raise BookingError("transfer journal snapshot checksum does not match")
@@ -3787,9 +4498,16 @@ def _read_transfer_journal(path: Path, *, expected_owner: int) -> dict:
     try:
         document = json.loads(payload)
     except json.JSONDecodeError as exc:
-        raise BookingError(f"service-account transfer journal is invalid JSON: {path}") from exc
-    if not isinstance(document, dict) or document.get("schema_version") != TRANSFER_SCHEMA_VERSION:
-        raise BookingError(f"unsupported or invalid service-account transfer journal: {path}")
+        raise BookingError(
+            f"service-account transfer journal is invalid JSON: {path}"
+        ) from exc
+    if (
+        not isinstance(document, dict)
+        or document.get("schema_version") != TRANSFER_SCHEMA_VERSION
+    ):
+        raise BookingError(
+            f"unsupported or invalid service-account transfer journal: {path}"
+        )
     _transfer_plan_from_journal(document)
     return document
 
@@ -3853,16 +4571,24 @@ def _validate_transfer_tree(
                 entries.append((path, True, mode))
             elif stat.S_ISREG(metadata.st_mode):
                 if metadata.st_nlink != 1:
-                    raise BookingError(f"refusing hard-linked managed data file: {path}")
+                    raise BookingError(
+                        f"refusing hard-linked managed data file: {path}"
+                    )
                 if mode not in {BROKER_FILE_MODE, INSTALL_MANIFEST_MODE}:
                     raise BookingError(
                         f"managed data file mode must be 0644 or 0600: {path}"
                     )
                 entries.append((path, False, mode))
             else:
-                raise BookingError(f"refusing special or symbolic file in managed data: {path}")
+                raise BookingError(
+                    f"refusing special or symbolic file in managed data: {path}"
+                )
     return tuple(
-        sorted(entries, key=lambda item: len(item[0].relative_to(data_dir).parts), reverse=True)
+        sorted(
+            entries,
+            key=lambda item: len(item[0].relative_to(data_dir).parts),
+            reverse=True,
+        )
     )
 
 
@@ -4076,7 +4802,9 @@ def _retarget_transfer_path(
     require_directory: bool,
 ) -> None:
     if not hasattr(os, "O_NOFOLLOW") and path.is_symlink():
-        raise BookingError(f"refusing symbolic link during service-account transfer: {path}")
+        raise BookingError(
+            f"refusing symbolic link during service-account transfer: {path}"
+        )
     flags = os.O_RDONLY
     for name in ("O_CLOEXEC", "O_NOFOLLOW"):
         flags |= getattr(os, name, 0)
@@ -4224,7 +4952,9 @@ def apply_admin_init(
     require_root: bool = True,
 ) -> dict:
     if require_root and os.geteuid() != 0:
-        raise BookingError("administrator initialization must run as root; use sudo bk admin init")
+        raise BookingError(
+            "administrator initialization must run as root; use sudo bk admin init"
+        )
 
     expected_owner = 0 if require_root else os.geteuid()
     inspection = inspect_admin_init(plan, force=force, expected_owner=expected_owner)
@@ -4914,8 +5644,7 @@ def _build_plan(
     broker_socket = _ask_absolute_path(
         "Broker socket",
         args.broker_socket or DEFAULT_BROKER_SOCKET,
-        enabled=interactive
-        and args.broker_socket in {None, DEFAULT_BROKER_SOCKET},
+        enabled=interactive and args.broker_socket in {None, DEFAULT_BROKER_SOCKET},
     )
 
     gpu_count = _ask_int(
@@ -4927,10 +5656,14 @@ def _build_plan(
     )
     disabled_value = args.disabled_gpus
     if interactive and disabled_value is None:
-        disabled_value = _ask("Disabled GPUs (comma separated; blank for none)", "", enabled=True)
+        disabled_value = _ask(
+            "Disabled GPUs (comma separated; blank for none)", "", enabled=True
+        )
     priority_value = args.gpu_priority
     if interactive and priority_value is None:
-        priority_value = _ask("Lower-priority GPUs (GPU=LEVEL; blank for none)", "", enabled=True)
+        priority_value = _ask(
+            "Lower-priority GPUs (GPU=LEVEL; blank for none)", "", enabled=True
+        )
     while True:
         try:
             disabled_gpus = validate_gpu_list(
@@ -5084,9 +5817,13 @@ def _detected_gpu_count(explicit: Optional[int]) -> int:
         return explicit
     detected = int(detect_gpu_count())
     if detected < 1:
-        raise BookingError("no NVIDIA GPU detected; pass --gpu-count for a simulation setup")
+        raise BookingError(
+            "no NVIDIA GPU detected; pass --gpu-count for a simulation setup"
+        )
     if detected > MAX_GPU_COUNT:
-        raise BookingError(f"detected GPU count exceeds supported maximum {MAX_GPU_COUNT}")
+        raise BookingError(
+            f"detected GPU count exceeds supported maximum {MAX_GPU_COUNT}"
+        )
     probe = snapshot(Config(DEFAULT_SYSTEM_DATA_DIR, gpu_count=detected))
     if not probe or all(device.source == "unknown" for device in probe):
         raise BookingError(
@@ -5240,7 +5977,9 @@ def _validate_config_destination(path: Path, *, expected_owner: int) -> None:
     if os.path.lexists(directory):
         metadata = directory.lstat()
         if not stat.S_ISDIR(metadata.st_mode):
-            raise BookingError(f"configuration parent is not a real directory: {directory}")
+            raise BookingError(
+                f"configuration parent is not a real directory: {directory}"
+            )
         if stat.S_IMODE(metadata.st_mode) != CONFIG_DIRECTORY_MODE:
             raise BookingError(
                 f"configuration directory mode must be {CONFIG_DIRECTORY_MODE:04o}: {directory}"
@@ -5252,7 +5991,9 @@ def _validate_config_destination(path: Path, *, expected_owner: int) -> None:
     else:
         parent = directory.parent
         if not parent.is_dir():
-            raise BookingError(f"configuration-directory parent does not exist: {parent}")
+            raise BookingError(
+                f"configuration-directory parent does not exist: {parent}"
+            )
 
 
 def _read_existing_config(path: Path, *, expected_owner: int) -> Optional[dict]:
@@ -5280,12 +6021,16 @@ def _read_existing_config(path: Path, *, expected_owner: int) -> Optional[dict]:
     return payload
 
 
-def _atomic_write_config(path: Path, document: dict, *, previous: Optional[dict]) -> Optional[Path]:
+def _atomic_write_config(
+    path: Path, document: dict, *, previous: Optional[dict]
+) -> Optional[Path]:
     directory = path.parent
     if os.path.lexists(directory):
         metadata = directory.lstat()
         if not stat.S_ISDIR(metadata.st_mode):
-            raise BookingError(f"configuration parent is not a real directory: {directory}")
+            raise BookingError(
+                f"configuration parent is not a real directory: {directory}"
+            )
         if stat.S_IMODE(metadata.st_mode) != CONFIG_DIRECTORY_MODE:
             raise BookingError(
                 f"configuration directory mode must be {CONFIG_DIRECTORY_MODE:04o}: {directory}"
@@ -5293,7 +6038,9 @@ def _atomic_write_config(path: Path, document: dict, *, previous: Optional[dict]
     else:
         parent = directory.parent
         if not parent.is_dir():
-            raise BookingError(f"configuration-directory parent does not exist: {parent}")
+            raise BookingError(
+                f"configuration-directory parent does not exist: {parent}"
+            )
         os.mkdir(directory, CONFIG_DIRECTORY_MODE)
         fsync_directory(parent)
 
@@ -5330,7 +6077,9 @@ def _write_new_file(path: Path, payload: bytes, mode: int, *, replace: bool) -> 
         while view:
             written = os.write(fd, view)
             if written <= 0:
-                raise OSError("short write while installing administrator configuration")
+                raise OSError(
+                    "short write while installing administrator configuration"
+                )
             view = view[written:]
         os.fsync(fd)
         os.close(fd)

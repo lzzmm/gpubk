@@ -2289,6 +2289,7 @@ def _config_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         f"shared={effective['max_shared_users']} queue={effective['queue_search_hours']}h "
         f"horizon={effective['booking_horizon_days']}d"
     )
+    print(f"maximum booking duration: {effective['max_booking_duration_hours']}h")
     if effective["booking_blackouts"]:
         print(f"booking blackouts: {len(effective['booking_blackouts'])}")
         for blackout in effective["booking_blackouts"]:
@@ -2373,6 +2374,7 @@ def _effective_config(config: Config) -> dict:
         "max_shared_users": config.max_shared_users,
         "queue_search_hours": config.queue_search_hours,
         "booking_horizon_days": config.booking_horizon_days,
+        "max_booking_duration_hours": config.max_booking_duration_hours,
         "booking_blackouts": [
             {"start_at": start, "end_at": end, "reason": reason}
             for start, end, reason in config.booking_blackouts
@@ -3641,14 +3643,25 @@ def _notifications_command(argv: List[str], store: LedgerStore) -> int:
     args = parser.parse_args(argv)
     if args.limit < 1 or args.limit > 1000:
         parser.error("--limit must be between 1 and 1000")
+    from .announcements import active_announcements
+
     actor = _current_actor()
+    ledger = store.load()
     notices = []
-    for reservation in store.load().get("reservations", []):
+    for announcement in active_announcements(ledger):
+        notices.append({**announcement, "kind": "announcement"})
+    for reservation in ledger.get("reservations", []):
         if int(reservation.get("uid", -1)) != actor.uid:
             continue
         for notice in reservation.get("notifications", []):
             if isinstance(notice, dict):
-                notices.append({**notice, "reservation_id": reservation.get("id")})
+                notices.append(
+                    {
+                        **notice,
+                        "kind": "reservation",
+                        "reservation_id": reservation.get("id"),
+                    }
+                )
     notices.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
     notices = notices[: args.limit]
     if args.json:
@@ -3668,14 +3681,22 @@ def _notifications_command(argv: List[str], store: LedgerStore) -> int:
         print("No notifications.")
         return 0
     colors = color_enabled(sys.stdout)
-    print("When                    Reservation Event")
+    print("When                    Ref      Level     Event")
     for notice in notices:
         created = format_local(str(notice["created_at"]))
-        reservation_id = str(notice.get("reservation_id", ""))[:8]
+        reference = str(notice.get("reservation_id", notice.get("id", "")))[:8]
+        level = str(notice.get("level", "action"))
         message = str(notice.get("message", notice.get("reason", "notification")))
+        role = (
+            "error"
+            if notice.get("kind") == "reservation"
+            else "warning"
+            if level in {"warning", "critical"}
+            else "accent"
+        )
         print(
-            f"{created:<23} {style(f'{reservation_id:<11}', 'id', enabled=colors)} "
-            f"{style(message, 'error', enabled=colors)}"
+            f"{created:<23} {style(f'{reference:<8}', 'id', enabled=colors)} "
+            f"{level:<9} {style(message, role, enabled=colors)}"
         )
     return 0
 
@@ -4552,6 +4573,9 @@ ADMINISTRATION (current administrator only)
   sudo bk admin services install     install tracked boot services
   sudo bk admin login-hook install   optional login booking notice
   sudo bk admin cancel ID --reason TEXT  cancel and notify owner
+  sudo bk admin maintain             guided notice and maintenance block
+  sudo bk admin notice publish TEXT  expiring global announcement
+  sudo bk admin blackout -h          edit maintenance blocks
   sudo bk admin gpu-policy           GPU, horizon, and blackout policy
   sudo bk admin data backup [PATH]   checksummed data snapshot
   sudo bk admin data verify PATH     read-only integrity check
@@ -4827,7 +4851,8 @@ def _print_status(
     timeline_gpus: Optional[List[int]] = None,
 ) -> None:
     now = utc_now()
-    active = list_active(store.load(), now)
+    ledger = store.load()
+    active = list_active(ledger, now)
     gpu_snapshots = snapshot(config)
     if timeline_gpus is not None:
         selected_gpu_ids = set(timeline_gpus)
@@ -4840,6 +4865,20 @@ def _print_status(
     )
     live_states = assess_gpu_live_states(gpu_snapshots, config.gpu_count)
     colors = color_enabled(sys.stdout)
+    from .announcements import active_announcements
+
+    for announcement in active_announcements(ledger, now=now):
+        if announcement.get("level") not in {"warning", "critical"}:
+            continue
+        level = str(announcement["level"]).upper()
+        role = "warning"
+        print(
+            style(
+                f"{level}: {announcement['message']} (until {format_local(announcement['expires_at'])})",
+                role,
+                enabled=colors,
+            )
+        )
     print(style("GPU status", "heading", enabled=colors))
     terminal_width = shutil.get_terminal_size(fallback=(100, 24)).columns
     wide_status = terminal_width >= 88
@@ -5065,6 +5104,18 @@ def _print_timeline(
             cells = []
             for slot_start in block:
                 slot_end = slot_start + timedelta(seconds=step_seconds)
+                blackout = next(
+                    (
+                        item
+                        for item in config.booking_blackouts
+                        if parse_iso(item[0]) < slot_end
+                        and slot_start < parse_iso(item[1])
+                    ),
+                    None,
+                )
+                if blackout is not None:
+                    cells.append("##")
+                    continue
                 overlapping = [
                     item
                     for item in visible
@@ -5098,8 +5149,19 @@ def _print_timeline(
                         f"{prefix}{used_units}" if used_units < 10 else f"{prefix}+"
                     )
             print(_timeline_cells(f"G{gpu}", cells))
-    print("Legend: ·· free | M1-M9 total units, includes mine")
+    print("Legend: ·· free | ## administrator blackout")
+    print("        M1-M9 total units, includes mine")
     print("        S1-S9 total units, others only | MX/XX exclusive")
+    visible_blackouts = [
+        item
+        for item in config.booking_blackouts
+        if parse_iso(item[0]) < end and start < parse_iso(item[1])
+    ]
+    for blocked_start, blocked_end, reason in visible_blackouts:
+        print(
+            f"Blackout: {format_local(blocked_start)} -> "
+            f"{format_local(blocked_end)} | {reason}"
+        )
     example_step = _duration_compact(config.slot_seconds * 3)
     print(
         f"Control: --from 20:00 --window 8h --step {example_step} "
