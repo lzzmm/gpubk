@@ -73,6 +73,37 @@ class LoginNoticeTests(unittest.TestCase):
         self.assertIn("CRITICAL Power maintenance", rendered)
         self.assertNotIn("FYI", rendered)
 
+    def test_multiline_announcement_wraps_to_eighty_display_columns(self):
+        now = datetime(2030, 1, 1, 10, 0, tzinfo=timezone.utc)
+        summary = {
+            "generated_at": iso(now),
+            "active": [],
+            "upcoming": [],
+            "overdue": [],
+            "notifications": [],
+            "exclusive_blocks": [],
+            "worker": None,
+            "announcements": [
+                {
+                    "message": "English heading\n" + "预约制度正式启用。" * 12,
+                }
+            ],
+        }
+
+        rendered = render_login_summary(summary, color=False)
+
+        self.assertIn("CRITICAL English heading\n", rendered)
+        for line in rendered.splitlines():
+            display_width = sum(
+                0
+                if __import__("unicodedata").combining(char)
+                else 2
+                if __import__("unicodedata").east_asian_width(char) in {"W", "F"}
+                else 1
+                for char in line
+            )
+            self.assertLessEqual(display_width, 80)
+
     def test_summary_contains_only_this_uids_active_and_near_term_bookings(self):
         now = datetime(2030, 1, 1, 10, 0, tzinfo=timezone.utc)
         ledger = {
@@ -167,7 +198,8 @@ class LoginNoticeTests(unittest.TestCase):
 
         self.assertIn("2 upcoming exclusives", rendered)
         self.assertIn("SOON  GPU 4", rendered)
-        self.assertIn("(+1 later; run `bk tl`)", rendered)
+        self.assertIn("(+1 later;", rendered)
+        self.assertIn("run `bk tl`)", rendered)
         self.assertNotIn("SOON  GPU 5", rendered)
 
     def test_scheduled_job_login_notice_explains_worker_and_logout_risk(self):

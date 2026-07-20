@@ -112,6 +112,25 @@ class AnnouncementTests(unittest.TestCase):
                 self.store, self.config, self.admin, "message", "info", 10
             )
 
+    def test_message_allows_newlines_but_rejects_unsafe_controls(self):
+        item = publish_announcement(
+            self.store,
+            self.config,
+            self.admin,
+            "English line\n中文一行",
+            "critical",
+            3600,
+        )
+        self.assertEqual(item["message"], "English line\n中文一行")
+        with self.assertRaisesRegex(BookingError, "control characters"):
+            edit_announcement(
+                self.store,
+                self.config,
+                self.admin,
+                item["id"],
+                message="unsafe\x00message",
+            )
+
     def test_scheduled_announcement_activates_only_inside_its_window(self):
         now = datetime.now(timezone.utc).replace(microsecond=0)
         starts = now + timedelta(hours=2)

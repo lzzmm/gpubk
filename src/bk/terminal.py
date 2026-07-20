@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import unicodedata
 from typing import Mapping, Optional, TextIO
 
 
@@ -35,6 +36,55 @@ def style(text: str, role: str, *, enabled: bool) -> str:
     if not enabled or code is None:
         return text
     return f"{code}{text}{RESET}"
+
+
+def display_width(text: str) -> int:
+    return sum(_character_width(char) for char in text)
+
+
+def pad_display_text(text: str, width: int) -> str:
+    return text + " " * max(0, width - display_width(text))
+
+
+def wrap_display_text(
+    text: str,
+    width: int,
+    *,
+    subsequent_indent: str = "  ",
+    preserve_newlines: bool = True,
+) -> list[str]:
+    """Wrap text by terminal cells, accounting for wide CJK characters."""
+    if width < 1:
+        return [""]
+    source = str(text)
+    paragraphs = source.split("\n") if preserve_newlines else [" ".join(source.split())]
+    output: list[str] = []
+    for paragraph in paragraphs:
+        current = ""
+        current_width = 0
+        for char in paragraph:
+            char_width = _character_width(char)
+            if current and current_width + char_width > width:
+                break_at = max(current.rfind(" "), current.rfind("\t"))
+                if break_at >= len(subsequent_indent):
+                    output.append(current[:break_at].rstrip())
+                    remainder = current[break_at + 1 :].lstrip()
+                    current = subsequent_indent + remainder
+                    current_width = display_width(current)
+                else:
+                    output.append(current.rstrip())
+                    current = subsequent_indent
+                    current_width = display_width(subsequent_indent)
+            current += char
+            current_width += char_width
+        output.append(current.rstrip())
+    return output
+
+
+def _character_width(char: str) -> int:
+    if unicodedata.combining(char):
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
 
 
 def colorize_help(text: str, *, enabled: bool) -> str:

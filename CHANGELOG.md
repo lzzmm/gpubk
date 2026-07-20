@@ -2,6 +2,15 @@
 
 All notable changes are documented here. The project follows Semantic Versioning once a public release is published.
 
+## 0.2.8 - 2026-07-21
+
+- Accept safe multiline administrator announcements while continuing to reject NUL,
+  carriage-return, and other unsafe control characters in both API and ledger validation.
+- Wrap interactive login notices to at most 80 terminal cells, including correct CJK width,
+  and reflow CLI announcement output to the current terminal width.
+- Give the TUI a bounded, adaptive announcement banner that shifts the timeline down,
+  preserves useful context, and directs users to `bk n` when the full text does not fit.
+
 ## 0.2.7 - 2026-07-20
 
 - Add scheduled administrator announcements with guided creation, explicit start and

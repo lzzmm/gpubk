@@ -825,6 +825,22 @@ sudo bk admin notice edit NOTICE_ID --message "检修推迟到 23:00" \
 sudo bk admin notice archive NOTICE_ID --yes
 ```
 
+多行公告推荐使用 heredoc，不需要手工编写 `\n` 转义：
+
+```bash
+sudo bk admin notice edit NOTICE_ID --message "$(cat <<'EOF'
+GPU 预约制度现已启用。
+使用 GPU 前请先预约。
+
+bk 1 1h：共享预约
+bk x 1 1h：独占预约
+EOF
+)"
+```
+
+`bk n` 会保留正文段落；登录提示最多占 80 个终端格，状态输出跟随当前终端宽度，
+TUI 则自动重排为高度受限的公告区，显示不全时引导用户运行 `bk n` 查看全文。
+
 `info` 只进入 `bk n`；`warning` 还会显示在状态页和 TUI；`critical` 再额外进入登录提示。
 warning 与 critical 都使用橙色/琥珀色强调，不使用大面积错误红色。
 归档会立即隐藏公告，但不会物理删除：原正文、时间窗、归档时间和归档管理员继续保留在
