@@ -251,7 +251,7 @@ def _validate_announcements(value: object) -> None:
         seen.add(announcement_id)
         if item.get("level") not in {"info", "warning", "critical"}:
             raise ValueError(f"{path}.level is unsupported")
-        _bounded_text(item.get("message"), f"{path}.message", 1024)
+        _bounded_multiline_text(item.get("message"), f"{path}.message", 1024)
         created = _timestamp(item.get("created_at"), f"{path}.created_at")
         if item.get("updated_at") is not None:
             _timestamp(item.get("updated_at"), f"{path}.updated_at")
@@ -312,6 +312,14 @@ def _bounded_text(value: Any, path: str, limit: int) -> str:
     if not isinstance(value, str) or not value or len(value) > limit:
         raise ValueError(f"{path} must contain 1-{limit} characters")
     if any(ord(char) < 32 for char in value):
+        raise ValueError(f"{path} must not contain control characters")
+    return value
+
+
+def _bounded_multiline_text(value: Any, path: str, limit: int) -> str:
+    if not isinstance(value, str) or not value or len(value) > limit:
+        raise ValueError(f"{path} must contain 1-{limit} characters")
+    if any(ord(char) < 32 and char not in "\t\n" for char in value):
         raise ValueError(f"{path} must not contain control characters")
     return value
 

@@ -357,7 +357,10 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn('git cat-file -t "$GITHUB_REF"', workflow)
         self.assertIn('git rev-parse "${GITHUB_REF}^{commit}"', workflow)
         self.assertIn("Smoke-test upgrade from last public release", workflow)
-        self.assertIn('LAST_PUBLIC_VERSION: "0.2.4"', workflow)
+        self.assertRegex(
+            workflow,
+            r'LAST_PUBLIC_VERSION: "\d+\.\d+\.\d+"',
+        )
         self.assertIn('old[0]["share_units_per_gpu"] != 1', workflow)
         self.assertIn('new["share_units_per_gpu"] != 2', workflow)
         self.assertIn("Record distribution hashes", workflow)

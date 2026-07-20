@@ -213,7 +213,7 @@ def _message(value: str) -> str:
     normalized = str(value).strip()
     if not 1 <= len(normalized) <= 1024:
         raise BookingError("announcement message must contain 1-1024 characters")
-    if any(ord(char) < 32 and char not in "\t" for char in normalized):
+    if any(ord(char) < 32 and char not in "\t\n" for char in normalized):
         raise BookingError("announcement message contains control characters")
     return normalized
 

@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Mapping, Optional, Sequence
 
 from .models import STATUS_ACTIVE
 from .announcements import active_announcements
 from .scheduler import exclusive_blocks_for_uid
-from .terminal import style
+from .terminal import wrap_display_text, style
 from .timeparse import parse_iso
 from .worker_guidance import WORKER_FOREGROUND_COMMAND
 
 
 LOGIN_NOTICE_SCHEMA_VERSION = "gpubk.login-notice.v1"
+LOGIN_NOTICE_COLUMNS = 80
+_OUTER_ANSI = re.compile(
+    r"^(?P<prefix>\x1b\[[0-9;]*m)?(?P<text>.*?)(?P<suffix>\x1b\[0m)?$",
+    re.DOTALL,
+)
 
 
 def build_login_summary(
@@ -197,7 +203,29 @@ def render_login_summary(summary: dict, *, color: bool = False) -> str:
                     enabled=color,
                 )
             )
-    return "\n".join(lines)
+    return "\n".join(
+        wrapped
+        for line in lines
+        for wrapped in _wrap_login_line(line, width=LOGIN_NOTICE_COLUMNS)
+    )
+
+
+def _wrap_login_line(value: str, *, width: int) -> list[str]:
+    """Wrap one optionally styled line by terminal display width."""
+    match = _OUTER_ANSI.fullmatch(value)
+    prefix = match.group("prefix") or "" if match else ""
+    suffix = match.group("suffix") or "" if match else ""
+    text = match.group("text") if match else value
+    output = []
+    indent = text[: len(text) - len(text.lstrip())]
+    for wrapped in wrap_display_text(
+        text,
+        width,
+        subsequent_indent=indent or "  ",
+        preserve_newlines=True,
+    ):
+        output.append(f"{prefix}{wrapped}{suffix}")
+    return output
 
 
 def _overdue_occupancy(

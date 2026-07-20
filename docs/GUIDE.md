@@ -971,6 +971,23 @@ sudo bk admin notice edit NOTICE_ID --message "Maintenance moved to 23:00" \
 sudo bk admin notice archive NOTICE_ID --yes
 ```
 
+Use a quoted heredoc for a readable multiline announcement:
+
+```bash
+sudo bk admin notice edit NOTICE_ID --message "$(cat <<'EOF'
+GPU reservation policy is now active.
+Please reserve before using a GPU.
+
+bk 1 1h: shared booking
+bk x 1 1h: exclusive booking
+EOF
+)"
+```
+
+The stored paragraph breaks are preserved in `bk n`. Login output wraps to at
+most 80 terminal cells; status output follows the terminal width; the TUI
+reflows the text into a bounded banner and points to `bk n` when it is truncated.
+
 `info` appears in `bk n`; `warning` also appears in status and the TUI;
 `critical` additionally appears at interactive login. Warning and critical
 announcements use an amber accent rather than an error-red background.

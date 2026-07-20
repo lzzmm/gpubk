@@ -38,6 +38,7 @@ from .scheduler import (
 from .service import public_reservation, submit_cancellation
 from .sharing import parse_share_units, reservation_share_units, share_text
 from .storage import LedgerStore
+from .terminal import pad_display_text, wrap_display_text
 from .timeparse import format_local, format_local_range, parse_iso, parse_memory_mb, utc_now
 from .tutorial import TUI_TOUR, mark_onboarding_seen, onboarding_seen
 from .usage import (
@@ -669,13 +670,35 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
     )
     gpu_by_index = {gpu.index: gpu for gpu in gpu_snapshots}
 
-    timeline_top = 3
     label_width = _timeline_label_width(width)
     timeline_width = max(24, width - label_width - 2)
     state.timeline_columns = timeline_width
     default_view_start = _timeline_view_start(now, state)
     view_start = state.editor_view_start if state.editor_active and state.editor_view_start else default_view_start
     view_end = view_start + timedelta(minutes=timeline_width * state.slot_minutes)
+    visible_announcements = []
+    if not state.editor_active:
+        visible_announcements = [
+            item
+            for item in active_announcements(ledger, now=now)
+            if item.get("level") in {"warning", "critical"}
+        ]
+    visible_blackouts = [
+        item
+        for item in config.booking_blackouts
+        if parse_iso(item[0]) < view_end and view_start < parse_iso(item[1])
+    ]
+    banner_lines = _announcement_banner_lines(visible_announcements, width)
+    if not banner_lines and not state.editor_active and visible_blackouts:
+        blocked_start, blocked_end, reason = visible_blackouts[0]
+        banner_lines = _bounded_banner_lines(
+            f" BLACKOUT {format_local(blocked_start)} -> "
+            f"{format_local(blocked_end)}: {reason}",
+            width,
+            max_lines=2,
+            overflow_line="  ... run bk n for maintenance details",
+        )
+    timeline_top = 2 + len(banner_lines) if banner_lines else 3
     timeline_index = ReservationIndex.from_ledger(
         ledger,
         min(now, view_start),
@@ -708,44 +731,17 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
     _draw_header(stdscr, config, now, view_start, view_end, width, state)
     _draw_editor_banner(stdscr, 2, width, state, preview, id_width)
     if not state.editor_active:
-        visible_announcements = [
-            item
-            for item in active_announcements(ledger, now=now)
-            if item.get("level") in {"warning", "critical"}
-        ]
-        visible_blackouts = [
-            item
-            for item in config.booking_blackouts
-            if parse_iso(item[0]) < view_end and view_start < parse_iso(item[1])
-        ]
-        if visible_announcements:
-            announcement = visible_announcements[0]
-            label = str(announcement.get("level", "warning")).upper()
-            message = f" {label}: {announcement.get('message', '')} | bk n for details "
-            _addstr(
-                stdscr,
-                2,
-                0,
-                message[: max(0, width - 1)].ljust(width),
-                width,
-                COLOR_PREVIEW_EXCLUSIVE,
-                curses.A_BOLD,
-            )
-        elif visible_blackouts:
-            blocked_start, blocked_end, reason = visible_blackouts[0]
-            message = (
-                f" BLACKOUT {format_local(blocked_start)} -> "
-                f"{format_local(blocked_end)}: {reason} "
-            )
-            _addstr(
-                stdscr,
-                2,
-                0,
-                message[: max(0, width - 1)].ljust(width),
-                width,
-                COLOR_PREVIEW_EXCLUSIVE,
-                curses.A_BOLD,
-            )
+        if banner_lines:
+            for offset, message in enumerate(banner_lines):
+                _addstr(
+                    stdscr,
+                    2 + offset,
+                    0,
+                    pad_display_text(message, width),
+                    width,
+                    COLOR_PREVIEW_EXCLUSIVE,
+                    curses.A_BOLD,
+                )
     _draw_time_axis(stdscr, timeline_top, label_width, timeline_width, view_start, view_end, width, now)
     row = timeline_top + 4
     for gpu in visible_gpu_snapshots:
@@ -824,6 +820,45 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
         )
     _draw_footer(stdscr, height, width, state, preview)
     stdscr.refresh()
+
+
+def _announcement_banner_lines(
+    announcements: Sequence[dict],
+    width: int,
+    *,
+    max_lines: int = 3,
+) -> list[str]:
+    if not announcements or width < 2 or max_lines < 1:
+        return []
+    announcement = announcements[0]
+    label = str(announcement.get("level", "warning")).upper()
+    message = str(announcement.get("message", "administrator announcement"))
+    return _bounded_banner_lines(
+        f" {label}: {message}",
+        width,
+        max_lines=max_lines,
+        overflow_line="  ... run bk n for full announcement",
+    )
+
+
+def _bounded_banner_lines(
+    message: str,
+    width: int,
+    *,
+    max_lines: int,
+    overflow_line: str,
+) -> list[str]:
+    lines = wrap_display_text(
+        message,
+        width - 1,
+        subsequent_indent="  ",
+        preserve_newlines=False,
+    )
+    if len(lines) <= max_lines:
+        return lines
+    if max_lines == 1:
+        return [overflow_line]
+    return [*lines[: max_lines - 1], overflow_line]
 
 
 def _draw_header(

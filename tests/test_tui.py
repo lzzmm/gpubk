@@ -31,6 +31,7 @@ from bk.tui import (
     TuiState,
     WEAVE_CHARS,
     _build_add_preview,
+    _announcement_banner_lines,
     _blackout_overlaps,
     _capacity_text,
     _cell_for_gpu,
@@ -182,6 +183,19 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertIn("monitor=not-seen", details)
         self.assertIn("worker=idle", details)
         self.assertNotIn("data=", details)
+
+        announcement_lines = _announcement_banner_lines(
+            [
+                {
+                    "level": "critical",
+                    "message": "GPU reservation policy\n" + "预约制度已经启用。" * 20,
+                }
+            ],
+            width,
+        )
+        self.assertEqual(len(announcement_lines), 3)
+        self.assertTrue(announcement_lines[-1].endswith("full announcement"))
+        self.assertTrue(all(len(line) <= width - 1 for line in announcement_lines))
 
         preview = AddPreview(self.start, self.end, (0,), 0, MODE_SHARED, True, blink=True)
         variants = [

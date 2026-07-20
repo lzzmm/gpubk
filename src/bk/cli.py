@@ -79,7 +79,7 @@ from .service import (
     submit_edit,
 )
 from .storage import AUDIT_SCHEMA_VERSION, LedgerStore
-from .terminal import color_enabled, colorize_help, style
+from .terminal import color_enabled, colorize_help, style, wrap_display_text
 from .timeparse import (
     format_local,
     format_local_range,
@@ -3682,6 +3682,8 @@ def _notifications_command(argv: List[str], store: LedgerStore) -> int:
         return 0
     colors = color_enabled(sys.stdout)
     print("When                    Ref      Level     Event")
+    terminal_width = shutil.get_terminal_size(fallback=(100, 24)).columns
+    message_width = max(20, terminal_width - 43)
     for notice in notices:
         created = format_local(str(notice["created_at"]))
         reference = str(notice.get("reservation_id", notice.get("id", "")))[:8]
@@ -3694,10 +3696,19 @@ def _notifications_command(argv: List[str], store: LedgerStore) -> int:
             if level in {"warning", "critical"}
             else "accent"
         )
-        print(
-            f"{created:<23} {style(f'{reference:<8}', 'id', enabled=colors)} "
-            f"{level:<9} {style(message, role, enabled=colors)}"
+        message_lines = wrap_display_text(
+            message,
+            message_width,
+            subsequent_indent="",
+            preserve_newlines=True,
         )
+        prefix = (
+            f"{created:<23} {style(f'{reference:<8}', 'id', enabled=colors)} "
+            f"{level:<9} "
+        )
+        print(prefix + style(message_lines[0], role, enabled=colors))
+        for line in message_lines[1:]:
+            print(" " * 43 + style(line, role, enabled=colors))
     return 0
 
 
@@ -4865,6 +4876,7 @@ def _print_status(
     )
     live_states = assess_gpu_live_states(gpu_snapshots, config.gpu_count)
     colors = color_enabled(sys.stdout)
+    terminal_width = shutil.get_terminal_size(fallback=(100, 24)).columns
     from .announcements import active_announcements
 
     for announcement in active_announcements(ledger, now=now):
@@ -4872,15 +4884,13 @@ def _print_status(
             continue
         level = str(announcement["level"]).upper()
         role = "warning"
-        print(
-            style(
-                f"{level}: {announcement['message']} (until {format_local(announcement['expires_at'])})",
-                role,
-                enabled=colors,
-            )
+        message = (
+            f"{level}: {announcement['message']} "
+            f"(until {format_local(announcement['expires_at'])})"
         )
+        for line in wrap_display_text(message, terminal_width, subsequent_indent="  "):
+            print(style(line, role, enabled=colors))
     print(style("GPU status", "heading", enabled=colors))
-    terminal_width = shutil.get_terminal_size(fallback=(100, 24)).columns
     wide_status = terminal_width >= 88
     wide_reservations = terminal_width >= 124
     if wide_status:
