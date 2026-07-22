@@ -239,7 +239,24 @@ def _print_collector_summary(collector: object) -> None:
     state = str(collector.get("state", "unknown"))
     if state in {"running", "degraded", "stale"}:
         age = collector.get("age_seconds")
-        detail = f" age={age:g}s" if isinstance(age, (int, float)) else ""
+        detail_parts = []
+        started_at = collector.get("started_at")
+        if started_at:
+            try:
+                uptime = max(
+                    0,
+                    int((utc_now() - parse_iso(str(started_at))).total_seconds()),
+                )
+                detail_parts.append(f"up {format_usage_duration(uptime)}")
+            except ValueError:
+                pass
+        if isinstance(age, (int, float)):
+            detail_parts.append(f"sampled {age:g}s ago")
+        rollup = collector.get("rollup_seconds")
+        if isinstance(rollup, (int, float)) and rollup > 0:
+            detail_parts.append(
+                f"latest history may lag up to {format_usage_duration(int(rollup))}"
+            )
         if state == "degraded":
             gaps = []
             for label, key in (
@@ -252,7 +269,8 @@ def _print_collector_summary(collector: object) -> None:
                 if isinstance(values, list) and values:
                     gaps.append(f"{label}:{','.join(str(item) for item in values)}")
             if gaps:
-                detail += " gaps=" + ";".join(gaps)
+                detail_parts.append("gaps=" + ";".join(gaps))
+        detail = " | " + " | ".join(detail_parts) if detail_parts else ""
     elif state == "stopped" and collector.get("stopped_at"):
         try:
             detail = f" at={parse_iso(str(collector['stopped_at'])).astimezone():%m-%d %H:%M:%S}"
@@ -269,7 +287,8 @@ def _print_collector_summary(collector: object) -> None:
         detail = f" ({collector.get('error')})" if collector.get("error") else ""
     colors = color_enabled(sys.stdout)
     role = "success" if state == "running" else "warning" if state in {"degraded", "stale"} else "muted"
-    print(style(f"collector: {state}{detail}", role, enabled=colors))
+    label = "healthy" if state == "running" else state
+    print(style(f"monitor: {label}{detail}", role, enabled=colors))
 
 
 def _print_users(payload: dict, *, personal: bool = False) -> None:
